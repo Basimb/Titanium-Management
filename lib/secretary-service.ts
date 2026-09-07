@@ -6,8 +6,8 @@ import type { TeamChatConfig, TeamChatEnvelope } from "./team-chat-gateway.ts";
 import { directTaskCreationIntent, emptySecretaryIntent, validateSecretaryIntent, type SecretaryIntent, type SecretaryModelInput } from "./secretary-intent.ts";
 import { priorityTaskQuery, type PriorityTaskQuery } from "./secretary-priority-query.ts";
 import { AGENT_KINDS } from "./secretary-intent.ts";
-import { applyDecision, createProjectBundle, handleAgentIntent, type AgentResult } from "./secretary-agent.ts";
-import { listApprovals, requestTaskCreate } from "./approvals.ts";
+import { applyDecision, createProjectBundle, describeProjectBundle, handleAgentIntent, type AgentResult, type ProjectDraftTask } from "./secretary-agent.ts";
+import { listApprovals, requestProjectCreate, requestTaskCreate } from "./approvals.ts";
 import { activeRules } from "./rules.ts";
 import { searchKnowledge, formatKnowledgeHits } from "./knowledge.ts";
 import { migrateSecretaryMemory, rememberSecretaryMistake, recallSecretaryMemory, personalMemoryCommand, updatePersonalMemory, personalMemory } from "./secretary-memory.ts";
@@ -25,7 +25,12 @@ type Result = { status: string; reply: string; taskId?: string; batchId?: string
 type Pending = { token: string; command_json: string; snapshot_hash: string; original_text: string; source_message_id: string; expires_at: number };
 type ConfirmationView = { token: string; preview_event_key: string; requires_restatement: number };
 type HistoryRow = { original_text: string; result_json: string; scope_json: string };
-type TaskDraft = { projectId: string | null; title: string | null; details: string | null; priority: "red" | "yellow" | "green" | null; ownerId: string | null; dueDate: string | null };
+// newProjectName holds a project name the user gave that doesn't match any
+// existing project -- captured instead of re-asking "which project?", and
+// resolved into a real project (created together with the task) once the
+// rest of the draft is complete. Mutually exclusive with projectId in
+// practice: availableDraft clears it the moment a real projectId resolves.
+type TaskDraft = { projectId: string | null; newProjectName: string | null; title: string | null; details: string | null; priority: "red" | "yellow" | "green" | null; ownerId: string | null; dueDate: string | null };
 type IntakeRow = { draft_json: string; last_event_key: string; expires_at: number };
 const ORIGIN = "https://www.management.titanium-pharmacy.com";
 const CONFIRM_MS = 10 * 60_000;
@@ -55,7 +60,23 @@ export function migrateSecretary(db: DatabaseSync) {
     CREATE TABLE IF NOT EXISTS secretary_confirmation_views (conversation_key TEXT PRIMARY KEY,token TEXT NOT NULL,preview_event_key TEXT NOT NULL,requires_restatement INTEGER NOT NULL DEFAULT 0);
     CREATE TABLE IF NOT EXISTS secretary_task_intake (conversation_key TEXT PRIMARY KEY,draft_json TEXT NOT NULL,last_event_key TEXT NOT NULL,expires_at INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS secretary_reminders (id TEXT PRIMARY KEY,actor_id TEXT NOT NULL,sender_number TEXT NOT NULL,group_id TEXT,task_id TEXT NOT NULL,due_at INTEGER NOT NULL,state TEXT NOT NULL DEFAULT 'pending',created_at INTEGER NOT NULL,sent_at INTEGER,sending_at INTEGER,responded_at INTEGER,reply_message_id TEXT NOT NULL);
-    CREATE INDEX IF NOT EXISTS secretary_reminders_due ON secretary_reminders(state,due_at);`);
+    CREATE INDEX IF NOT EXISTS secretary_reminders_due ON secretary_reminders(state,due_at);
+    CREATE TABLE IF NOT EXISTS secretary_last_project (conversation_key TEXT PRIMARY KEY,project_id TEXT NOT NULL,project_name TEXT NOT NULL,expires_at INTEGER NOT NULL);`);
+}
+// Short-lived "which project are we talking about" memory per conversation --
+// set whenever a task is actually attached to a project (existing or just
+// created) through the task_draft flow, so a follow-up "افتح مهمة كمان: ..."
+// with no project named attaches to the same project instead of asking again.
+// Deliberately short (see LAST_PROJECT_MS) so it never silently reattaches an
+// unrelated later request to a stale project.
+const LAST_PROJECT_MS = 20 * 60_000;
+function rememberLastProject(db: DatabaseSync, key: string, projectId: string, projectName: string, now: number) {
+  db.prepare("INSERT INTO secretary_last_project VALUES(?,?,?,?) ON CONFLICT(conversation_key) DO UPDATE SET project_id=excluded.project_id,project_name=excluded.project_name,expires_at=excluded.expires_at")
+    .run(key, projectId, projectName, now + LAST_PROJECT_MS);
+}
+function recentProject(db: DatabaseSync, key: string, now: number): { id: string; name: string } | null {
+  const row = db.prepare("SELECT project_id AS id,project_name AS name,expires_at AS expiresAt FROM secretary_last_project WHERE conversation_key=?").get(key) as { id: string; name: string; expiresAt: number } | undefined;
+  return row && row.expiresAt > now ? { id: row.id, name: row.name } : null;
 }
 function actorFor(db: DatabaseSync, event: Event, config: TeamChatConfig) {
   return resolveChatUser({ senderNumber: event.senderNumber, groupId: event.groupId }, config.contacts, db.prepare("SELECT id,name,role,active FROM users").all() as ChatUser[], config.allowedGroupIds);
@@ -335,7 +356,7 @@ function pendingTaskDraft(pending: Pending | undefined, snapshotHash: string, no
   if (!pending || pending.expires_at <= now || pending.snapshot_hash !== snapshotHash) return null;
   const command = JSON.parse(pending.command_json);
   if (command.action !== "add_task") return null;
-  return { projectId: typeof command.projectId === "string" ? command.projectId : null,
+  return { projectId: typeof command.projectId === "string" ? command.projectId : null, newProjectName: null,
     title: typeof command.title === "string" ? command.title : null, details: typeof command.details === "string" ? command.details : null,
     priority: ["red", "yellow", "green"].includes(command.priority) ? command.priority : null,
     ownerId: command.ownerId === null ? "unassigned" : typeof command.ownerId === "string" ? command.ownerId : null,
@@ -345,14 +366,22 @@ function availableDraft(draft: TaskDraft, state: Snapshot): TaskDraft {
   const date = draft.dueDate;
   const validDate = date === "unscheduled" || (typeof date === "string" && /^\d{4}-\d{2}-\d{2}$/.test(date)
     && Number.isFinite(Date.parse(`${date}T00:00:00Z`)) && new Date(`${date}T00:00:00Z`).toISOString().slice(0, 10) === date);
-  return { projectId: state.projects.some(project => project.id === draft.projectId && project.status === "active" && !project.archivedAt) ? draft.projectId : null,
+  const hasProject = state.projects.some(project => project.id === draft.projectId && project.status === "active" && !project.archivedAt);
+  return { projectId: hasProject ? draft.projectId : null,
+    // A pending new-project name only matters while no real project has
+    // resolved yet -- once one has (e.g. a later turn matched an existing
+    // project instead), drop it so a duplicate project is never created
+    // alongside the real one.
+    newProjectName: hasProject ? null : (draft.newProjectName?.trim().slice(0, 240) || null),
     title: draft.title?.trim() || null, details: draft.details?.trim() || null,
     priority: draft.priority && ["red", "yellow", "green"].includes(draft.priority) ? draft.priority : null,
     ownerId: draft.ownerId === "unassigned" || state.users.some(user => user.id === draft.ownerId && user.active === 1) ? draft.ownerId : null,
     dueDate: validDate ? date : null };
 }
 function intakeQuestion(draft: TaskDraft, state: Snapshot): string | null {
-  if (!draft.projectId) return `بأي مشروع بدك أضيف المهمة؟${state.projects.some(project => project.status === "active") ? ` المشاريع النشطة: ${state.projects.filter(project => project.status === "active").slice(0, 8).map(project => clean(project.name, 90)).join("، ")}.` : " ما في مشروع نشط حاليًا؛ لازم نجهّز مشروعًا أولًا."}`;
+  // A named-but-unknown project (newProjectName) counts as answered -- it will
+  // be created together with the task once the rest of the draft is done.
+  if (!draft.projectId && !draft.newProjectName) return `بأي مشروع بدك أضيف المهمة؟ لو مشروع جديد، اذكر اسمه وبفتحه إلك.${state.projects.some(project => project.status === "active") ? ` المشاريع النشطة: ${state.projects.filter(project => project.status === "active").slice(0, 8).map(project => clean(project.name, 90)).join("، ")}.` : ""}`;
   if (!draft.title) return "شو المهمة أو الشغل المطلوب بالضبط؟";
   if (!draft.ownerId) return "مين بدك يمسك المهمة؟ اذكر الموظف، أو قل «بدون مسؤول حاليًا».";
   if (!draft.priority) return "شو أولويتها: 🔴 قصوى، 🟡 متوسطة، ولا 🟢 عادية؟ هاي أولوية الشغل، مش حالة تنفيذه.";
@@ -364,7 +393,7 @@ function choiceCatalogHash(state: Snapshot) {
     users: state.users.map(user => ({ id: user.id, name: user.name, active: user.active, role: user.role })) });
 }
 function missingChoiceField(draft: TaskDraft): SecretaryChoiceField | null {
-  if (!draft.projectId) return "projectId";
+  if (!draft.projectId && !draft.newProjectName) return "projectId";
   if (!draft.title) return null;
   if (!draft.ownerId) return "ownerId";
   if (!draft.priority) return "priority";
@@ -403,12 +432,22 @@ function taskIntake(db: DatabaseSync, event: Event, actor: ChatUser, state: Snap
     clearSecretaryChoices(db, key);
     return save(db, event, actor, { status: "clarify", reply: "ما في مسودة مهمة حالية نكمل عليها. احكيلي المهمة الجديدة المطلوبة من البداية." }, [], now);
   }
-  const proposed: TaskDraft = { projectId: plan.projectId, title: plan.fields.title, details: plan.fields.details,
+  const proposed: TaskDraft = { projectId: plan.projectId, newProjectName: plan.fields.name, title: plan.fields.title, details: plan.fields.details,
     priority: plan.fields.priority, ownerId: plan.fields.ownerId, dueDate: plan.fields.dueDate };
   if (plan.intakeMode === "continue" && existingDraft) {
     for (const field of Object.keys(proposed) as Array<keyof TaskDraft>) {
       if (proposed[field] === null) Object.assign(proposed, { [field]: existingDraft[field] });
     }
+  }
+  // A brand-new task-open request (not a continuation) that doesn't name any
+  // project at all quietly attaches to whichever project a task was just
+  // filed/created under in this same conversation, if that was recent -- see
+  // rememberLastProject. This is what lets "افتح مهمة كمان: ..." right after
+  // opening one keep going without repeating the project name; naming a
+  // different project explicitly always overrides it.
+  if (plan.intakeMode === "start" && proposed.projectId === null && !proposed.newProjectName) {
+    const recent = recentProject(db, key, now);
+    if (recent) proposed.projectId = recent.id;
   }
   // An employee always opens a task for himself -- there is no one else to
   // assign it to from this flow -- so the owner question never applies to him.
@@ -426,29 +465,49 @@ function taskIntake(db: DatabaseSync, event: Event, actor: ChatUser, state: Snap
     const choices = event.groupId === null ? intakeChoices(db, actor, state, draft, key, now) : undefined;
     return save(db, event, actor, { status: "clarify", reply: question + (choices ? `\n\n${choices.options.map(option => option.label).join("\n")}\nاختار خيارًا واحدًا، أو اكتب اسم الخيار بالكلام.` : ""), ...(choices ? { choices } : {}) }, scope, now);
   }
-  const project = state.projects.find(item => item.id === draft.projectId)!;
+  const project = draft.projectId ? state.projects.find(item => item.id === draft.projectId) ?? null : null;
   const owner = state.users.find(item => item.id === draft.ownerId);
   db.prepare("DELETE FROM secretary_task_intake WHERE conversation_key=?").run(key);
+  const projectTask: ProjectDraftTask = { title: draft.title!, ownerId: draft.ownerId === "unassigned" ? null : draft.ownerId,
+    priority: draft.priority!, dueDate: draft.dueDate === "unscheduled" ? null : draft.dueDate };
+  const chainHint = "\n\nلو بدك تضيف مهمة كمان لنفس المشروع، احكيها عادي وبربطها فيه تلقائيًا.";
   if (!isAdmin) {
     // Not Basim's decision to make directly -- file it and let him decide,
     // same pattern as project_create/task_close/ownership requests.
     try {
+      if (draft.newProjectName) {
+        const request = requestProjectCreate(db, actor, { name: draft.newProjectName, goal: draft.details || undefined, tasks: [projectTask] }, { now });
+        enqueueAgentMessage(db, { toUser: "basem", text: request.ownerMessage }, now);
+        log(db, actor, event, "secretary_proposal", { summary: "رفع طلب فتح مشروع مع مهمته لباسم", approvalId: request.approval.id, confirmationRequired: false }, now);
+        return save(db, event, actor, { status: "applied", reply: `📨 رفعت طلبك لباسم: ${request.approval.summary}\nبخبرك أول ما يقرر.` }, scope, now);
+      }
       const request = requestTaskCreate(db, actor, { projectId: draft.projectId!, title: draft.title!, details: draft.details || undefined,
         priority: draft.priority!, dueDate: draft.dueDate === "unscheduled" ? null : draft.dueDate,
         ownerId: draft.ownerId === "unassigned" ? null : draft.ownerId }, { now });
+      rememberLastProject(db, key, draft.projectId!, project?.name ?? draft.projectId!, now);
       enqueueAgentMessage(db, { toUser: "basem", text: request.ownerMessage }, now);
       log(db, actor, event, "secretary_proposal", { summary: "رفع طلب فتح مهمة لباسم", approvalId: request.approval.id, confirmationRequired: false }, now);
-      return save(db, event, actor, { status: "applied", reply: `📨 رفعت طلبك لباسم: ${request.approval.summary}\nبخبرك أول ما يقرر.` }, scope, now);
+      return save(db, event, actor, { status: "applied", reply: `📨 رفعت طلبك لباسم: ${request.approval.summary}\nبخبرك أول ما يقرر.${chainHint}` }, scope, now);
     } catch (error) {
       if (!(error instanceof ManagementActionError)) throw error;
       return save(db, event, actor, { status: "clarify", reply: error.message }, scope, now);
     }
   }
+  if (draft.newProjectName) {
+    const token = "T" + randomBytes(3).toString("hex").toUpperCase();
+    const command = { action: "create_project_bundle", name: draft.newProjectName, goal: draft.details || "", tasks: [projectTask], suppressNotices: false };
+    const preview = describeProjectBundle(draft.newProjectName, draft.details || "", [projectTask], state.users);
+    const reply = `${preview}\n\nهاد مشروع جديد؛ رح ينشئ مع هاي المهمة سوا. أعتمد الإنشاء؟ اكتب «موافق ${token}» أو صحّح أي بند.`;
+    if (reply.length > 3700) return save(db, event, actor, { status: "clarify", reply: "تفاصيل المهمة طويلة للمعاينة الكاملة. اختصر التفاصيل حتى أعرضها كلها قبل التأكيد." }, scope, now);
+    db.prepare("INSERT INTO secretary_pending VALUES(?,?,?,?,?,?,?)").run(key, token, JSON.stringify(command), fingerprint(state), event.text, event.messageId, now + CONFIRM_MS);
+    log(db, actor, event, "secretary_proposal", { summary: "عرض إنشاء مشروع جديد مع مهمته", proposedCommand: command, confirmationRequired: true }, now);
+    return save(db, event, actor, { status: "confirmation", reply }, scope, now);
+  }
   const token = "T" + randomBytes(3).toString("hex").toUpperCase();
   const command = { action: "add_task", projectId: draft.projectId, title: draft.title, ...(draft.details ? { details: draft.details } : {}),
     ownerId: draft.ownerId === "unassigned" ? null : draft.ownerId, priority: draft.priority,
-    dueDate: draft.dueDate === "unscheduled" ? null : draft.dueDate, expectedProjectUpdatedAt: project.updatedAt ?? null, expectedProjectStatus: "active" };
-  const reply = `للتأكيد قبل إنشاء المهمة:\nالمشروع: ${clean(project.name, 240)}\nالمهمة: ${draft.title}${draft.details ? `\nالمطلوب: ${draft.details}` : ""}\nالمسؤول: ${owner ? clean(owner.name, 200) : "بدون مسؤول حاليًا"}\nالأولوية: ${PRIORITIES[draft.priority!].icon} ${PRIORITIES[draft.priority!].label}\nالموعد: ${draft.dueDate === "unscheduled" ? "بدون موعد" : draft.dueDate}\nالحالة عند الإنشاء: مفتوحة بانتظار الاستلام.\n\nلم أنشئ المهمة بعد. اكتب «موافق ${token}» أو رد مباشرة بالموافقة على هذه المعاينة؛ وللتراجع اكتب «إلغاء». التأكيد صالح 10 دقائق.`;
+    dueDate: draft.dueDate === "unscheduled" ? null : draft.dueDate, expectedProjectUpdatedAt: project!.updatedAt ?? null, expectedProjectStatus: "active" };
+  const reply = `للتأكيد قبل إنشاء المهمة:\nالمشروع: ${clean(project!.name, 240)}\nالمهمة: ${draft.title}${draft.details ? `\nالمطلوب: ${draft.details}` : ""}\nالمسؤول: ${owner ? clean(owner.name, 200) : "بدون مسؤول حاليًا"}\nالأولوية: ${PRIORITIES[draft.priority!].icon} ${PRIORITIES[draft.priority!].label}\nالموعد: ${draft.dueDate === "unscheduled" ? "بدون موعد" : draft.dueDate}\nالحالة عند الإنشاء: مفتوحة بانتظار الاستلام.\n\nلم أنشئ المهمة بعد. اكتب «موافق ${token}» أو رد مباشرة بالموافقة على هذه المعاينة؛ وللتراجع اكتب «إلغاء». التأكيد صالح 10 دقائق.`;
   if (reply.length > 3700) return save(db, event, actor, { status: "clarify", reply: "تفاصيل المهمة طويلة للمعاينة الكاملة. اختصر التفاصيل حتى أعرضها كلها قبل التأكيد." }, scope, now);
   db.prepare("INSERT INTO secretary_pending VALUES(?,?,?,?,?,?,?)").run(key, token, JSON.stringify(command), fingerprint(state), event.text, event.messageId, now + CONFIRM_MS);
   log(db, actor, event, "secretary_proposal", { summary: "عرض إنشاء مهمة بعد استكمال بياناتها", proposedCommand: command, confirmationRequired: true }, now);
@@ -499,7 +558,12 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
   const storedIntake = intakeRow(db, key);
   const pendingDraft = pendingTaskDraft(pending, initialHash, now);
   const draftCandidate = storedIntake && storedIntake.expires_at > now ? JSON.parse(storedIntake.draft_json) : pendingDraft;
-  const taskDraft = draftCandidate && actor.id === "basem" && actor.role === "admin" ? availableDraft(draftCandidate, initial) : null;
+  // Continuation state applies to every actor, not just Basim -- an employee
+  // mid-way through a multi-turn task-open Q&A needs the same persisted
+  // memory of already-answered fields, or each new message has to be
+  // re-derived whole from raw history and any unrestated answer gets lost
+  // (the same bug class as the project-open loop).
+  const taskDraft = draftCandidate ? availableDraft(draftCandidate, initial) : null;
   const eventChoice = event.choice;
   if (eventChoice) return transaction(db, () => {
     const freshActor = actorFor(db, event, config);
@@ -624,6 +688,7 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
             ? createProjectBundle(db, freshActor, { name: String(command.name), goal: String(command.goal ?? ""), tasks: Array.isArray(command.tasks) ? command.tasks : [], suppressNotices: command.suppressNotices === true }, now, { originalText: live.original_text, sourceMessageId: live.source_message_id, confirmationRequired: true, confirmedBy: freshActor.id, confirmationMessageId: event.messageId, senderNumber: event.senderNumber, origin: "whatsapp" })
             : applyDecision(db, freshActor, { approvalId: String(command.approvalId), decision: command.decision === "approved" ? "approved" : "rejected", note: typeof command.note === "string" ? command.note : undefined }, now);
           deliverAgentSideEffects(db, freshActor, result, now);
+          if (command.action === "create_project_bundle" && result.projectId) rememberLastProject(db, key, result.projectId, String(command.name), now);
           return save(db, event, freshActor, { status: result.status, reply: result.reply }, [], now);
         } catch (error) { if (!(error instanceof ManagementActionError)) throw error; return save(db, event, freshActor, { status: "clarify", reply: error.message }, [], now); }
       }
@@ -793,6 +858,12 @@ function perform(db: DatabaseSync, event: Event, actor: ChatUser, state: Snapsho
     const result = executeManagementAction(db, actor, command as ManagementCommand, { now, source: "whatsapp_secretary", auditContext: { ...context, senderNumber: event.senderNumber, origin: "whatsapp", proposedCommand: command } });
     const taskId = typeof command.taskId === "string" ? command.taskId : result.entityType === "task" ? result.entityId : undefined;
     if (taskId) db.prepare("UPDATE secretary_reminders SET responded_at=? WHERE actor_id=? AND task_id=? AND group_id IS ? AND state='sent' AND responded_at IS NULL").run(now, actor.id, taskId, event.groupId);
+    // Remember this project for a short window so a follow-up task-open
+    // request in the same conversation can skip naming it again.
+    if (command.action === "add_task" && typeof command.projectId === "string") {
+      const projectName = state.projects.find(p => p.id === command.projectId)?.name ?? String(command.projectId);
+      rememberLastProject(db, conversation(event, actor), command.projectId, projectName, now);
+    }
     const scope = [...(taskId && state.tasks.some(t => t.id === taskId) && command.action !== "delete_task" ? ["t:" + taskId] : []), ...(typeof command.projectId === "string" && command.action !== "delete_project" ? ["p:" + command.projectId] : [])];
     // File blobs from confirmed deletions remain recoverable on disk; DB links are removed atomically.
     return save(db, event, actor, { status: "applied", reply: `✅ ${result.message}`, ...(taskId ? { taskId } : {}) }, scope, now);

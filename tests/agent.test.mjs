@@ -206,10 +206,14 @@ test("project_draft parses task lines, previews for owner, and bundle creation i
   assert.equal(preview.status, "confirmation"); assert.match(preview.reply, /ملخص المشروع قبل الإنشاء/);
   assert.equal(stashed[0].action, "create_project_bundle");
   const result = createProjectBundle(db, owner, stashed[0], T0 + 5, { origin: "test" });
-  assert.match(result.reply, /مع 1 مهام/);
+  assert.match(result.reply, /مع مهمة واحدة/);
+  assert.equal(result.projectId, db.prepare("SELECT id FROM projects WHERE name='تجهيز دابوق'").get().id);
   assert.equal(db.prepare("SELECT COUNT(*) AS n FROM tasks WHERE project_id=(SELECT id FROM projects WHERE name='تجهيز دابوق')").get().n, 1);
-  const denied = handleAgentIntent(plan, { db, actor: khaled, now: T0, users: snapshot.users, tasks: snapshot.tasks, projects: snapshot.projects, stash: () => "T" });
-  assert.equal(denied.status, "denied");
+  // A plain member may also propose a project now (approval.request, which every
+  // role has) -- it is filed for Basim's decision, never created directly.
+  const filed = handleAgentIntent(plan, { db, actor: khaled, now: T0, users: snapshot.users, tasks: snapshot.tasks, projects: snapshot.projects, stash: () => "T" });
+  assert.equal(filed.status, "applied");
+  assert.match(filed.reply, /رفعت اقتراح المشروع/);
 });
 
 test("follow-ups: overdue owner nudge once per day, stale approval to owner, digest bounded; queued notifications first", async t => {

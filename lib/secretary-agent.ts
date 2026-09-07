@@ -11,7 +11,7 @@ import { activeRules, formatRules, policyViolations, proposeRuleFromStatement, r
 import { can, isOwner, type PermissionActor } from "./permissions.ts";
 import type { SecretaryIntent } from "./secretary-intent.ts";
 
-export type AgentResult = { status: string; reply: string; taskId?: string; groupNotice?: string | null; notify?: Array<{ userId: string; text: string }> };
+export type AgentResult = { status: string; reply: string; taskId?: string; projectId?: string; groupNotice?: string | null; notify?: Array<{ userId: string; text: string }> };
 export type AgentContext = {
   db: DatabaseSync; actor: ManagementActor; now: number; inputKind?: string | null; suppressNotices?: boolean;
   users: Array<{ id: string; name: string; active?: number }>; tasks: Array<{ id: string; title: string; projectId: string; status: string; owner: string | null; dueDate: string | null }>;
@@ -21,6 +21,10 @@ export type AgentContext = {
 };
 const clean = (value: unknown, max = 200) => String(value ?? "").replace(/[\x00-\x1f\u202a-\u202e\u2066-\u2069]/g, " ").trim().slice(0, max);
 const ORDINALS: Record<string, number> = { "الاول": 1, "الأول": 1, "الثاني": 2, "الثالث": 3, "الرابع": 4, "الخامس": 5, "1": 1, "2": 2, "3": 3, "4": 4, "5": 5 };
+// Arabic count agreement for "مهمة" -- 1 and 2 have their own words, 3-10
+// take the plural, 11+ reverts to the singular after the number. Duplicated from
+// secretary-service.ts's taskCountPhrase to avoid a circular import between the two.
+const taskCountPhrase = (n: number) => n === 1 ? "مهمة واحدة" : n === 2 ? "مهمتين" : n <= 10 ? `${n} مهام` : `${n} مهمة`;
 export type ProjectDraftTask = { title: string; ownerId: string | null; priority: "red" | "yellow" | "green"; dueDate: string | null };
 
 export function parseProjectTaskLines(message: string | null, users: AgentContext["users"]): { tasks: ProjectDraftTask[]; problems: string[] } {
@@ -53,7 +57,9 @@ export function createProjectBundle(db: DatabaseSync, actor: ManagementActor, bu
   }
   const nameOf = (id: string | null) => id ? String(db.prepare("SELECT name FROM users WHERE id=?").get(id)?.name ?? id) : null;
   const lines = bundle.tasks.map(task => `${nameOf(task.ownerId) ?? "غير معيّن"}: ${task.title} — ${task.priority === "red" ? "أحمر" : task.priority === "yellow" ? "أصفر" : "أخضر"}${task.dueDate ? ` — ${task.dueDate}` : ""}`);
-  return { status: "applied", reply: `✅ أنشأت مشروع «${clean(bundle.name)}» مع ${count} مهام.${bundle.suppressNotices ? " بدون إرسال إشعارات للفريق." : ""}`, groupNotice: bundle.suppressNotices ? null : `📁 مشروع جديد: ${clean(bundle.name)}${lines.length ? `\n${lines.join("\n")}` : ""}` };
+  return { status: "applied", projectId: created.entityId,
+    reply: `✅ أنشأت مشروع «${clean(bundle.name)}»${count ? ` مع ${taskCountPhrase(count)}` : ""}.${bundle.suppressNotices ? " بدون إرسال إشعارات للفريق." : ""}\nاحكيلي أي مهمة كمان بمشروع «${clean(bundle.name)}» عادي وبربطها فيه تلقائيًا.`,
+    groupNotice: bundle.suppressNotices ? null : `📁 مشروع جديد: ${clean(bundle.name)}${lines.length ? `\n${lines.join("\n")}` : ""}` };
 }
 
 /** Execute a confirmed decision (owner, voice path) — called from the confirmation flow. */
@@ -178,22 +184,34 @@ export function handleAgentIntent(plan: SecretaryIntent, ctx: AgentContext): Age
         return { status: "summary", reply: `من قاعدة المعرفة:\n\n${formatKnowledgeHits(hits)}` };
       }
       case "project_draft": {
-        if (!can(actor as PermissionActor, "project.create")) return { status: "denied", reply: "فتح المشاريع لباسم ومديري الأقسام." };
+        // Any authenticated actor may propose a project (approval.request, which
+        // every role has) -- only the DIRECT no-approval creation path below is
+        // restricted, and that already only ever runs for the owner (Basim).
+        // A blanket project.create gate here used to block plain members from
+        // even filing the request, contradicting the intended design (DM-only
+        // project/task proposals from staff, same as task_draft).
         const name = clean(plan.fields.name, 240); const goal = clean(plan.fields.details, 2000);
         const parsed = parseProjectTaskLines(plan.message, ctx.users);
-        if (!parsed.tasks.length) return { status: "clarify", reply: `تمام، مشروع «${name}». شو المهام اللي بدك تحطها فيه، ومين المسؤول عن كل وحدة، وأي وحدة عاجلة (حمراء)؟` };
+        // Never ask a second question here (e.g. "what tasks go in it?") --
+        // project_draft has no saved state across turns, so a follow-up
+        // question here is exactly the loop bug reported live: the project
+        // name gets lost if the next message doesn't restate it. Finalize on
+        // this single turn (with whatever tasks were given, possibly none)
+        // and let further tasks come in one at a time through the normal,
+        // stateful task_draft flow, which remembers this project automatically.
         for (const task of parsed.tasks) {
           if (!task.ownerId) { const suggestion = suggestOwner(db, { text: task.title }); if (suggestion) task.ownerId = suggestion.ownerId; }
         }
         const violations = parsed.tasks.flatMap(task => policyViolations(db, { title: task.title, dueDate: task.dueDate, ownerId: task.ownerId }));
         const preview = describeProjectBundle(name, goal, parsed.tasks, ctx.users);
         const warnings = [...parsed.problems, ...violations].map(problem => `⚠️ ${problem}`).join("\n");
+        const taskNote = parsed.tasks.length ? "" : `\n\nبعد ما ينفتح، احكيلي أي مهمة بمشروع «${name}» عادي وبربطها فيه تلقائيًا.`;
         if (owner) {
           const token = ctx.stash({ action: "create_project_bundle", name, goal, tasks: parsed.tasks, suppressNotices: ctx.suppressNotices === true });
-          return { status: "confirmation", reply: `${voice ? "فهمت من الصوت:\n" : ""}${preview}${warnings ? `\n${warnings}` : ""}${ctx.suppressNotices ? "\nبدون إرسال إشعارات للفريق." : ""}\n\nأعتمد إنشاء المشروع؟ اكتب «موافق ${token}» أو صحّح أي بند.` };
+          return { status: "confirmation", reply: `${voice ? "فهمت من الصوت:\n" : ""}${preview}${warnings ? `\n${warnings}` : ""}${ctx.suppressNotices ? "\nبدون إرسال إشعارات للفريق." : ""}${taskNote}\n\nأعتمد إنشاء المشروع؟ اكتب «موافق ${token}» أو صحّح أي بند.` };
         }
         const request = requestProjectCreate(db, actor, { name, goal, tasks: parsed.tasks }, { now });
-        return { status: "applied", reply: `📨 رفعت اقتراح المشروع «${name}» لباسم للاعتماد.`, notify: [{ userId: "basem", text: request.ownerMessage }], groupNotice: null };
+        return { status: "applied", reply: `📨 رفعت اقتراح المشروع «${name}» لباسم للاعتماد.${taskNote}`, notify: [{ userId: "basem", text: request.ownerMessage }], groupNotice: null };
       }
       default: return null;
     }

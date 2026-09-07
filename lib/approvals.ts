@@ -132,7 +132,10 @@ export function requestProjectCreate(db: DatabaseSync, claimed: ManagementActor,
   const name = text(input.name, "اسم المشروع", 240);
   const goal = text(input.goal, "الهدف", 2000, true);
   const tasks = (input.tasks ?? []).slice(0, 40).map(task => ({ title: text(task.title, "اسم المهمة", 240), ownerId: task.ownerId ?? null, priority: task.priority ?? "yellow", dueDate: task.dueDate ?? null }));
-  const summary = `فتح مشروع «${name}»${tasks.length ? ` مع ${tasks.length} مهام` : ""}`;
+  // Arabic count agreement for "مهمة" -- 1 and 2 have their own words, 3-10 take
+  // the plural, 11+ reverts to the singular after the number.
+  const taskCountPhrase = (n: number) => n === 1 ? "مهمة واحدة" : n === 2 ? "مهمتين" : n <= 10 ? `${n} مهام` : `${n} مهمة`;
+  const summary = `فتح مشروع «${name}»${tasks.length ? ` مع ${taskCountPhrase(tasks.length)}` : ""}`;
   const approval = insert(db, actor, { type: "project_create", entityType: "project", entityId: null, summary, payload: { name, goal, tasks } }, now(options));
   const lines = tasks.map((task, index) => `${index + 1}. ${task.title}${task.ownerId ? ` — ${task.ownerId}` : ""} — ${task.priority}${task.dueDate ? ` — ${task.dueDate}` : ""}`);
   const ownerMessage = `${actor.name} يقترح فتح مشروع «${name}»${goal ? `\nالهدف: ${goal}` : ""}${lines.length ? `\nالمهام:\n${lines.join("\n")}` : ""}\n\nأعتمد الإنشاء؟`;

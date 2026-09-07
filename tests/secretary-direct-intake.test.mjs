@@ -67,7 +67,7 @@ test('fresh literal creation replaces even an unexpired complete draft without i
   await f.run(f.event('ضيف مهمة جديدة ضمن مشروع تجريبي'),async()=>({...p,intakeMode:'start',projectId:'p',fields:{...p.fields,title:'عنوان سابق',ownerId:'member',priority:'green',dueDate:'2026-09-10'}}));
   const old=f.pending();assert.ok(old);
   const r=await f.run(f.event('أضف مهمة تجريبية'));assert.ok(r.choices);assert.equal(f.pending(),undefined);
-  assert.deepEqual(saved(f),{projectId:null,title:'تجريبية',details:null,priority:null,ownerId:null,dueDate:null});
+  assert.deepEqual(saved(f),{projectId:null,newProjectName:null,title:'تجريبية',details:null,priority:null,ownerId:null,dueDate:null});
   assert.equal((await f.run(f.event(`موافق ${old.token}`))).status,'clarify');assert.equal(count(f),1);
 });
 
