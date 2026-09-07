@@ -29,7 +29,7 @@ test('login codes and obvious credentials cannot become work transcripts',()=>{
 });
 test('voice download and transcription require fresh auth, bounded in-memory body and actual hash',async()=>{
  const bytes=ogg();let calls=0,checks=0;
- const transcribe=createVoiceTranscriber({apiKey:'synthetic',downloadContent:async(a,type,opts)=>{assert.equal(type,'audio');assert.equal(opts.host,'mmg.whatsapp.net');assert.equal(opts.options.redirect,'error');return Readable.from([bytes]);},fetcher:async(url,options)=>{calls++;assert.equal(url,'https://api.groq.com/openai/v1/audio/transcriptions');assert.equal(options.body.get('model'),'whisper-large-v3-turbo');assert.equal(options.body.get('file').size,bytes.length);return Response.json({text:'خلصت اللوحة',duration:1});}});
+ const transcribe=createVoiceTranscriber({apiKey:'synthetic',downloadContent:async(a,type,opts)=>{assert.equal(type,'audio');assert.equal(opts.host,'mmg.whatsapp.net');assert.equal(opts.options.redirect,'error');return Readable.from([bytes]);},fetcher:async(url,options)=>{calls++;assert.equal(url,'https://api.openai.com/v1/audio/transcriptions');assert.equal(options.body.get('model'),'gpt-4o-transcribe');assert.equal(options.body.get('file').size,bytes.length);return Response.json({text:'خلصت اللوحة'});}});
  assert.equal(await transcribe(audio(bytes),{authorize:async()=>{checks++;return true;}}),'خلصت اللوحة');assert.equal(checks,2);assert.equal(calls,1);
  await assert.rejects(transcribe(audio(bytes),{authorize:async()=>false}));assert.equal(calls,1);
  await assert.rejects(transcribe({...audio(bytes),fileSha256:Buffer.alloc(32)},{authorize:async()=>true}));assert.equal(calls,1);

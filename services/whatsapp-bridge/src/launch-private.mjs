@@ -5,7 +5,7 @@ import { spawn as nativeSpawn } from 'node:child_process';
 import { loadConfig } from './config.mjs';
 
 const SETTINGS_KEYS = new Set(['TEAM_CHAT_ENABLED', 'TEAM_CHAT_SHARED_KEY', 'TEAM_CHAT_CONTACTS_JSON',
-  'TEAM_CHAT_GROUP_IDS_JSON', 'GROQ_API_KEY', 'GROQ_MODEL', 'WHATSAPP_LOGIN_ENABLED',
+  'TEAM_CHAT_GROUP_IDS_JSON', 'GROQ_API_KEY', 'GROQ_MODEL', 'OPENAI_API_KEY', 'OPENAI_MODEL', 'OPENAI_SEARCH_MODEL', 'WHATSAPP_LOGIN_ENABLED',
   'WHATSAPP_LOGIN_SECRET', 'WHATSAPP_LOGIN_DATABASE', 'WHATSAPP_LOGIN_ORIGIN',
   'SECRETARY_ENABLED', 'SECRETARY_WEB_ENABLED', 'SECRETARY_VOICE_ENABLED', 'SECRETARY_FOLLOWUP_ENABLED', 'TITANIUM_PUBLIC_URL', 'DASHBOARD_READONLY']);
 const MAX_BYTES = 32_768;
@@ -119,8 +119,8 @@ export function bridgeChildEnvironment(settings, env, pair, serviceDirectory = S
   });
   // Explicit owner consent: this key is used only for bounded voice transcription on the server.
   if (childEnv.SECRETARY_VOICE_ENABLED === '1') {
-    if (typeof settings.GROQ_API_KEY !== 'string' || !settings.GROQ_API_KEY.trim() || /[\r\n]/.test(settings.GROQ_API_KEY)) throw new Error('Voice settings unavailable.');
-    childEnv.GROQ_API_KEY = settings.GROQ_API_KEY;
+    if (typeof settings.OPENAI_API_KEY !== 'string' || !settings.OPENAI_API_KEY.trim() || /[\r\n]/.test(settings.OPENAI_API_KEY)) throw new Error('Voice settings unavailable.');
+    childEnv.OPENAI_API_KEY = settings.OPENAI_API_KEY;
   }
   // Phone/user mapping only; no names or AI key. launchPrivate separately grants
   // the validated settings path for fresh outbox authorization, never from an override.

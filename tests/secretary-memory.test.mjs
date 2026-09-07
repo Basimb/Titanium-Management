@@ -37,37 +37,33 @@ test('personal memory explicitly replaces and forgets one topic, isolated by own
   updatePersonalMemory(f.db,'basem',personalMemoryCommand('انس عني: الأسلوب'),f.now+2);
   assert.deepEqual(personalMemory(f.db,'basem'),[]);
 });
-test('second model gets only public question and tool evidence; failure preserves sources',async()=>{
+test('grounded search needs a single OpenAI web_search call, never a second provider round-trip',async()=>{
   const requests=[];
   const fetcher=async(_url,options)=>{
     const body=JSON.parse(options.body);requests.push(body);
-    if(requests.length===1)return Response.json({choices:[{message:{content:'search',executed_tools:[{search_results:{results:[{title:'Official source',url:'https://example.org/source',content:'Evidence'}]}}]}}]});
-    return Response.json({choices:[{finish_reason:'stop',message:{content:JSON.stringify({assessment:'الأدلة غير كافية للتأكيد.'})}}]});
+    return Response.json({output:[{type:'message',content:[{type:'output_text',text:'الأدلة كافية للتأكيد.',annotations:[
+      {type:'url_citation',url:'https://example.org/source',title:'Official source'},
+    ]}]}]});
   };
   const reply=await searchSecretaryWeb('public question',{apiKey:'synthetic',fetcher});
-  assert.equal(requests.length,2);assert.notEqual(requests[0].model,requests[1].model);
-  assert.deepEqual(Object.keys(JSON.parse(requests[1].messages[1].content)).sort(),['question','sources']);
-  assert.match(reply,/الأدلة غير كافية/);assert.match(reply,/https:\/\/example.org\/source/);
+  assert.equal(requests.length,1);
+  assert.match(reply,/الأدلة كافية/);assert.match(reply,/https:\/\/example.org\/source/);
 });
 
-test('live provider rejection returns honest unverified status without a fake second review',async()=>{
+test('live provider rejection returns honest unverified status without inventing an answer',async()=>{
  let calls=0;
  const answer=await searchSecretaryWeb('public question',{apiKey:'synthetic',fetcher:async()=>{calls++;return Response.json({error:{code:'request_too_large'}},{status:413});}});
  assert.equal(calls,1);assert.match(answer,/ما قدرت أتحقق/);assert.doesNotMatch(answer,/https:\/\//);
 });
 
-test('browser page excerpts are bound to retrieved URLs, never invented answer links',async()=>{
- let calls=0, review;
- const answer=await searchSecretaryWeb('public question',{apiKey:'synthetic',fetcher:async(_url,options)=>{
-  if(++calls===1)return Response.json({choices:[{message:{content:'https://invented.example/',executed_tools:[
-   {type:'browser.search',search_results:{results:[{title:'Source',url:'https://example.org/page',content:''}]}},
-   {type:'browser.open',output:'L0: \nL1: URL:\nL2: https://example.org/page\nL3: Actual page evidence'},
-   {type:'browser.open',output:'L0: \nL1: URL:\nL2: https://invented.example/\nL3: Unmatched evidence'}
-  ]}}]});
-  review=JSON.parse(JSON.parse(options.body).messages[1].content);
-  return Response.json({choices:[{finish_reason:'stop',message:{content:'{"assessment":"المصدر يحتاج مراجعة التاريخ."}'}}]});
- }});
- assert.equal(review.sources[0].content,'Actual page evidence');
- assert.match(answer,/Actual page evidence/);assert.doesNotMatch(answer,/invented|Unmatched/);
+test('citation URLs are validated before rendering: private/loopback hosts and credentials are dropped, safe HTTPS ones remain',async()=>{
+ const answer=await searchSecretaryWeb('public question',{apiKey:'synthetic',fetcher:async()=>Response.json({output:[{type:'message',content:[{type:'output_text',text:'نتائج متعددة',annotations:[
+   {type:'url_citation',url:'https://example.org/page',title:'Actual source'},
+   {type:'url_citation',url:'http://127.0.0.1/',title:'Loopback'},
+   {type:'url_citation',url:'https://user:pass@example.org/','title':'Credentials'},
+   {type:'url_citation',url:'https://192.168.1.1/','title':'Private'},
+ ]}]}]})});
+ assert.match(answer,/https:\/\/example.org\/page/);
+ assert.doesNotMatch(answer,/127\.0\.0\.1|192\.168\.1\.1|user:pass/);
 });
 

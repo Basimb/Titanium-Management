@@ -49,7 +49,7 @@ test('provider schema puts required intakeMode at the root and explains task int
   const planned = draft();
   let request;
   const result = await inferSecretaryIntent(input, { apiKey: 'synthetic-only', fetcher: async (url, options) => {
-    assert.equal(url, 'https://api.groq.com/openai/v1/chat/completions');
+    assert.equal(url, 'https://api.openai.com/v1/chat/completions');
     assert.equal(options.redirect, 'error');
     request = JSON.parse(options.body);
     return Response.json({ choices: [{ finish_reason: 'stop', message: { content: JSON.stringify(planned) } }] });

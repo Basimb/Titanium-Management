@@ -214,8 +214,8 @@ test('explicit reminder is durable, sent once and not sent for completed work',a
  p.fields.remindAt=new Date(f.now+120000).toISOString();await f.run(p);f.tick(120001);f.db.exec("UPDATE tasks SET status='completed' WHERE id='t'");assert.equal((await worker.deliverNext(async()=>sent++)).status,'failed');assert.equal(sent,1);
 });
 test('provider search never receives catalog or history and requires actual web tool evidence',async()=>{
- let body;const reply=await searchSecretaryWeb('LG televisions Jordan',{apiKey:'synthetic',fetcher:async(url,options)=>{body=JSON.parse(options.body);return Response.json({choices:[{message:{content:'نتيجة https://example.com/product',executed_tools:[]}}]});}});
- assert.equal(body.model,'openai/gpt-oss-120b');assert.deepEqual(body.tools,[{type:'browser_search'}]);assert.equal(body.tool_choice,'required');assert.doesNotMatch(JSON.stringify(body),/taskCatalog|senderNumber|contacts/);assert.match(reply,/ما قدرت أتحقق/);
+ let body;const reply=await searchSecretaryWeb('LG televisions Jordan',{apiKey:'synthetic',fetcher:async(url,options)=>{body=JSON.parse(options.body);return Response.json({output:[{type:'message',content:[{type:'output_text',text:'نتيجة https://example.com/product',annotations:[]}]}]});}});
+ assert.equal(body.model,'gpt-4.1-mini');assert.deepEqual(body.tools,[{type:'web_search',search_context_size:'medium'}]);assert.equal(body.tool_choice,'required');assert.doesNotMatch(JSON.stringify(body),/taskCatalog|senderNumber|contacts/);assert.match(reply,/ما قدرت أتحقق/);
 });
 test('planner response limits reject tool calls and success cannot come from model JSON',async()=>{
  const input={text:'مرحبا',tasks:[],projects:[],users:[],actor:{id:'member',name:'خالد',role:'member'},history:[],now:new Date().toISOString()};
@@ -248,8 +248,11 @@ test('freeform replies and history lose visibility when input task permissions c
 });
 
 test('public search renders only source URLs actually returned by the search tool',async()=>{
- const reply=await searchSecretaryWeb('public product search',{apiKey:'synthetic',fetcher:async()=>Response.json({choices:[{message:{content:'Invented https://invented.example/',executed_tools:[{type:'web_search',search_results:{results:[{title:'Verified product',url:'https://example.com/product',content:'Source description'},{title:'Unsafe',url:'http://127.0.0.1/',content:'Discard'}]}}]}}]})});
- assert.match(reply,/https:\/\/example.com\/product/);assert.doesNotMatch(reply,/invented\.example|127\.0\.0\.1/);
+ const reply=await searchSecretaryWeb('public product search',{apiKey:'synthetic',fetcher:async()=>Response.json({output:[{type:'message',content:[{type:'output_text',text:'Verified product found',annotations:[
+   {type:'url_citation',url:'https://example.com/product',title:'Verified product'},
+   {type:'url_citation',url:'http://127.0.0.1/',title:'Unsafe'},
+ ]}]}]})});
+ assert.match(reply,/https:\/\/example.com\/product/);assert.doesNotMatch(reply,/127\.0\.0\.1/);
 });
 
 test('late bare approval and old token/quote cannot execute a replacement request',async t=>{

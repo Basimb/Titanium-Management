@@ -107,16 +107,18 @@ export function createVoiceTranscriber({ apiKey, downloadContent, fetcher = fetc
       stage = 'validation';
       if (!timingSafeEqual(createHash('sha256').update(audioBuffer).digest(), Buffer.from(audio.fileSha256))) throw new Error('voice_integrity_failed');
       opusDuration(audioBuffer);
-      // Recheck current active sender + all current group members BEFORE upload to Groq.
+      // Recheck current active sender + all current group members BEFORE upload to OpenAI.
       if (!await withAbortSignal(authorize, signal)) throw new Error('voice_unauthorized');
       const form = new FormData();
       form.set('file', new Blob([audioBuffer], { type: 'audio/ogg' }), 'voice.ogg');
-      form.set('model', 'whisper-large-v3-turbo');
+      form.set('model', 'gpt-4o-transcribe');
       form.set('language', 'ar');
       form.set('temperature', '0');
-      form.set('response_format', 'verbose_json');
+      // gpt-4o-transcribe does not support verbose_json/segment duration like Whisper did;
+      // duration was already bounded above by opusDuration() from the container itself.
+      form.set('response_format', 'json');
       stage = 'transcription';
-      const response = await withAbortSignal(() => fetcher('https://api.groq.com/openai/v1/audio/transcriptions', {
+      const response = await withAbortSignal(() => fetcher('https://api.openai.com/v1/audio/transcriptions', {
         method: 'POST', headers: { authorization: `Bearer ${apiKey}` }, body: form, signal, redirect: 'error',
       }), signal);
       if (response.status !== 200 || Number(response.headers.get('content-length')) > 16_384 || !response.body) {
@@ -138,7 +140,9 @@ export function createVoiceTranscriber({ apiKey, downloadContent, fetcher = fetc
       } finally { await reader.cancel().catch(() => {}); }
       const result = JSON.parse(Buffer.concat(parts).toString('utf8'));
       const text = safeVoiceTranscript(result?.text);
-      if (!text || typeof result?.duration !== 'number' || result.duration <= 0 || result.duration > MAX_VOICE_SECONDS) throw new Error('voice_transcript_rejected');
+      // Duration is already bounded by opusDuration() above from the container itself;
+      // gpt-4o-transcribe's json response format does not return a duration field.
+      if (!text) throw new Error('voice_transcript_rejected');
       return text;
     } catch (error) {
       const known = new Set(['voice_unauthorized','voice_too_large','voice_integrity_failed','voice_duration_invalid','voice_duration_exceeded','voice_transcription_unavailable','voice_response_too_large','voice_transcript_rejected']);

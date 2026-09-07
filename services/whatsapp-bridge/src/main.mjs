@@ -70,7 +70,7 @@ async function main() {
   const runtime = createBridgeRuntime({
     config, store, auth, makeWASocket, jidNormalizedUser, makeCacheableSignalKeyStore, DisconnectReason, logger, otpQueue,
     control, isActiveNumber, secretaryJobs, secretaryOutbox, agentFollowups, proto, generateWAMessageContent, generateWAMessage, decryptPollVote, normalizeMessageContent,
-    ...(config.voiceEnabled ? { transcribeVoice: createVoiceTranscriber({ apiKey: process.env.GROQ_API_KEY, downloadContent: downloadContentFromMessage }) } : {}),
+    ...(config.voiceEnabled ? { transcribeVoice: createVoiceTranscriber({ apiKey: process.env.OPENAI_API_KEY, downloadContent: downloadContentFromMessage }) } : {}),
     onStop: code => { process.exitCode = code === 'service_shutdown' ? 0 : 78; },
   });
   process.once('SIGTERM', () => runtime.stop('service_shutdown'));

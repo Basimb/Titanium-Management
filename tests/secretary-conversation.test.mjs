@@ -11,12 +11,12 @@ test('conversational provider keeps task planner schema and untrusted context bo
   const request = input('مش فاهم وضحلي', [{role:'user',content:'كيف أرتب شغلي؟'}, {role:'assistant',content:'ابدأ بأهم مهمة.'}]);
   let body;
   const plan = await inferSecretaryIntent(request, { apiKey:'synthetic-only', fetcher:async (url, options) => {
-    assert.equal(url, 'https://api.groq.com/openai/v1/chat/completions');
+    assert.equal(url, 'https://api.openai.com/v1/chat/completions');
     assert.equal(options.redirect, 'error');
     body = JSON.parse(options.body);
     return Response.json({choices:[{finish_reason:'stop',message:{content:JSON.stringify(emptySecretaryIntent('chat','اختَر مهمة واحدة ضرورية اليوم وابدأ بأول خطوة فيها.'))}}]});
   }});
-  assert.equal(body.model,'openai/gpt-oss-120b');
+  assert.equal(body.model,'gpt-4o');
   assert.equal(body.response_format.json_schema.strict,true);
   assert.equal(body.messages.length,2);
   assert.equal(body.messages[0].role,'system');

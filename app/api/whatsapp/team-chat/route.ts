@@ -15,8 +15,8 @@ export async function POST(request: Request) {
       config: teamChatConfigFromEnv(settings), getDatabase: chatDatabase,
       infer: input => inferWhatsAppIntent(input, { apiKey: settings.GROQ_API_KEY, model: settings.GROQ_MODEL }),
       ...(settings.SECRETARY_ENABLED === "1" ? { secretary: (database: ReturnType<typeof chatDatabase>, event: import("@/lib/team-chat-gateway").TeamChatEnvelope, config: import("@/lib/team-chat-gateway").TeamChatConfig) => handleSecretaryEvent(database, event, config, {
-        infer: input => inferSecretaryIntent(input, { apiKey: settings.GROQ_API_KEY, model: settings.GROQ_MODEL }),
-        ...(settings.SECRETARY_WEB_ENABLED === "1" ? { search: (query: string) => searchSecretaryWeb(query, { apiKey: settings.GROQ_API_KEY }) } : {}),
+        infer: input => inferSecretaryIntent(input, { apiKey: settings.OPENAI_API_KEY, model: settings.OPENAI_MODEL }),
+        ...(settings.SECRETARY_WEB_ENABLED === "1" ? { search: (query: string) => searchSecretaryWeb(query, { apiKey: settings.OPENAI_API_KEY, model: settings.OPENAI_SEARCH_MODEL }) } : {}),
       }) } : {}),
     });
   } catch {

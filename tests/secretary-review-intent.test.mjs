@@ -14,17 +14,17 @@ const context = (extra = {}) => ({
 });
 const response = plan => Response.json({ choices: [{ finish_reason: 'stop', message: { content: JSON.stringify(plan) } }] });
 
-test('review retains the same bounded Groq call and receives quoted context plus explicit truthful identity policy', async () => {
+test('review retains the same bounded OpenAI call and receives quoted context plus explicit truthful identity policy', async () => {
   const input = context(), seen = [];
   const plan = await inferSecretaryIntent(input, { apiKey: 'synthetic-only', fetcher: async (url, options) => {
     seen.push({ url, body: JSON.parse(options.body) });
     return response(emptySecretaryIntent('chat', 'التصحيح: الأخضر أولوية عادية، وليس دليلًا على إنجاز المهمة.'));
   } });
   assert.equal(seen.length, 1);
-  assert.equal(seen[0].url, 'https://api.groq.com/openai/v1/chat/completions');
+  assert.equal(seen[0].url, 'https://api.openai.com/v1/chat/completions');
   const body = seen[0].body, prompt = body.messages[0].content;
-  assert.equal(body.model, 'openai/gpt-oss-120b');
-  assert.equal(body.reasoning_effort, 'low'); assert.equal(body.max_completion_tokens, 1300);
+  assert.equal(body.model, 'gpt-4o');
+  assert.equal(body.reasoning_effort, undefined); assert.equal(body.max_completion_tokens, 1300);
   assert.equal(body.response_format.json_schema.strict, true);
   assert.equal(body.messages.length, 2);
   assert.deepEqual(JSON.parse(body.messages[1].content), input);
@@ -104,15 +104,15 @@ test('ordinary task updates remain available without review context', () => {
   assert.equal(validateSecretaryIntent(plan, input).kind, 'command');
 });
 
-test('search remains evidence-based: no tool results means no invented verification or citations', async () => {
+test('search remains evidence-based: no citation annotations means no invented verification', async () => {
   let seen;
   const answer = await searchSecretaryWeb('سؤال عام اصطناعي', { apiKey: 'synthetic-only', fetcher: async (url, options) => {
     seen = JSON.parse(options.body);
-    return Response.json({ choices: [{ message: { content: 'بحثت وصححت الجواب https://invented.invalid', executed_tools: [] } }] });
+    return Response.json({ output: [{ type: 'message', content: [{ type: 'output_text', text: 'بحثت وصححت الجواب https://invented.invalid', annotations: [] }] }] });
   } });
-  assert.equal(seen.model, 'openai/gpt-oss-120b'); assert.equal(seen.max_completion_tokens, 2048);
-  assert.deepEqual(seen.tools, [{type:'browser_search'}]); assert.equal(seen.tool_choice, 'required');
-  assert.equal(seen.messages[1].content, 'سؤال عام اصطناعي');
+  assert.equal(seen.model, 'gpt-4.1-mini'); assert.equal(seen.max_output_tokens, 900);
+  assert.deepEqual(seen.tools, [{type:'web_search', search_context_size:'medium'}]); assert.equal(seen.tool_choice, 'required');
+  assert.equal(seen.input[1].content, 'سؤال عام اصطناعي');
   assert.doesNotMatch(JSON.stringify(seen), /previousQuestion|previousAnswer|تقرير داخلي|موظف اصطناعي/);
   assert.match(answer, /ما قدرت أتحقق/); assert.doesNotMatch(answer, /invented|صححت/);
 });
