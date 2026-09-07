@@ -119,8 +119,11 @@ test('choice labels cannot trigger the literal shortcut; voice and quoted messag
   await f.run(f.event('أضف مهمة تجريبية',{replyToMessageId:'REPLY-1'}),infer);assert.equal(calls,2);assert.equal(count(f),1);assert.equal(f.pending(),undefined);
 });
 
-test('member impersonation cannot access owner-only direct creation',async t=>{
+test('member can start task intake but never reaches the owner-only direct-confirm path',async t=>{
   const f=fixture(t);const p=emptySecretaryIntent('task_draft');
   const r=await f.run(f.event('أضف مهمة تجريبية',{senderNumber:'12025550101'}),async()=>({...p,intakeMode:'start',fields:{...p.fields,title:'تجريبية'}}));
-  assert.ok(['denied','clarify'].includes(r.status));assert.equal(f.db.prepare('SELECT count(*) n FROM secretary_task_intake').get().n,0);assert.equal(count(f),1);
+  assert.equal(r.status,'clarify');// still missing the project, same as it would for Basim
+  assert.equal(f.db.prepare('SELECT count(*) n FROM secretary_task_intake').get().n,1);
+  assert.equal(f.pending(),undefined);// never a self-confirm add_task, unlike the owner path
+  assert.equal(count(f),1);
 });

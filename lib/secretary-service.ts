@@ -7,7 +7,7 @@ import { directTaskCreationIntent, emptySecretaryIntent, validateSecretaryIntent
 import { priorityTaskQuery, type PriorityTaskQuery } from "./secretary-priority-query.ts";
 import { AGENT_KINDS } from "./secretary-intent.ts";
 import { applyDecision, createProjectBundle, handleAgentIntent, type AgentResult } from "./secretary-agent.ts";
-import { listApprovals } from "./approvals.ts";
+import { listApprovals, requestTaskCreate } from "./approvals.ts";
 import { activeRules } from "./rules.ts";
 import { searchKnowledge, formatKnowledgeHits } from "./knowledge.ts";
 import { migrateSecretaryMemory, rememberSecretaryMistake, recallSecretaryMemory, personalMemoryCommand, updatePersonalMemory, personalMemory } from "./secretary-memory.ts";
@@ -61,6 +61,20 @@ function actorFor(db: DatabaseSync, event: Event, config: TeamChatConfig) {
   return resolveChatUser({ senderNumber: event.senderNumber, groupId: event.groupId }, config.contacts, db.prepare("SELECT id,name,role,active FROM users").all() as ChatUser[], config.allowedGroupIds);
 }
 function stateFor(db: DatabaseSync, actor: ChatUser): Snapshot { return getManagementSnapshot(db, actor) as unknown as Snapshot; }
+// A member's/manager's own snapshot only lists projects tied to tasks already
+// visible to them (see getManagementSnapshot's per-actor filtering), which is
+// right for browsing but wrong for naming a project to open a brand-new task
+// in -- an employee with no task yet in a project could never reference it.
+// Creation specifically needs the plain list of active project names (id and
+// name only, no task/comment content), so it is unioned in only for that.
+function activeProjectNames(db: DatabaseSync): Project[] {
+  return db.prepare("SELECT id,name,status,updated_at AS updatedAt,archived_at AS archivedAt FROM projects WHERE archived_at IS NULL AND status='active'").all() as Project[];
+}
+function withCreatableProjects(state: Snapshot, actor: ChatUser, db: DatabaseSync): Snapshot {
+  if (actor.id === "basem" && actor.role === "admin") return state;
+  const seen = new Set(state.projects.map(project => project.id));
+  return { ...state, projects: [...state.projects, ...activeProjectNames(db).filter(project => !seen.has(project.id))] };
+}
 // Same base filter + overdue/pending-first ordering as the displayed task
 // list (readReply's "ordered" array) so a task's position number is always
 // identical wherever it's shown -- the list a user sees and the list any
@@ -357,6 +371,10 @@ function missingChoiceField(draft: TaskDraft): SecretaryChoiceField | null {
   return draft.dueDate ? null : "dueDate";
 }
 function intakeChoices(db: DatabaseSync, actor: ChatUser, state: Snapshot, draft: TaskDraft, key: string, now: number): SecretaryChoices | undefined {
+  // The interactive choice-button storage is scoped to Basim's own chat only
+  // (see createSecretaryChoices); an employee's intake question always falls
+  // back to a plain free-text question instead.
+  if (actor.id !== "basem" || actor.role !== "admin") return undefined;
   const field = missingChoiceField(draft); if (!field) return undefined;
   const options = secretaryChoiceOptions(field, { projects: state.projects.filter(project => project.status === "active" && !project.archivedAt), users: state.users.filter(user => user.active === 1), now });
   if (!options.length) return undefined;
@@ -365,7 +383,6 @@ function intakeChoices(db: DatabaseSync, actor: ChatUser, state: Snapshot, draft
     field, title: titles[field], options, now, expiresAt: Math.min(now + INTAKE_MS, intakeRow(db, key)?.expires_at ?? now) });
 }
 function currentIntakeQuestion(db: DatabaseSync, event: Event, actor: ChatUser, state: Snapshot, key: string, now: number): { result: Result; scope: string[] } | null {
-  if (actor.id !== "basem" || actor.role !== "admin") return null;
   const live = intakeRow(db, key);
   if (!live || live.expires_at <= now) return null;
   const draft = availableDraft(JSON.parse(live.draft_json), state);
@@ -376,7 +393,11 @@ function currentIntakeQuestion(db: DatabaseSync, event: Event, actor: ChatUser, 
 }
 function taskIntake(db: DatabaseSync, event: Event, actor: ChatUser, state: Snapshot, plan: SecretaryIntent,
   key: string, existingDraft: TaskDraft | null, now: number, freeTextField?: SecretaryChoiceField): Result {
-  if (actor.id !== "basem" || actor.role !== "admin") return save(db, event, actor, { status: "denied", reply: "إنشاء المهام وتعيينها من صلاحيات باسم فقط. أقدر أساعدك بتحديث مهامك الحالية." }, [], now);
+  const isAdmin = actor.id === "basem" && actor.role === "admin";
+  // Employees may now open a task too (it goes to Basim for a decision instead
+  // of self-confirming -- see below), but only from a private chat with the
+  // secretary; a group message can't start or continue this.
+  if (!isAdmin && event.groupId !== null) return save(db, event, actor, { status: "denied", reply: "فتح مهمة جديدة لازم يكون من رسالة خاصة معي، مش من الجروب. راسلني عالخاص." }, [], now);
   if (plan.intakeMode !== "start" && (plan.intakeMode !== "continue" || !existingDraft)) {
     db.prepare("DELETE FROM secretary_task_intake WHERE conversation_key=?").run(key);
     clearSecretaryChoices(db, key);
@@ -389,6 +410,9 @@ function taskIntake(db: DatabaseSync, event: Event, actor: ChatUser, state: Snap
       if (proposed[field] === null) Object.assign(proposed, { [field]: existingDraft[field] });
     }
   }
+  // An employee always opens a task for himself -- there is no one else to
+  // assign it to from this flow -- so the owner question never applies to him.
+  if (!isAdmin && proposed.ownerId === null) proposed.ownerId = actor.id;
   const draft = availableDraft(proposed, state);
   clearSecretaryChoices(db, key);
   // Collecting a new proposal never reuses an older task/send confirmation.
@@ -404,13 +428,28 @@ function taskIntake(db: DatabaseSync, event: Event, actor: ChatUser, state: Snap
   }
   const project = state.projects.find(item => item.id === draft.projectId)!;
   const owner = state.users.find(item => item.id === draft.ownerId);
+  db.prepare("DELETE FROM secretary_task_intake WHERE conversation_key=?").run(key);
+  if (!isAdmin) {
+    // Not Basim's decision to make directly -- file it and let him decide,
+    // same pattern as project_create/task_close/ownership requests.
+    try {
+      const request = requestTaskCreate(db, actor, { projectId: draft.projectId!, title: draft.title!, details: draft.details || undefined,
+        priority: draft.priority!, dueDate: draft.dueDate === "unscheduled" ? null : draft.dueDate,
+        ownerId: draft.ownerId === "unassigned" ? null : draft.ownerId }, { now });
+      enqueueAgentMessage(db, { toUser: "basem", text: request.ownerMessage }, now);
+      log(db, actor, event, "secretary_proposal", { summary: "رفع طلب فتح مهمة لباسم", approvalId: request.approval.id, confirmationRequired: false }, now);
+      return save(db, event, actor, { status: "applied", reply: `📨 رفعت طلبك لباسم: ${request.approval.summary}\nبخبرك أول ما يقرر.` }, scope, now);
+    } catch (error) {
+      if (!(error instanceof ManagementActionError)) throw error;
+      return save(db, event, actor, { status: "clarify", reply: error.message }, scope, now);
+    }
+  }
   const token = "T" + randomBytes(3).toString("hex").toUpperCase();
   const command = { action: "add_task", projectId: draft.projectId, title: draft.title, ...(draft.details ? { details: draft.details } : {}),
     ownerId: draft.ownerId === "unassigned" ? null : draft.ownerId, priority: draft.priority,
     dueDate: draft.dueDate === "unscheduled" ? null : draft.dueDate, expectedProjectUpdatedAt: project.updatedAt ?? null, expectedProjectStatus: "active" };
   const reply = `للتأكيد قبل إنشاء المهمة:\nالمشروع: ${clean(project.name, 240)}\nالمهمة: ${draft.title}${draft.details ? `\nالمطلوب: ${draft.details}` : ""}\nالمسؤول: ${owner ? clean(owner.name, 200) : "بدون مسؤول حاليًا"}\nالأولوية: ${PRIORITIES[draft.priority!].icon} ${PRIORITIES[draft.priority!].label}\nالموعد: ${draft.dueDate === "unscheduled" ? "بدون موعد" : draft.dueDate}\nالحالة عند الإنشاء: مفتوحة بانتظار الاستلام.\n\nلم أنشئ المهمة بعد. اكتب «موافق ${token}» أو رد مباشرة بالموافقة على هذه المعاينة؛ وللتراجع اكتب «إلغاء». التأكيد صالح 10 دقائق.`;
   if (reply.length > 3700) return save(db, event, actor, { status: "clarify", reply: "تفاصيل المهمة طويلة للمعاينة الكاملة. اختصر التفاصيل حتى أعرضها كلها قبل التأكيد." }, scope, now);
-  db.prepare("DELETE FROM secretary_task_intake WHERE conversation_key=?").run(key);
   db.prepare("INSERT INTO secretary_pending VALUES(?,?,?,?,?,?,?)").run(key, token, JSON.stringify(command), fingerprint(state), event.text, event.messageId, now + CONFIRM_MS);
   log(db, actor, event, "secretary_proposal", { summary: "عرض إنشاء مهمة بعد استكمال بياناتها", proposedCommand: command, confirmationRequired: true }, now);
   return save(db, event, actor, { status: "confirmation", reply }, scope, now);
@@ -598,7 +637,7 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
     canMessageTeam, messageRecipients: canMessageTeam ? getSecretaryOutboxRecipients(db, config).map(user => ({ id: user.userId, name: user.name })) : [],
     pendingMessagePreview: pendingCommand?.action === "message_team" && typeof pendingCommand.text === "string" && Array.isArray(pendingCommand.recipientIds) ? { text: pendingCommand.text, recipientIds: pendingCommand.recipientIds } : null,
     tasks: initial.tasks.map(t => ({ id: t.id, title: t.title, projectId: t.projectId, status: t.status, priority: t.priority })),
-    projects: initial.projects.map(p => ({ id: p.id, name: p.name, status: p.status })), users: initial.users.filter(u => u.active === 1).map(u => ({ id: u.id, name: u.name })), history, now: new Date(now).toISOString(),
+    projects: withCreatableProjects(initial, actor, db).projects.map(p => ({ id: p.id, name: p.name, status: p.status })), users: initial.users.filter(u => u.active === 1).map(u => ({ id: u.id, name: u.name })), history, now: new Date(now).toISOString(),
     ownershipCandidates: review ? [] : ownershipCandidates(initial, now),
     pendingApprovals: safeApprovals(db, actor), rules: safeRules(db),
     personalContext: actor.id === "basem" && actor.role === "admin" && event.groupId === null ? personalMemory(db, actor.id) : [],
@@ -668,7 +707,7 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
       question: review.question, answer: review.previousAnswer, now,
       scope: [...initial.tasks.map(t => "t:" + t.id), ...initial.projects.map(p => "p:" + p.id)] });
     rememberPendingPreview(db, event, key, db.prepare("SELECT * FROM secretary_pending WHERE conversation_key=?").get(key) as Pending | undefined);
-    if (plan.kind === "task_draft") return taskIntake(db, event, freshActor, state, plan, key, taskDraft, now);
+    if (plan.kind === "task_draft") return taskIntake(db, event, freshActor, withCreatableProjects(state, freshActor, db), plan, key, taskDraft, now);
     // Only an explicit task_draft plan may continue intake; unrelated subjects cannot revive it later.
     if (!review) {
       if (storedIntake) db.prepare("DELETE FROM secretary_task_intake WHERE conversation_key=?").run(key);
@@ -710,6 +749,7 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
         return save(db, event, freshActor, { status: "confirmation", batchId: preview.batchId, reply }, [], now);
       } catch(error) { if (!(error instanceof SecretaryOutboxError)) throw error; return save(db, event, freshActor, { status: "clarify", reply: error.message }, [], now); }
     }
+    if (plan.kind === "project_draft" && event.groupId !== null && !(freshActor.id === "basem" && freshActor.role === "admin")) return save(db, event, freshActor, { status: "denied", reply: "فتح مشروع جديد لازم يكون من رسالة خاصة معي، مش من الجروب. راسلني عالخاص." }, [], now);
     if (AGENT_KINDS.has(plan.kind)) {
       db.prepare("DELETE FROM secretary_pending WHERE conversation_key=?").run(key);
       const result = handleAgentIntent(plan, { db, actor: freshActor, now, inputKind: event.inputKind, suppressNotices: event.groupId === null && /(?:لا|ما)\s+(?:تبعت|تبعث|ترسل)|بدون\s+(?:رسائل|إشعارات|اشعارات)/u.test(event.text), users: state.users, tasks: state.tasks, projects: state.projects,

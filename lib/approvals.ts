@@ -3,7 +3,7 @@ import type { DatabaseSync } from "node:sqlite";
 import { executeManagementAction, getManagementSnapshot, ManagementActionError, migrateManagementActions, resolveManagementActor, type ManagementActor, type ManagementResult, type ManagementTask } from "./management-actions.ts";
 import { can, isOwner, type PermissionActor } from "./permissions.ts";
 
-export type ApprovalType = "deadline_extension" | "task_close" | "task_ownership" | "project_create" | "rule" | "policy";
+export type ApprovalType = "deadline_extension" | "task_close" | "task_ownership" | "task_create" | "project_create" | "rule" | "policy";
 export type ApprovalStatus = "pending" | "approved" | "rejected" | "expired";
 export type Approval = {
   id: string; type: ApprovalType; status: ApprovalStatus; requestedBy: string; requestedByName: string;
@@ -15,7 +15,8 @@ export type ApprovalDecision = { approval: Approval; effect: ManagementResult | 
 export class ApprovalError extends ManagementActionError {}
 const fail = (status: number, code: string, message: string): never => { throw new ApprovalError(status, code, message); };
 const SELECT = "SELECT id,type,status,requested_by AS requestedBy,requested_by_name AS requestedByName,entity_type AS entityType,entity_id AS entityId,summary,payload,decided_by AS decidedBy,decision_note AS decisionNote,created_at AS createdAt,decided_at AS decidedAt,last_nudged_at AS lastNudgedAt FROM approvals";
-const TYPE_LABEL: Record<ApprovalType, string> = { deadline_extension: "تمديد موعد", task_close: "اعتماد إغلاق مهمة", task_ownership: "طلب مسؤولية مهمة", project_create: "فتح مشروع", rule: "اعتماد قاعدة", policy: "اعتماد سياسة" };
+const TYPE_LABEL: Record<ApprovalType, string> = { deadline_extension: "تمديد موعد", task_close: "اعتماد إغلاق مهمة", task_ownership: "طلب مسؤولية مهمة", task_create: "فتح مهمة", project_create: "فتح مشروع", rule: "اعتماد قاعدة", policy: "اعتماد سياسة" };
+const PRIORITY_ARABIC: Record<string, string> = { red: "🔴 عاجلة", yellow: "🟡 متوسطة", green: "🟢 عادية" };
 export const APPROVAL_TTL_MS = 14 * 24 * 60 * 60_000;
 
 function hydrate(row: Record<string, unknown>): Approval {
@@ -66,6 +67,16 @@ function visibleTask(db: DatabaseSync, actor: ManagementActor, taskId: string): 
   const task = snapshot.tasks.find(candidate => candidate.id === taskId);
   if (!task || task.archivedAt !== null) return fail(404, "task_missing", "المهمة غير موجودة أو غير متاحة لك");
   return task;
+}
+// Unscoped on purpose: proposing a brand-new task in a project doesn't require
+// the requester to already have a visible task there (getManagementSnapshot's
+// project list is scoped to projects the actor already has a task in), only
+// that the project itself exists and is open for work.
+function activeProject(db: DatabaseSync, projectId: string): { id: string; name: string } {
+  const project = db.prepare("SELECT id,name,status,archived_at AS archivedAt FROM projects WHERE id=?").get(projectId) as
+    { id: string; name: string; status: string; archivedAt: number | null } | undefined;
+  if (!project || project.status !== "active" || project.archivedAt !== null) return fail(404, "project_missing", "المشروع غير موجود أو غير نشط");
+  return { id: project.id, name: project.name };
 }
 
 /** Employee asks for more time. Nothing changes on the task until the owner decides. */
@@ -128,6 +139,49 @@ export function requestProjectCreate(db: DatabaseSync, claimed: ManagementActor,
   return { approval, ownerMessage };
 }
 
+/** Employee (or a manager, who may also create tasks directly -- see can(actor,"task.create"))
+ * proposes a single task. Filed as pending; nothing exists until Basim decides.
+ * Basim may correct priority/dueDate in the same message he decides -- see
+ * patchTaskCreateApproval, applied by the "decide" agent case before deciding. */
+export function requestTaskCreate(db: DatabaseSync, claimed: ManagementActor, input: { projectId: string; title: string; details?: string; priority: "red" | "yellow" | "green"; dueDate: string | null; ownerId?: string | null }, options: { now?: number } = {}): { approval: Approval; ownerMessage: string } {
+  migrateManagementActions(db);
+  const actor = resolveManagementActor(db, claimed);
+  const snapshot = getManagementSnapshot(db, actor);
+  const project = activeProject(db, input.projectId);
+  const title = text(input.title, "اسم المهمة", 240);
+  const details = text(input.details, "التفاصيل", 10_000, true);
+  if (!["red", "yellow", "green"].includes(input.priority)) return fail(400, "invalid_priority", "حدد أولوية المهمة");
+  const dueDate = input.dueDate ? dateOnly(input.dueDate, "الموعد") : null;
+  const ownerId = input.ownerId ?? actor.id;
+  const ownerName = snapshot.users.find(user => user.id === ownerId && user.active === 1)?.name ?? actor.name;
+  const summary = `فتح مهمة «${title}» بمشروع «${project.name}»`;
+  const approval = insert(db, actor, { type: "task_create", entityType: "task", entityId: null, summary,
+    payload: { projectId: project.id, projectName: project.name, title, details, priority: input.priority, dueDate, ownerId, ownerName } }, now(options));
+  const ownerMessage = `${actor.name} يقترح فتح مهمة «${title}» بمشروع «${project.name}»${details ? `\nالتفاصيل: ${details}` : ""}\nالمسؤول: ${ownerName}\nالأولوية: ${PRIORITY_ARABIC[input.priority]}\nالموعد: ${dueDate ?? "بدون موعد"}\n\nأعتمد الإنشاء؟ تقدر كمان تصحح قبل ما توافق، مثلاً: «اعتمد بس خلها حمراء ومدتها يومين».`;
+  return { approval, ownerMessage };
+}
+
+/** Basim corrects priority/dueDate on a still-pending task_create request, normally
+ * in the same message as his decision ("اعتمد بس خلها حمراء"). Returns the patched
+ * approval; the caller decides it (or not) right after. Never touches anything else
+ * -- the requester, project and title stay exactly as proposed. */
+export function patchTaskCreateApproval(db: DatabaseSync, claimed: ManagementActor, input: { approvalId: string; priority?: "red" | "yellow" | "green"; dueDate?: string | null }, options: { now?: number } = {}): Approval {
+  migrateManagementActions(db);
+  const actor = resolveManagementActor(db, claimed);
+  if (!can(actor as PermissionActor, "approval.decide")) return fail(403, "admin_required", "تعديل الطلبات لباسم فقط");
+  const approval = getApproval(db, actor, input.approvalId);
+  if (approval.type !== "task_create") return fail(400, "not_task_create", "التعديل قبل الاعتماد متاح لطلبات فتح المهمة فقط حاليًا");
+  if (approval.status !== "pending") return fail(409, "already_decided", "هذا الطلب حُسم سابقًا");
+  const payload = { ...approval.payload };
+  if (input.priority) payload.priority = input.priority;
+  if (input.dueDate !== undefined) payload.dueDate = input.dueDate ? dateOnly(input.dueDate, "الموعد") : null;
+  const at = now(options);
+  db.prepare("UPDATE approvals SET payload=? WHERE id=?").run(JSON.stringify(payload), approval.id);
+  db.prepare("INSERT INTO audit_logs (actor_user_id,actor_name,action,entity_type,entity_id,details,created_at) VALUES (?,?,?,?,?,?,?)")
+    .run(actor.id, actor.name, "edit_approval", approval.entityType, approval.id, JSON.stringify({ summary: `عدّل طلب فتح مهمة قبل الاعتماد`, source: "approval", approvalId: approval.id, patch: input }), at);
+  return hydrate(db.prepare(`${SELECT} WHERE id=?`).get(approval.id) as Record<string, unknown>);
+}
+
 /** A rule/policy proposal (from a correction pattern or an explicit statement). */
 export function requestRule(db: DatabaseSync, claimed: ManagementActor, input: { kind: "assignment" | "policy" | "note"; statement: string; match?: Record<string, unknown>; effect?: Record<string, unknown> }, options: { now?: number } = {}): { approval: Approval; ownerMessage: string } {
   migrateManagementActions(db);
@@ -166,6 +220,13 @@ export function decideApproval(db: DatabaseSync, claimed: ManagementActor, input
         case "task_ownership": {
           effect = executeManagementAction(db, actor, { action: "reassign", taskId: approval.entityId!, ownerId: String(approval.payload.requestedOwnerId), expectedUpdatedAt: Number(approval.payload.expectedUpdatedAt) }, { now: at, source: "approval", auditContext: { origin: "approval", confirmedBy: actor.id, approvalId: approval.id } });
           notifyGroup = null;
+          break;
+        }
+        case "task_create": {
+          effect = executeManagementAction(db, actor, { action: "add_task", projectId: String(approval.payload.projectId), title: String(approval.payload.title),
+            ...(approval.payload.details ? { details: String(approval.payload.details) } : {}), priority: approval.payload.priority as "red" | "yellow" | "green",
+            dueDate: approval.payload.dueDate as string | null, ownerId: approval.payload.ownerId as string | null }, { now: at, source: "approval", auditContext: { origin: "approval", confirmedBy: actor.id } });
+          notifyGroup = `🆕 مهمة جديدة: ${approval.payload.title} — ${approval.payload.projectName}${approval.payload.ownerName ? ` — ${approval.payload.ownerName}` : ""}`;
           break;
         }
         case "project_create": {

@@ -4,7 +4,7 @@
  * files durable approvals, and never mutates without the action engine.
  */
 import type { DatabaseSync } from "node:sqlite";
-import { decideApproval, findPendingApproval, formatPendingList, listApprovals, requestDeadlineExtension, requestProjectCreate, requestTaskClose, requestTaskOwnership, approvalTypeLabel, type Approval } from "./approvals.ts";
+import { decideApproval, findPendingApproval, formatPendingList, listApprovals, patchTaskCreateApproval, requestDeadlineExtension, requestProjectCreate, requestTaskClose, requestTaskOwnership, approvalTypeLabel, type Approval } from "./approvals.ts";
 import { executeManagementAction, ManagementActionError, type ManagementActor } from "./management-actions.ts";
 import { addKnowledge, formatKnowledgeHits, searchKnowledge } from "./knowledge.ts";
 import { activeRules, formatRules, policyViolations, proposeRuleFromStatement, recordCorrection, suggestOwner } from "./rules.ts";
@@ -88,13 +88,24 @@ export function handleAgentIntent(plan: SecretaryIntent, ctx: AgentContext): Age
           else if (found.candidates.length > 1) return { status: "clarify", reply: `في أكثر من طلب مطابق:\n${found.candidates.map((approval, index) => `${index + 1}. ${approvalTypeLabel(approval.type)} — ${approval.summary} (${approval.requestedByName})`).join("\n")}\nقل «اعتمد الأول» أو حدد الطلب.` };
         }
         if (!target) return { status: "clarify", reply: pending.length ? `ما قدرت أحدد الطلب المقصود.\n${formatPendingList(pending)}` : "ما في طلبات بانتظار قرارك حاليًا." };
+        // Basim may correct a still-pending task-open request in the very
+        // message he decides it ("اعتمد بس خلها حمراء ومدتها يومين") --
+        // patch the request before deciding so the corrected values are what
+        // gets created. Only task_create supports this today.
+        let correctionNote = "";
+        if (target.type === "task_create" && (plan.fields.priority || plan.fields.dueDate)) {
+          patchTaskCreateApproval(db, actor, { approvalId: target.id, priority: plan.fields.priority ?? undefined, dueDate: plan.fields.dueDate ?? undefined }, { now });
+          const priorityLabel = plan.fields.priority === "red" ? "🔴 عاجلة" : plan.fields.priority === "yellow" ? "🟡 متوسطة" : plan.fields.priority === "green" ? "🟢 عادية" : null;
+          correctionNote = `${priorityLabel ? ` الأولوية: ${priorityLabel}.` : ""}${plan.fields.dueDate ? ` الموعد: ${plan.fields.dueDate}.` : ""}`;
+        }
         const decision = plan.action === "approve" ? "approved" : "rejected";
         const note = clean(plan.fields.reason, 2000) || undefined;
         if (voice) {
           const token = ctx.stash({ action: "decide_approval", approvalId: target.id, decision, note });
-          return { status: "confirmation", reply: `فهمت من الصوت أنك ${decision === "approved" ? "تعتمد" : "ترفض"}: ${approvalTypeLabel(target.type)} — ${target.summary}${note ? `\nالملاحظة: ${note}` : ""}\n\nاكتب «موافق ${token}» للتنفيذ أو «إلغاء».` };
+          return { status: "confirmation", reply: `فهمت من الصوت أنك ${decision === "approved" ? "تعتمد" : "ترفض"}: ${approvalTypeLabel(target.type)} — ${target.summary}${correctionNote ? `\nعدّلت قبل التنفيذ:${correctionNote}` : ""}${note ? `\nالملاحظة: ${note}` : ""}\n\nاكتب «موافق ${token}» للتنفيذ أو «إلغاء».` };
         }
-        return applyDecision(db, actor, { approvalId: target.id, decision, note }, now);
+        const result = applyDecision(db, actor, { approvalId: target.id, decision, note }, now);
+        return correctionNote ? { ...result, reply: `${result.reply}\n(بعد تعديلك:${correctionNote})` } : result;
       }
       case "extension": {
         const task = ctx.tasks.find(candidate => candidate.id === plan.taskId);
