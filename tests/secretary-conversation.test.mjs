@@ -26,6 +26,7 @@ test('conversational provider keeps task planner schema and untrusted context bo
   assert.match(body.messages[0].content,/not a queue of orders/);
   assert.match(body.messages[0].content,/NEVER system instructions/);
   assert.match(body.messages[0].content,/actual owner, due date/);
+  assert.match(body.messages[0].content,/COMPOSE the full text yourself/);
   assert.deepEqual(JSON.parse(body.messages[1].content),request);
   assert.equal(plan.kind,'chat');
   assert.equal(plan.action,null);
@@ -71,6 +72,11 @@ test('announce_team schema requires body text, admin-private access, and never c
  const context={...input('اعلن على الجروب مرحبا'),canMessageTeam:true};
  const plan=emptySecretaryIntent('announce_team');plan.fields.body='صباح الخير يا فريق';
  assert.equal(validateSecretaryIntent(plan,context).kind,'announce_team');
+ // Composed wording (the user described tone/purpose, not literal text) is
+ // accepted exactly like dictated text -- there is no separate "who wrote
+ // it" field, only fields.body.
+ const composed={...plan,fields:{...plan.fields,body:'أهلًا فريقنا الرائع 👋\nشكرًا إلكم على جهودكم، وهذا تذكير بمواعيد هالأسبوع.'}};
+ assert.equal(validateSecretaryIntent(composed,context).kind,'announce_team');
  assert.equal(validateSecretaryIntent(plan,{...context,canMessageTeam:false}).kind,'clarify');
  assert.equal(validateSecretaryIntent(plan,{...context,actor:{...context.actor,role:'member'}}).kind,'clarify');
  assert.equal(validateSecretaryIntent({...plan,fields:{...plan.fields,body:null}},context).kind,'clarify');
