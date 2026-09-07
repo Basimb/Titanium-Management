@@ -587,11 +587,20 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
     : !event.replyToMessageId && (!taskDraft || /مهام|اعط|أعط|وريني|اعرض|اسرد/u.test(event.text)) ? priorityTaskQuery(event.text, input) : null;
   let plan: SecretaryIntent;
   const listText = event.text.normalize("NFKC").replace(/[أإآ]/g, "ا").replace(/[\u064B-\u065F\u0670ـ؟?!.،,]/g, "").replace(/\s+/g, " ").trim();
+  // A numbered list follow-up is often sent as just "12". Resolve it locally
+  // for employees so it never waits on the language model or loses the RTL
+  // context from the preceding list.
+  const bareOwnershipOrdinal = !review && event.groupId === null && actor.id !== "basem" && actor.role !== "admin"
+    && /^[0-9٠-٩۰-۹]{1,3}$/u.test(listText) && input.ownershipCandidates?.length
+    ? Number(listText.replace(/[٠-٩]/g, digit => String(digit.charCodeAt(0) - 0x660)).replace(/[۰-۹]/g, digit => String(digit.charCodeAt(0) - 0x6f0))) : null;
+  const bareOwnershipCandidate = bareOwnershipOrdinal && bareOwnershipOrdinal >= 1 ? input.ownershipCandidates?.[bareOwnershipOrdinal - 1] : undefined;
   const directTaskList = !review && !taskDraft && !event.replyToMessageId
     && /^(?:وريني|اعرض|اعرضلي|اعطيني|شو) المهام(?: المطلوبة| المطلوبه| المتاحة| المتاحه| الموجودة| الموجوده)?(?: كلها| جميعها)?(?: كمان مره| كمان مرة| مرة ثانية| مره ثانيه)?$/.test(listText);
   try {
     plan = priorityQuery ? emptySecretaryIntent(priorityQuery.kind === "clarify" ? "clarify" : "summary", priorityQuery.kind === "clarify" ? priorityQuery.reply : null)
-      : directTaskList ? emptySecretaryIntent("summary") : directCreation ?? validateSecretaryIntent(await dependencies.infer(input), input);
+      : directTaskList ? emptySecretaryIntent("summary")
+        : bareOwnershipCandidate ? { ...emptySecretaryIntent("ownership_request"), taskId: bareOwnershipCandidate.id }
+        : directCreation ?? validateSecretaryIntent(await dependencies.infer(input), input);
   } catch (error) {
     // Only standalone, unqualified read questions may recover from provider failure.
     // Never reinterpret a write, project filter, quoted reply, or active intake.
