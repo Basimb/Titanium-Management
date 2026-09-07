@@ -127,6 +127,23 @@ const PRIORITIES: Record<string, { icon: string; label: string; color: string }>
   yellow: { icon: "🟡", label: "متوسطة", color: "الصفراء" },
   green: { icon: "🟢", label: "عادية", color: "الخضراء" },
 };
+// Keep the ordinal in a left-to-right isolate so WhatsApp/RTL clients never
+// display "12" as "21". The same ordinal is used when resolving "رقم 12".
+export function stableOrdinal(index: number) { return `\u200E${index}\u200E.`; }
+
+function numberedTaskList(tasks: Task[], state: Snapshot, now: number) {
+  let previousProject = "";
+  return tasks.map((task, index) => {
+    const project = state.projects.find(p => p.id === task.projectId);
+    const projectName = project?.name || "مشروع غير محدد";
+    const heading = projectName === previousProject ? "" : `\n🔵 *${clean(projectName, 100).replace(/\*/g, "")}*\n`;
+    previousProject = projectName;
+    const priority = PRIORITIES[task.priority];
+    const overdue = task.status !== "completed" && task.dueDate && task.dueDate < new Date(now + 3 * 3600_000).toISOString().slice(0, 10);
+    const suffix = overdue ? ` • 🔴 متأخرة` : task.dueDate ? ` • الموعد: ${clean(task.dueDate, 10)}` : "";
+    return `${heading}${stableOrdinal(index + 1)} ${priority?.icon || "⚪"} ${clean(task.title, 150).replace(/\*/g, "")} — ${LABELS[task.status] || clean(task.status)} • ${clean(task.owner || task.suggestedOwner || "غير معيّن", 50)}${suffix}`;
+  }).join("\n");
+}
 export function formatSecretaryProjectHeadings(reply: string, state: Pick<Snapshot, "projects" | "tasks">) {
   return reply.split("\n").map(line => {
     const plain = line.replace(/\*/g, "");
@@ -186,6 +203,11 @@ function readReply(plan: SecretaryIntent, actor: ChatUser, state: Snapshot, now:
   const pending = tasks.filter(t => t.status === "approval");
   const header = plan.kind === "report" ? `📋 *ملخص الإدارة*\nالمشاريع: ${state.projects.length}\nمعتمدة: ${tasks.filter(t => t.status === "completed").length}\nقيد التنفيذ: ${tasks.filter(t => t.status === "progress").length}\nبانتظار باسم: ${pending.length}\nمتأخرة بموعد مسجل: ${overdue.length}\nبدون موعد: ${tasks.filter(t => !t.dueDate && t.status !== "completed").length}\n🔴 قصوى: ${tasks.filter(t => t.priority === "red").length} • 🟡 متوسطة: ${tasks.filter(t => t.priority === "yellow").length} • 🟢 عادية: ${tasks.filter(t => t.priority === "green").length}\n` : `${greeting}المهام المتاحة إلك: ${tasks.length}\n`;
   const ordered = [...tasks].sort((a, b) => Number(overdue.includes(b)) - Number(overdue.includes(a)) || Number(pending.includes(b)) - Number(pending.includes(a)));
+  if (plan.kind === "summary") {
+    const list = numberedTaskList(ordered, state, now);
+    const reply = `${header.trimEnd()}${list ? `\n${list}` : "\nما في مهام متاحة إلك حاليًا."}\n\nتم عرض جميع المهام (${ordered.length}).\nاختار رقم المهمة كما هو مكتوب، مثل: «رقم 12».`;
+    return { result: { status: "summary", reply: reply.slice(0, 3750) }, scope: ordered.map(t => "t:" + t.id) };
+  }
   let body = "", shown = 0;
   const groups = new Map<string, Task[]>();
   for (const task of ordered) { const group = groups.get(task.projectId) || []; group.push(task); groups.set(task.projectId, group); }

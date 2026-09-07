@@ -32,7 +32,7 @@ export type SecretaryModelInput = {
   learningMemory?: Array<{ question: string; disputedAnswer: string; guidance: string; recordedAt: number }>;
   knowledgeContext?: Array<{ title: string; snippet: string }>;
   personalContext?: Array<{ topic: string; body: string }>;
-  ownershipCandidates?: Array<{ id: string; title: string; projectName: string; status: string; assignee: string | null }>;
+  ownershipCandidates?: Array<{ id: string; title: string; projectName: string; status: string; assignee: string | null; number?: number }>;
 };
 const KINDS = ["summary", "details", "projects", "report", "help", "chat", "search", "remind", "command", "clarify", "message_team", "message_status", "task_draft",
   "approvals", "decide", "extension", "close_request", "ownership_request", "rule", "correction", "knowledge", "project_draft"];
@@ -149,7 +149,7 @@ export function validateSecretaryIntent(value: unknown, input: SecretaryModelInp
     || !(value.action === null || SECRETARY_ACTIONS.includes(value.action as never)) || !object(value.fields) || !keys(value.fields, FIELD_NAMES)) throw new Error("Invalid secretary plan.");
   for (const [name, val] of Object.entries(value.fields)) if (!(val === null || (typeof val === "string" && val.length <= (name === "body" || name === "details" ? 2000 : 240)))) throw new Error("Invalid secretary fields.");
   for (const name of ["taskId", "projectId", "message"]) if (!(value[name] === null || (typeof value[name] === "string" && value[name].length <= (name === "message" ? 1400 : 100)))) throw new Error("Invalid secretary plan.");
-  const plan = value as unknown as SecretaryIntent;
+  let plan = value as unknown as SecretaryIntent;
   if (review && (!["chat", "clarify", "help", "details", "summary", "report", "projects", "message_status", "search"].includes(plan.kind)
     || plan.action !== null || plan.intakeMode !== null || !Array.isArray(plan.recipientIds) || plan.recipientIds.length
     || Object.values(plan.fields).some(field => field !== null))) return emptySecretaryIntent("clarify", "أي نقطة في جوابي السابق تحتاج تصحيحًا؟");
@@ -180,6 +180,17 @@ export function validateSecretaryIntent(value: unknown, input: SecretaryModelInp
     } else if (plan.action !== null) throw new Error("Invalid agent plan.");
     if ((plan.kind === "extension" || plan.kind === "close_request") && (plan.taskId === null || !input.tasks.some(t => t.id === plan.taskId))) return emptySecretaryIntent("clarify", "أي مهمة تقصد؟ اذكر اسمها والمشروع.");
     if (plan.kind === "ownership_request" && (input.actor.id === "basem" || input.actor.role === "admin")) return emptySecretaryIntent("clarify", "أنت تقدر تعيّن المسؤول مباشرة. اذكر المهمة واسم الموظف.");
+    // WhatsApp renders Arabic right-to-left text around bare numbers inconsistently.
+    // When an employee explicitly says "رقم 12", resolve that number against the
+    // server-issued candidate list instead of trusting the model's interpretation.
+    if (plan.kind === "ownership_request" && input.ownershipCandidates?.length) {
+      const match = /(?:رقم|المهمة)\s*[:#-]?\s*([0-9٠-٩۰-۹]{1,3})/u.exec(input.text);
+      if (match) {
+        const ordinal = Number(match[1].normalize("NFKC").replace(/[٠-٩]/g, digit => String(digit.charCodeAt(0) - 0x660)).replace(/[۰-۹]/g, digit => String(digit.charCodeAt(0) - 0x6f0)));
+        const candidate = Number.isInteger(ordinal) && ordinal >= 1 ? input.ownershipCandidates[ordinal - 1] : undefined;
+        if (candidate) plan = { ...plan, taskId: candidate.id };
+      }
+    }
     if (plan.kind === "ownership_request" && (plan.taskId === null || !input.ownershipCandidates?.some(t => t.id === plan.taskId))) return emptySecretaryIntent("clarify", "أي مهمة بدك تستلم مسؤوليتها؟ اذكر اسم المهمة والمشروع.");
     if (plan.kind === "extension" && !plan.fields.dueDate) return emptySecretaryIntent("clarify", "لأي تاريخ بدك التمديد؟ اكتب اليوم أو التاريخ والسبب.");
     if (plan.kind === "rule" && (!plan.fields.body?.trim() || (input.actor.id !== "basem"))) return emptySecretaryIntent("clarify", "القواعد الدائمة يعتمدها باسم. اكتب نص القاعدة بوضوح.");
@@ -256,7 +267,7 @@ function plannerPrompt(input: SecretaryModelInput) {
 function plannerContext(input: SecretaryModelInput) {
   let length = 0; const history = [];
   for (const turn of [...input.history].reverse()) { if (length + turn.content.length > 2400) break; history.unshift(turn); length += turn.content.length; }
-  return { ...input, history };
+  return { ...input, ownershipCandidates: input.ownershipCandidates?.map((candidate, index) => ({ ...candidate, number: index + 1 })), history };
 }
 async function jsonResponse(response: Response) {
   if (!response.body) throw new SecretaryProviderError("empty_response", 60);

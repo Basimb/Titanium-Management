@@ -175,7 +175,7 @@ function safeTitle(value: string, length = 160): string {
 function summary(tasks: TeamChatTask[]): string {
   if (!tasks.length) return "ما في مهام متاحة إلك حاليًا.";
   const labels: Record<string, string> = { open: "بانتظار الاستلام", progress: "قيد التنفيذ", approval: "بانتظار باسم", completed: "معتمدة" };
-  const lines = tasks.slice(0, 12).map(task => `• ${safeTitle(task.title, 120)} — ${safeTitle(task.projectName, 70)}: ${labels[task.status] ?? "راجع اللوحة"}`);
+  const lines = tasks.slice(0, 12).map((task, index) => `\u200E${index + 1}\u200E. ${safeTitle(task.title, 120)} — ${safeTitle(task.projectName, 70)}: ${labels[task.status] ?? "راجع اللوحة"}`);
   return `المهام المتاحة إلك (${tasks.length}):\n${lines.join("\n")}${tasks.length > 12 ? "\nبقية المهام موجودة في لوحة الإدارة." : ""}`;
 }
 
