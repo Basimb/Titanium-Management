@@ -127,13 +127,16 @@ const PRIORITIES: Record<string, { icon: string; label: string; color: string }>
   yellow: { icon: "🟡", label: "متوسطة", color: "الصفراء" },
   green: { icon: "🟢", label: "عادية", color: "الخضراء" },
 };
-// Keep the ordinal in a left-to-right isolate so WhatsApp/RTL clients never
-// display "12" as "21". The same ordinal is used when resolving "رقم 12".
+// A leading RLM fixes this RTL line's base direction explicitly; a real
+// directional isolate (not a bare LRM) then protects multi-digit order
+// ("12" never becomes "21") without hijacking that base direction the way
+// a plain strong LTR mark did before -- that bug pushed the whole line,
+// ordinal included, to the wrong (left) side. Bold for visibility.
 // Zero-padded to the list's own digit width so every number takes the same
 // visual space in a plain-text WhatsApp message (WhatsApp has no hanging
 // indent for wrapped lines, so this is a best-effort alignment aid, not a
-// perfect fix \u2014 a long title still wraps back to the bare margin).
-export function stableOrdinal(index: number, total = index) { const width = String(total).length; return `\u200E${String(index).padStart(width, "0")}\u200E.`; }
+// perfect fix -- a long title still wraps back to the bare margin).
+export function stableOrdinal(index: number, total = index) { const width = String(total).length; return `\u200F*\u2066${String(index).padStart(width, "0")}\u2069.*`; }
 
 function numberedTaskList(tasks: Task[], state: Snapshot, now: number) {
   let previousProject = "";
