@@ -77,5 +77,8 @@ test('announce_team schema requires body text, admin-private access, and never c
  assert.equal(validateSecretaryIntent({...plan,fields:{...plan.fields,body:'  '}},context).kind,'clarify');
  assert.equal(validateSecretaryIntent(plan,{...context,text:'اكتب مسودة إعلان للجروب'}).kind,'clarify');
  assert.throws(()=>validateSecretaryIntent({...plan,recipientIds:['employee-one']},context));
- assert.throws(()=>validateSecretaryIntent({...plan,taskId:'t'},context));
+ // A shape violation the authorized model itself produced (e.g. it also set
+ // taskId on a long/confused request) is a benign formatting slip once
+ // authorization already passed -- clarify, not a hard throw.
+ assert.equal(validateSecretaryIntent({...plan,taskId:'t'},context).kind,'clarify');
 });

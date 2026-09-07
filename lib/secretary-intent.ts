@@ -211,8 +211,14 @@ export function validateSecretaryIntent(value: unknown, input: SecretaryModelInp
   if (plan.kind !== "message_team" && plan.recipientIds.length) throw new Error("Unexpected message recipients.");
   if (plan.kind === "message_team" || plan.kind === "message_status") {
     if (!input.canMessageTeam || input.actor.id !== "basem" || input.actor.role !== "admin") return emptySecretaryIntent("clarify", "إرسال رسائل الفريق متاح لباسم من محادثته الخاصة فقط.");
-    if (plan.action !== null || plan.taskId !== null || plan.projectId !== null || plan.message !== null) throw new Error("Invalid team message plan.");
-    if (Object.entries(plan.fields).some(([key,value]) => value !== null && (plan.kind === "message_status" || key !== "body"))) throw new Error("Invalid message fields.");
+    // A well-formed plan never sets these; a model confused by a long/mixed
+    // request (e.g. asked to both compose wording and send it) sometimes does.
+    // That is a benign formatting slip, not a security-relevant one -- the
+    // authorization check above already ran -- so fail back to a plain
+    // clarify instead of a hard provider error the person can't act on.
+    if (plan.action !== null || plan.taskId !== null || plan.projectId !== null || plan.message !== null
+      || Object.entries(plan.fields).some(([key, value]) => value !== null && (plan.kind === "message_status" || key !== "body")))
+      return emptySecretaryIntent("clarify", "اكتب لي النص النهائي الجاهز للإرسال بجملة وحدة، وحدد لمين من الفريق. أنا ما بؤلف الرسالة من عندي، بس بأرسل النص يلي تعطيني ياه بالضبط.");
     if (plan.kind === "message_team") {
       if (!plan.fields.body?.trim() || !plan.recipientIds.length) return emptySecretaryIntent("clarify", "شو نص الرسالة بالضبط، ولمين من الفريق بدك أبعثها على الخاص؟");
       if (isDiscussionOnlyRequest(input.text)) return emptySecretaryIntent("clarify", "بدك مسودة وشرح، ولا إرسال رسالة فعلية للتيم على الخاص؟");
@@ -222,8 +228,12 @@ export function validateSecretaryIntent(value: unknown, input: SecretaryModelInp
   }
   if (plan.kind === "announce_team") {
     if (!input.canMessageTeam || input.actor.id !== "basem" || input.actor.role !== "admin") return emptySecretaryIntent("clarify", "نشر إعلان على جروب الفريق متاح لباسم من محادثته الخاصة فقط.");
-    if (plan.action !== null || plan.taskId !== null || plan.projectId !== null || plan.message !== null) throw new Error("Invalid announce plan.");
-    if (Object.entries(plan.fields).some(([key, value]) => value !== null && key !== "body")) throw new Error("Invalid announce fields.");
+    // Same reasoning as message_team above: a shape violation here is a
+    // confused-but-authorized model output, not an attack -- clarify, don't
+    // throw, so the person gets something they can act on.
+    if (plan.action !== null || plan.taskId !== null || plan.projectId !== null || plan.message !== null
+      || Object.entries(plan.fields).some(([key, value]) => value !== null && key !== "body"))
+      return emptySecretaryIntent("clarify", "اكتب لي النص النهائي الجاهز للنشر بجملة وحدة. أنا ما بؤلف الإعلان من عندي، بس بأنشر النص يلي تعطيني ياه بالضبط.");
     if (!plan.fields.body?.trim()) return emptySecretaryIntent("clarify", "شو نص الإعلان بالضبط يلي بدك تنشره على جروب الفريق؟");
     if (isDiscussionOnlyRequest(input.text)) return emptySecretaryIntent("clarify", "بدك مسودة وشرح، ولا نشر فعلي على جروب الفريق الآن؟");
     return plan;
