@@ -3,7 +3,7 @@ import type { DatabaseSync } from "node:sqlite";
 import { executeManagementAction, getManagementSnapshot, ManagementActionError, migrateManagementActions, resolveManagementActor, type ManagementActor, type ManagementResult, type ManagementTask } from "./management-actions.ts";
 import { can, isOwner, type PermissionActor } from "./permissions.ts";
 
-export type ApprovalType = "deadline_extension" | "task_close" | "project_create" | "rule" | "policy";
+export type ApprovalType = "deadline_extension" | "task_close" | "task_ownership" | "project_create" | "rule" | "policy";
 export type ApprovalStatus = "pending" | "approved" | "rejected" | "expired";
 export type Approval = {
   id: string; type: ApprovalType; status: ApprovalStatus; requestedBy: string; requestedByName: string;
@@ -15,7 +15,7 @@ export type ApprovalDecision = { approval: Approval; effect: ManagementResult | 
 export class ApprovalError extends ManagementActionError {}
 const fail = (status: number, code: string, message: string): never => { throw new ApprovalError(status, code, message); };
 const SELECT = "SELECT id,type,status,requested_by AS requestedBy,requested_by_name AS requestedByName,entity_type AS entityType,entity_id AS entityId,summary,payload,decided_by AS decidedBy,decision_note AS decisionNote,created_at AS createdAt,decided_at AS decidedAt,last_nudged_at AS lastNudgedAt FROM approvals";
-const TYPE_LABEL: Record<ApprovalType, string> = { deadline_extension: "تمديد موعد", task_close: "اعتماد إغلاق مهمة", project_create: "فتح مشروع", rule: "اعتماد قاعدة", policy: "اعتماد سياسة" };
+const TYPE_LABEL: Record<ApprovalType, string> = { deadline_extension: "تمديد موعد", task_close: "اعتماد إغلاق مهمة", task_ownership: "طلب مسؤولية مهمة", project_create: "فتح مشروع", rule: "اعتماد قاعدة", policy: "اعتماد سياسة" };
 export const APPROVAL_TTL_MS = 14 * 24 * 60 * 60_000;
 
 function hydrate(row: Record<string, unknown>): Approval {
@@ -99,6 +99,21 @@ export function requestTaskClose(db: DatabaseSync, claimed: ManagementActor, inp
   return { approval, ownerMessage, effect: effect ?? { ok: true, action: "submit", entityType: "task", entityId: task.id, message: "المهمة بانتظار الاعتماد", deletedObjectKeys: [] } };
 }
 
+/** Employee requests responsibility for an active task; assignment changes only after Basim approves. */
+export function requestTaskOwnership(db: DatabaseSync, claimed: ManagementActor, input: { taskId: string; reason?: string }, options: { now?: number } = {}): { approval: Approval; ownerMessage: string } {
+  migrateManagementActions(db);
+  const actor = resolveManagementActor(db, claimed);
+  if (isOwner(actor as PermissionActor)) return fail(400, "employee_only", "طلب مسؤولية المهمة مخصص للموظفين");
+  const task = db.prepare("SELECT id,title,status,owner,suggested_owner AS suggestedOwner,updated_at AS updatedAt,archived_at AS archivedAt FROM tasks WHERE id=?").get(input.taskId) as { id: string; title: string; status: string; owner: string | null; suggestedOwner: string | null; updatedAt: number; archivedAt: number | null } | undefined;
+  if (!task || task.archivedAt !== null) return fail(404, "task_missing", "المهمة غير موجودة أو مؤرشفة");
+  if (task.status === "completed" || task.status === "approval") return fail(409, "invalid_transition", "المهمة منتهية أو بانتظار الاعتماد");
+  if (task.owner === actor.name || task.suggestedOwner === actor.name) return fail(409, "already_assigned", "المهمة معيّنة لك؛ قل «استلم المهمة» لبدء التنفيذ");
+  const reason = text(input.reason, "سبب الطلب", 1000, true);
+  const summary = `${actor.name} يطلب مسؤولية «${task.title}»`;
+  const approval = insert(db, actor, { type: "task_ownership", entityType: "task", entityId: task.id, summary, payload: { taskTitle: task.title, requestedOwnerId: actor.id, requestedOwnerName: actor.name, previousOwner: task.owner, previousSuggestedOwner: task.suggestedOwner, expectedUpdatedAt: task.updatedAt, reason } }, now(options));
+  return { approval, ownerMessage: `${summary}${task.owner || task.suggestedOwner ? `\nالمسؤول الحالي: ${task.owner || task.suggestedOwner}` : "\nالمهمة غير معيّنة حاليًا"}${reason ? `\nالسبب: ${reason}` : ""}\n\nهل تعتمد نقل المسؤولية له؟` };
+}
+
 /** Manager/employee proposes a project. Created as pending and filed as a request. */
 export function requestProjectCreate(db: DatabaseSync, claimed: ManagementActor, input: { name: string; goal?: string; tasks?: Array<{ title: string; ownerId?: string | null; priority?: "red" | "yellow" | "green"; dueDate?: string | null }> }, options: { now?: number } = {}): { approval: Approval; ownerMessage: string } {
   migrateManagementActions(db);
@@ -148,6 +163,11 @@ export function decideApproval(db: DatabaseSync, claimed: ManagementActor, input
           notifyGroup = `✅ اعتُمد إغلاق مهمة «${approval.payload.taskTitle}» (${approval.requestedByName})`;
           break;
         }
+        case "task_ownership": {
+          effect = executeManagementAction(db, actor, { action: "reassign", taskId: approval.entityId!, ownerId: String(approval.payload.requestedOwnerId), expectedUpdatedAt: Number(approval.payload.expectedUpdatedAt) }, { now: at, source: "approval", auditContext: { origin: "approval", confirmedBy: actor.id, approvalId: approval.id } });
+          notifyGroup = null;
+          break;
+        }
         case "project_create": {
           const created = executeManagementAction(db, actor, { action: "add_project", name: String(approval.payload.name) }, { now: at, source: "approval", auditContext: { origin: "approval", confirmedBy: actor.id } });
           const tasks = Array.isArray(approval.payload.tasks) ? approval.payload.tasks as Array<{ title: string; ownerId: string | null; priority: "red" | "yellow" | "green"; dueDate: string | null }> : [];
@@ -192,6 +212,7 @@ export function findPendingApproval(db: DatabaseSync, claimed: ManagementActor, 
     const lower = normalize(hint.text);
     if (/تمديد|مهله|موعد/.test(lower)) candidates = candidates.filter(approval => approval.type === "deadline_extension");
     else if (/اغلاق|انهاء|خلص/.test(lower)) candidates = candidates.filter(approval => approval.type === "task_close");
+    else if (/مسؤول|مسئول|استلام|استلم/.test(lower)) candidates = candidates.filter(approval => approval.type === "task_ownership");
     else if (/مشروع/.test(lower)) candidates = candidates.filter(approval => approval.type === "project_create");
     else if (/قاعده|سياسه/.test(lower)) candidates = candidates.filter(approval => approval.type === "rule" || approval.type === "policy");
   }

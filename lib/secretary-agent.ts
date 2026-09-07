@@ -4,7 +4,7 @@
  * files durable approvals, and never mutates without the action engine.
  */
 import type { DatabaseSync } from "node:sqlite";
-import { decideApproval, findPendingApproval, formatPendingList, listApprovals, requestDeadlineExtension, requestProjectCreate, requestTaskClose, approvalTypeLabel, type Approval } from "./approvals.ts";
+import { decideApproval, findPendingApproval, formatPendingList, listApprovals, requestDeadlineExtension, requestProjectCreate, requestTaskClose, requestTaskOwnership, approvalTypeLabel, type Approval } from "./approvals.ts";
 import { executeManagementAction, ManagementActionError, type ManagementActor } from "./management-actions.ts";
 import { addKnowledge, formatKnowledgeHits, searchKnowledge } from "./knowledge.ts";
 import { activeRules, formatRules, policyViolations, proposeRuleFromStatement, recordCorrection, suggestOwner } from "./rules.ts";
@@ -118,6 +118,12 @@ export function handleAgentIntent(plan: SecretaryIntent, ctx: AgentContext): Age
         }
         const request = requestTaskClose(db, actor, { taskId: task.id, result }, { now });
         return { status: "applied", reply: `✅ سجّلت النتيجة ورفعت «${clean(task.title)}» لاعتماد باسم. بخبرك بقراره.`, taskId: task.id, notify: [{ userId: "basem", text: request.ownerMessage }], groupNotice: `📤 ${actor.name} أنهى «${clean(task.title)}» وبانتظار اعتماد باسم` };
+      }
+      case "ownership_request": {
+        if (owner) return { status: "clarify", reply: "أنت تقدر تعيّن المسؤول مباشرة. اذكر المهمة واسم الموظف." };
+        if (!plan.taskId) return { status: "clarify", reply: "أي مهمة بدك تستلم مسؤوليتها؟" };
+        const request = requestTaskOwnership(db, actor, { taskId: plan.taskId, reason: clean(plan.fields.reason, 1000) }, { now });
+        return { status: "applied", reply: `📨 رفعت طلبك لباسم: ${request.approval.summary}. ما تغير المسؤول قبل موافقته.`, taskId: plan.taskId, notify: [{ userId: "basem", text: request.ownerMessage }], groupNotice: null };
       }
       case "rule": {
         if (!owner) return { status: "denied", reply: "القواعد الدائمة يعتمدها باسم." };

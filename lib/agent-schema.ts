@@ -19,7 +19,7 @@ export function migrateAgentSchema(sqlite: DatabaseSync): void {
     sqlite.exec(`
       CREATE TABLE IF NOT EXISTS approvals (
         id TEXT PRIMARY KEY NOT NULL,
-        type TEXT NOT NULL,                -- deadline_extension | task_close | project_create | rule | policy
+        type TEXT NOT NULL,                -- deadline_extension | task_close | task_ownership | project_create | rule | policy
         status TEXT DEFAULT 'pending' NOT NULL, -- pending | approved | rejected | expired
         requested_by TEXT NOT NULL,        -- user id
         requested_by_name TEXT NOT NULL,

@@ -550,6 +550,7 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
     pendingMessagePreview: pendingCommand?.action === "message_team" && typeof pendingCommand.text === "string" && Array.isArray(pendingCommand.recipientIds) ? { text: pendingCommand.text, recipientIds: pendingCommand.recipientIds } : null,
     tasks: initial.tasks.map(t => ({ id: t.id, title: t.title, projectId: t.projectId, status: t.status, priority: t.priority })),
     projects: initial.projects.map(p => ({ id: p.id, name: p.name, status: p.status })), users: initial.users.filter(u => u.active === 1).map(u => ({ id: u.id, name: u.name })), history, now: new Date(now).toISOString(),
+    ownershipCandidates: review ? [] : ownershipCandidates(db, actor),
     pendingApprovals: safeApprovals(db, actor), rules: safeRules(db),
     personalContext: actor.id === "basem" && actor.role === "admin" && event.groupId === null ? personalMemory(db, actor.id) : [],
     learningMemory: event.groupId === null ? recallSecretaryMemory(db, { conversation: key, role: actor.role,

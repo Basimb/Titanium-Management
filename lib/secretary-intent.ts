@@ -3,7 +3,7 @@ import { isDiscussionOnlyRequest } from "./secretary-conversation-policy.ts";
 export const SECRETARY_ACTIONS = ["add_project", "edit_project", "approve_project", "reject_project", "restore_project", "archive_project", "delete_project", "add_task", "edit_task", "claim", "cancel_claim", "comment", "submit", "approve", "reject", "reopen", "reassign", "move_task", "archive_task", "restore_task", "delete_task"] as const;
 export type SecretaryIntent = {
   kind: "summary" | "details" | "projects" | "report" | "help" | "chat" | "search" | "remind" | "command" | "clarify" | "message_team" | "message_status" | "task_draft"
-    | "approvals" | "decide" | "extension" | "close_request" | "rule" | "correction" | "knowledge" | "project_draft";
+    | "approvals" | "decide" | "extension" | "close_request" | "ownership_request" | "rule" | "correction" | "knowledge" | "project_draft";
   intakeMode: "start" | "continue" | null;
   action: typeof SECRETARY_ACTIONS[number] | null;
   taskId: string | null; projectId: string | null;
@@ -32,10 +32,11 @@ export type SecretaryModelInput = {
   learningMemory?: Array<{ question: string; disputedAnswer: string; guidance: string; recordedAt: number }>;
   knowledgeContext?: Array<{ title: string; snippet: string }>;
   personalContext?: Array<{ topic: string; body: string }>;
+  ownershipCandidates?: Array<{ id: string; title: string; projectName: string; status: string; assignee: string | null }>;
 };
 const KINDS = ["summary", "details", "projects", "report", "help", "chat", "search", "remind", "command", "clarify", "message_team", "message_status", "task_draft",
-  "approvals", "decide", "extension", "close_request", "rule", "correction", "knowledge", "project_draft"];
-export const AGENT_KINDS = new Set(["approvals", "decide", "extension", "close_request", "rule", "correction", "knowledge", "project_draft"]);
+  "approvals", "decide", "extension", "close_request", "ownership_request", "rule", "correction", "knowledge", "project_draft"];
+export const AGENT_KINDS = new Set(["approvals", "decide", "extension", "close_request", "ownership_request", "rule", "correction", "knowledge", "project_draft"]);
 const FIELD_NAMES = ["title", "name", "details", "priority", "dueDate", "ownerId", "reason", "body", "remindAt"];
 export function emptySecretaryIntent(kind: SecretaryIntent["kind"] = "clarify", message: string | null = null): SecretaryIntent {
   return { kind, intakeMode: null, action: null, taskId: null, projectId: null, recipientIds: [], fields: { title: null, name: null, details: null, priority: null, dueDate: null, ownerId: null, reason: null, body: null, remindAt: null }, message };
@@ -80,6 +81,7 @@ AGENT KINDS (all planning only; the server enforces roles and asks for confirmat
 - decide: ONLY Basim decides a pending request from pendingApprovals: 'اعتمد تمديد خالد', 'ارفض إغلاق مهمة شادي، ناقص نسخة', 'وافق على الأول'. Set action to approve or reject, fields.reason = the note/reason if any, message = a short hint naming the requester/type/ordinal exactly as the user said (e.g. 'تمديد خالد', 'الأول'). Never invent an approval; if pendingApprovals is empty use clarify.
 - extension: the task OWNER asks for more time ('بدي يوم زيادة', 'مد لي لحد الخميس'): taskId, fields.dueDate = requested YYYY-MM-DD, fields.reason. Employees never edit deadlines directly; this files a request to Basim.
 - close_request: the task OWNER says the work is fully finished ('خلصت عقد الإيجار', 'انتهيت'): taskId, fields.details = the result in their words. If the result/proof is unclear ask one question first (clarify). Do not use command submit anymore for employees.
+- ownership_request: an employee asks to take responsibility for a task not assigned to them ('بدي أستلم مهمة اللوحة', 'بدي مسؤولية مهمة رقم 25'). Choose taskId ONLY from ownershipCandidates; fields.reason contains their stated reason or null. This files a request for Basim and never assigns immediately. If a task is already assigned/suggested to this actor, use command claim instead. If a number is used, it is the 1-based position in ownershipCandidates. If ambiguous, clarify with project and task names.
 - rule: Basim states a standing rule ('أي مهمة حكومية لدابوق خليها لخالد', 'ما في مهمة بدون موعد'): fields.body = the rule sentence, fields.ownerId = the employee it assigns to (or null), message = 3-6 comma-separated Arabic keywords that identify the rule scope, fields.reason = 'require_due_date' or 'require_owner' when the rule is a creation policy, otherwise null.
 - correction: Basim corrects an assignment the secretary/team made ('لا، شادي مش أيمن هو المسؤول عن اللوحات'): fields.ownerId = correct employee id, fields.name = wrong employee name if said, message = 2-5 keywords describing the task type. If the user also wants the live task reassigned, the server will ask; do not emit command.
 - knowledge: a question about company procedures, licensing steps, suppliers, forms, or 'كيف نعمل X عندنا' that may exist in the internal knowledge base: message = the standalone question. Also 'سجّل معلومة/احفظ هذي القاعدة المعرفية' from Basim/managers: fields.title and fields.body. Prefer knowledge over search for internal how-to questions.
@@ -177,6 +179,8 @@ export function validateSecretaryIntent(value: unknown, input: SecretaryModelInp
       if (!input.pendingApprovals?.length) return emptySecretaryIntent("clarify", "ما في طلبات بانتظار قرارك حاليًا.");
     } else if (plan.action !== null) throw new Error("Invalid agent plan.");
     if ((plan.kind === "extension" || plan.kind === "close_request") && (plan.taskId === null || !input.tasks.some(t => t.id === plan.taskId))) return emptySecretaryIntent("clarify", "أي مهمة تقصد؟ اذكر اسمها والمشروع.");
+    if (plan.kind === "ownership_request" && (input.actor.id === "basem" || input.actor.role === "admin")) return emptySecretaryIntent("clarify", "أنت تقدر تعيّن المسؤول مباشرة. اذكر المهمة واسم الموظف.");
+    if (plan.kind === "ownership_request" && (plan.taskId === null || !input.ownershipCandidates?.some(t => t.id === plan.taskId))) return emptySecretaryIntent("clarify", "أي مهمة بدك تستلم مسؤوليتها؟ اذكر اسم المهمة والمشروع.");
     if (plan.kind === "extension" && !plan.fields.dueDate) return emptySecretaryIntent("clarify", "لأي تاريخ بدك التمديد؟ اكتب اليوم أو التاريخ والسبب.");
     if (plan.kind === "rule" && (!plan.fields.body?.trim() || (input.actor.id !== "basem"))) return emptySecretaryIntent("clarify", "القواعد الدائمة يعتمدها باسم. اكتب نص القاعدة بوضوح.");
     if (plan.kind === "correction" && input.actor.id !== "basem") return emptySecretaryIntent("clarify", "التصحيحات الدائمة من باسم فقط؛ أقدر أسجّل ملاحظتك كتعليق على المهمة.");
