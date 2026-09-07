@@ -129,7 +129,11 @@ const PRIORITIES: Record<string, { icon: string; label: string; color: string }>
 };
 // Keep the ordinal in a left-to-right isolate so WhatsApp/RTL clients never
 // display "12" as "21". The same ordinal is used when resolving "رقم 12".
-export function stableOrdinal(index: number) { return `\u200E${index}\u200E.`; }
+// Zero-padded to the list's own digit width so every number takes the same
+// visual space in a plain-text WhatsApp message (WhatsApp has no hanging
+// indent for wrapped lines, so this is a best-effort alignment aid, not a
+// perfect fix \u2014 a long title still wraps back to the bare margin).
+export function stableOrdinal(index: number, total = index) { const width = String(total).length; return `\u200E${String(index).padStart(width, "0")}\u200E.`; }
 
 function numberedTaskList(tasks: Task[], state: Snapshot, now: number) {
   let previousProject = "";
@@ -141,7 +145,7 @@ function numberedTaskList(tasks: Task[], state: Snapshot, now: number) {
     const priority = PRIORITIES[task.priority];
     const overdue = task.status !== "completed" && task.dueDate && task.dueDate < new Date(now + 3 * 3600_000).toISOString().slice(0, 10);
     const suffix = overdue ? ` • 🔴 متأخرة` : task.dueDate ? ` • الموعد: ${clean(task.dueDate, 10)}` : "";
-    return `${heading}${stableOrdinal(index + 1)} ${priority?.icon || "⚪"} ${clean(task.title, 150).replace(/\*/g, "")} — ${LABELS[task.status] || clean(task.status)} • ${clean(task.owner || task.suggestedOwner || "غير معيّن", 50)}${suffix}`;
+    return `${heading}${stableOrdinal(index + 1, tasks.length)} ${priority?.icon || "⚪"} ${clean(task.title, 90).replace(/\*/g, "")} — ${LABELS[task.status] || clean(task.status)} • ${clean(task.owner || task.suggestedOwner || "غير معيّن", 50)}${suffix}`;
   }).join("\n");
 }
 export function formatSecretaryProjectHeadings(reply: string, state: Pick<Snapshot, "projects" | "tasks">) {
