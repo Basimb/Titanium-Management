@@ -116,3 +116,4 @@ test('search remains evidence-based: no tool results means no invented verificat
   assert.doesNotMatch(JSON.stringify(seen), /previousQuestion|previousAnswer|تقرير داخلي|موظف اصطناعي/);
   assert.match(answer, /ما قدرت أتحقق/); assert.doesNotMatch(answer, /invented|صححت/);
 });
+

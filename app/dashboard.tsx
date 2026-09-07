@@ -428,3 +428,4 @@ function MonitoringPanel({ monitoring, tasks, projects, now, isAdmin, onDecide }
     </div>
   </section>;
 }
+

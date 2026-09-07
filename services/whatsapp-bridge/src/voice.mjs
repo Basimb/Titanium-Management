@@ -162,3 +162,4 @@ export async function selectVoiceIncoming(message, event, config, identity, now,
   if (!safeVoiceTranscript(text) || !await authorize(incoming.body)) return null;
   return { ...incoming, body: { ...incoming.body, text, inputKind: 'voice' } };
 }
+

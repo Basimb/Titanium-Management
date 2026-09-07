@@ -240,3 +240,4 @@ export async function launchPrivate({ env = process.env, args = process.argv.sli
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
   process.exitCode = await launchPrivate();
 }
+

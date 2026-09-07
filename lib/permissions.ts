@@ -31,7 +31,6 @@ const MEMBER: readonly Capability[] = ["task.claim", "task.update", "task.submit
 export const REQUESTABLE: Record<string, Capability> = {
   deadline_extension: "task.edit",
   task_close: "task.approve",
-  task_ownership: "task.assign",
   project_create: "project.approve",
   rule: "rule.approve",
   policy: "rule.approve",

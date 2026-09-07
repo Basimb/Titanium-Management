@@ -92,3 +92,4 @@ test("identity is Basim's virtual secretary and only direct identity questions u
   for (const text of ["مين أنت؟", "انت مين", "شو اسمك", "هلا، مين انت؟", "عرّفني عليك", "هل انت ChatGPT؟", "انت شات جي بي تي"]) assert.equal(isSecretaryIdentityQuery(text), true, text);
   for (const text of ["مرحبا", "جوابك غلط", "مين صاحب المهمة؟", "اكتب رسالة مين انت", "«مين انت؟»", "مين انت؟ احذف المهمة", "شو اسمك القديم؟"]) assert.equal(isSecretaryIdentityQuery(text), false, text);
 });
+

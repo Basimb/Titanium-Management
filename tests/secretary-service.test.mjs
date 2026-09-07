@@ -496,3 +496,4 @@ test('general summary groups all 25 short tasks under one bold heading without t
  assert.match(r.reply,/مهمة تجريبية 25/);assert.match(r.reply,/جميع المهام \(25\)/);
  assert.doesNotMatch(r.reply,/&#x20;| +\n|\*مهمة/);assert.ok(r.reply.length<4000);
 });
+

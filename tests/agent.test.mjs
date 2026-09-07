@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import { executeManagementAction, getManagementSnapshot, migrateManagementActions, ManagementActionError } from "../lib/management-actions.ts";
-import { decideApproval, findPendingApproval, listApprovals, requestDeadlineExtension, requestProjectCreate, requestTaskClose, requestTaskOwnership, staleApprovals } from "../lib/approvals.ts";
+import { decideApproval, findPendingApproval, listApprovals, requestDeadlineExtension, requestProjectCreate, requestTaskClose, staleApprovals } from "../lib/approvals.ts";
 import { can, capabilities, inScope } from "../lib/permissions.ts";
 import { activeRules, policyViolations, proposeRuleFromStatement, recordCorrection, suggestOwner, CORRECTION_THRESHOLD } from "../lib/rules.ts";
 import { addKnowledge, searchKnowledge } from "../lib/knowledge.ts";
@@ -76,30 +76,6 @@ test("member cannot edit deadlines directly; extension request goes to owner and
   assert.match(decision.notifyRequester, /وافق باسم/); assert.match(decision.notifyGroup, /مُدّد/);
   assert.throws(() => decideApproval(db, owner, { approvalId: approval.id, decision: "rejected" }, { now: T0 + 2 }), /حُسم/);
   assert.ok(db.prepare("SELECT COUNT(*) AS n FROM audit_logs WHERE action IN ('request_approval','approve_request')").get().n >= 2);
-});
-
-test("employee ownership request waits for Basim and assigns only after approval", t => {
-  const db = fixture(t);
-  const { approval, ownerMessage } = requestTaskOwnership(db, khaled, { taskId: "t2", reason: "أقدر أتابع الأوراق" }, { now: T0 });
-  assert.equal(approval.type, "task_ownership");
-  assert.match(ownerMessage, /خالد يطلب مسؤولية/);
-  assert.equal(db.prepare("SELECT owner,suggested_owner FROM tasks WHERE id='t2'").get().suggested_owner, null, "request alone does not assign");
-  assert.throws(() => requestTaskOwnership(db, khaled, { taskId: "t2" }, { now: T0 + 1 }), /مماثل/);
-  const decision = decideApproval(db, owner, { approvalId: approval.id, decision: "approved" }, { now: T0 + 2 });
-  const task = db.prepare("SELECT status,owner,suggested_owner FROM tasks WHERE id='t2'").get();
-  assert.equal(task.status, "open");
-  assert.equal(task.owner, null);
-  assert.equal(task.suggested_owner, "خالد");
-  assert.match(decision.notifyRequester, /وافق باسم/);
-});
-
-test("ownership approval refuses to overwrite a task changed after the request", t => {
-  const db = fixture(t);
-  const { approval } = requestTaskOwnership(db, khaled, { taskId: "t2" }, { now: T0 });
-  db.prepare("UPDATE tasks SET suggested_owner='شادي',updated_at=? WHERE id='t2'").run(T0 + 1);
-  assert.throws(() => decideApproval(db, owner, { approvalId: approval.id, decision: "approved" }, { now: T0 + 2 }), /تغيّرت البيانات/);
-  assert.equal(db.prepare("SELECT status FROM approvals WHERE id=?").get(approval.id).status, "pending");
-  assert.equal(db.prepare("SELECT suggested_owner FROM tasks WHERE id='t2'").get().suggested_owner, "شادي");
 });
 
 test("task close request moves to approval; rejection returns it with the reason", t => {
@@ -239,3 +215,4 @@ test("follow-ups: overdue owner nudge once per day, stale approval to owner, dig
   assert.ok(groupBudgetRemaining(db, at + 60_000) < 12);
   assert.ok(isGroupWorthy("create", "project") && !isGroupWorthy("comment", "task"));
 });
+

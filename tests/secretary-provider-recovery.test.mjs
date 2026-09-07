@@ -28,3 +28,4 @@ test('context budget preserves catalogs and complete pending preview',async()=>{
  assert.deepEqual(sent.tasks,input.tasks);assert.ok(body.messages[0].content.length<21000);
 });
 
+

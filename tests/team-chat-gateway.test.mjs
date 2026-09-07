@@ -273,3 +273,4 @@ test("provider failures expose only safe codes and preserve retry timing", async
     const body=await r.text();assert.doesNotMatch(body,/gsk_|fields|json_validate|stack/);
   }
 });
+

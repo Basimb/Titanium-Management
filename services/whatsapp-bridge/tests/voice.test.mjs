@@ -41,3 +41,4 @@ test('voice selection preserves transport sender and marks every transcript as v
  const value=await selectVoiceIncoming(message,{type:'notify'},config,identity,1000000,999000,deps);assert.equal(value.body.senderNumber,'12025550101');assert.equal(value.body.inputKind,'voice');assert.equal(called,1);
  const denied=await selectVoiceIncoming({...message,key:{...message.key,remoteJid:'12025550888@s.whatsapp.net'}},{type:'notify'},config,identity,1000000,999000,deps);assert.equal(denied,null);assert.equal(called,1);
 });
+

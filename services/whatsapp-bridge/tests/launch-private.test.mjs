@@ -114,6 +114,15 @@ test('shared read-only dashboard config does not disable bridge or leak into chi
   assert.equal(child.DASHBOARD_READONLY, undefined);
 });
 
+test('shared read-only dashboard config does not disable bridge or leak into child environment', () => {
+  const f = fixture({ DASHBOARD_READONLY: '1', SECRETARY_ENABLED: '1' });
+  const config = readPrivateConfig(configFile, f.fs);
+  assert.equal(readOutboxConfig(configFile, f.fs).enabled, true);
+  const child = bridgeChildEnvironment(config, env, false, serviceDirectory);
+  assert.equal(child.TEAM_CHAT_BRIDGE_ENABLED, '1');
+  assert.equal(child.DASHBOARD_READONLY, undefined);
+});
+
 test('outbox policy re-reads remapping, contact flags and disable switches without retaining private settings', () => {
   const current = { ...settings, SECRETARY_ENABLED: '1' };
   const f = fixture({ SECRETARY_ENABLED: '1' });
@@ -284,3 +293,4 @@ test('unsafe marker and invalid settings fail closed without spawning or printin
   assert.equal(g.spawns.length, 0);
   assert.ok(g.reports.every(message => !message.includes('secret-invalid')));
 });
+

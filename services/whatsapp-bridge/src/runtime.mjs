@@ -356,3 +356,4 @@ export function createBridgeRuntime({ config, store, auth, makeWASocket, jidNorm
   }, 1000);
   return { start: startSocket, stop, status: () => ({ ready, stopped, reconnectCount }) };
 }
+

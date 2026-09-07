@@ -83,3 +83,4 @@ export function isSecretaryIdentityQuery(text: string): boolean {
   const value = normalized(unquoted(text)).replace(/^(?:مرحبا|هلا|اهلا|السلام عليكم)[\s،,:]+/u, "").replace(/[.!؟?]+$/u, "").trim();
   return /^(?:مين انت|انت مين|من انت|شو اسمك|ايش اسمك|ما اسمك|اسمك شو|عرفني عليك|عرف عن نفسك|مين السكرتير|شو اسم السكرتير|هل انت (?:شات جي بي تي|chatgpt)|انت (?:شات جي بي تي|chatgpt))$/u.test(value);
 }
+
