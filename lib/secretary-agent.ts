@@ -113,7 +113,13 @@ export function handleAgentIntent(plan: SecretaryIntent, ctx: AgentContext): Age
         const result = clean(plan.fields.details, 4000) || clean(plan.message, 4000);
         if (!result) return { status: "clarify", reply: `شو نتيجة «${clean(task.title)}» بالضبط؟ تم التوقيع/التسليم؟ في ملف أو صورة؟ في شي متبقي؟`, taskId: task.id };
         if (owner) {
-          const token = ctx.stash({ action: "approve", taskId: task.id });
+          if (task.status === "completed") return { status: "clarify", reply: `«${clean(task.title)}» معتمدة خلص.`, taskId: task.id };
+          // "approve" only ever applies to a task already sitting in approval
+          // (an employee submitted it). Basim can also be the task's own
+          // worker now, in which case it's still "progress" -- never
+          // submitted -- so chain submit+approve in one confirmed step
+          // instead of a bare approve that would fail on that precondition.
+          const token = ctx.stash(task.status === "approval" ? { action: "approve", taskId: task.id } : { action: "close_direct", taskId: task.id });
           return { status: "confirmation", reply: `اعتماد إغلاق «${clean(task.title)}».\nاكتب «موافق ${token}» للتنفيذ.`, taskId: task.id };
         }
         const request = requestTaskClose(db, actor, { taskId: task.id, result }, { now });

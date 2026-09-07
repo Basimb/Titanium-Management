@@ -574,6 +574,7 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
         } catch (error) { if (!(error instanceof SecretaryOutboxError)) throw error; return save(db, event, freshActor, { status: "clarify", reply: error.message }, [], now); }
       }
       if (command.action === "schedule_reminder") return reminder(db, event, freshActor, state, command.taskId, command.dueAt, now);
+      if (command.action === "close_direct") return closeDirect(db, event, freshActor, state, String(command.taskId), now, { originalText: live.original_text, sourceMessageId: live.source_message_id, confirmationRequired: true, confirmedBy: freshActor.id, confirmationMessageId: event.messageId });
       if (command.action === "create_project_bundle" || command.action === "decide_approval") {
         try {
           const result = command.action === "create_project_bundle"
@@ -746,6 +747,24 @@ function perform(db: DatabaseSync, event: Event, actor: ChatUser, state: Snapsho
   }
 }
 
+// Basim can now be a task's own worker (see stableOrdinal/ownershipCandidates
+// above), not only its approver. "close_request" stashes this pseudo-action
+// when the task is still "progress" (never submitted) so his one "موافق"
+// both submits and approves it, instead of the bare "approve" action -- which
+// only ever accepts a task already sitting in "approval" -- failing outright.
+function closeDirect(db: DatabaseSync, event: Event, actor: ChatUser, state: Snapshot, taskId: string, now: number, context: Record<string, unknown>): Result {
+  try {
+    const task = state.tasks.find(t => t.id === taskId);
+    if (!task) throw new ManagementActionError(404, "task_missing", "المهمة غير موجودة أو غير متاحة لك");
+    if (task.status === "progress") executeManagementAction(db, actor, { action: "submit", taskId } as ManagementCommand, { now, source: "whatsapp_secretary", auditContext: context });
+    const approved = executeManagementAction(db, actor, { action: "approve", taskId } as ManagementCommand, { now, source: "whatsapp_secretary", auditContext: context });
+    db.prepare("UPDATE secretary_reminders SET responded_at=? WHERE actor_id=? AND task_id=? AND group_id IS ? AND state='sent' AND responded_at IS NULL").run(now, actor.id, taskId, event.groupId);
+    return save(db, event, actor, { status: "applied", reply: `✅ ${approved.message}`, taskId }, ["t:" + taskId], now);
+  } catch (error) {
+    if (!(error instanceof ManagementActionError)) throw error;
+    return save(db, event, actor, { status: "clarify", reply: error.message }, [], now);
+  }
+}
 function safeApprovals(db: DatabaseSync, actor: ChatUser) {
   try { return listApprovals(db, actor, { status: "pending", limit: 20 }).map(a => ({ id: a.id, type: a.type, summary: a.summary, requestedBy: a.requestedByName })); } catch { return []; }
 }
