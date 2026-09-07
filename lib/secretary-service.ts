@@ -58,11 +58,26 @@ function actorFor(db: DatabaseSync, event: Event, config: TeamChatConfig) {
   return resolveChatUser({ senderNumber: event.senderNumber, groupId: event.groupId }, config.contacts, db.prepare("SELECT id,name,role,active FROM users").all() as ChatUser[], config.allowedGroupIds);
 }
 function stateFor(db: DatabaseSync, actor: ChatUser): Snapshot { return getManagementSnapshot(db, actor) as unknown as Snapshot; }
-function ownershipCandidates(db: DatabaseSync, actor: ChatUser): NonNullable<SecretaryModelInput["ownershipCandidates"]> {
-  if (actor.id === "basem" || actor.role === "admin") return [];
-  const projects = new Map((db.prepare("SELECT id,name FROM projects WHERE archived_at IS NULL").all() as Array<{ id: string; name: string }>).map(p => [p.id, p.name]));
-  return (db.prepare("SELECT id,title,project_id AS projectId,status,owner,suggested_owner AS suggestedOwner FROM tasks WHERE archived_at IS NULL AND status NOT IN ('completed','approval') ORDER BY created_at,id").all() as Array<{ id: string; title: string; projectId: string; status: string; owner: string | null; suggestedOwner: string | null }>)
-    .slice(0, 80).map(task => ({ id: task.id, title: task.title, projectName: projects.get(task.projectId) || "مشروع غير محدد", status: task.status, assignee: task.owner || task.suggestedOwner }));
+// Same base filter + overdue/pending-first ordering as the displayed task
+// list (readReply's "ordered" array) so a task's position number is always
+// identical wherever it's shown -- the list a user sees and the list any
+// number they type is resolved against must never diverge.
+function orderedTasks(state: Snapshot, now: number): Task[] {
+  const tasks = state.tasks.filter(t => !t.archivedAt);
+  const today = new Date(now + 3 * 3600_000).toISOString().slice(0, 10);
+  const overdue = tasks.filter(t => t.status !== "completed" && t.dueDate && t.dueDate < today);
+  const pending = tasks.filter(t => t.status === "approval");
+  return [...tasks].sort((a, b) => Number(overdue.includes(b)) - Number(overdue.includes(a)) || Number(pending.includes(b)) - Number(pending.includes(a)));
+}
+// Available to every actor, admin included, so "task N" can be resolved
+// locally against the exact numbered list that was displayed -- completed/
+// approval-status tasks stay in (for positional parity with the display)
+// but keep their real status so callers can reject taking those cleanly.
+function ownershipCandidates(state: Snapshot, now: number): NonNullable<SecretaryModelInput["ownershipCandidates"]> {
+  return orderedTasks(state, now).slice(0, 80).map(task => {
+    const project = state.projects.find(p => p.id === task.projectId);
+    return { id: task.id, title: task.title, projectName: project?.name || "مشروع غير محدد", status: task.status, assignee: task.owner || task.suggestedOwner };
+  });
 }
 function fingerprint(state: Snapshot) { return hash({ tasks: state.tasks, projects: state.projects, users: state.users.map(u => ({ id: u.id, name: u.name, role: u.role, active: u.active })), comments: state.comments }); }
 function scopeAllowed(scope: string[], state: Snapshot) { const ids = new Set([...state.tasks.map(t => "t:" + t.id), ...state.projects.map(p => "p:" + p.id)]); return scope.every(id => ids.has(id)); }
@@ -209,7 +224,7 @@ function readReply(plan: SecretaryIntent, actor: ChatUser, state: Snapshot, now:
   const overdue = tasks.filter(t => t.status !== "completed" && t.dueDate && t.dueDate < today);
   const pending = tasks.filter(t => t.status === "approval");
   const header = plan.kind === "report" ? `📋 *ملخص الإدارة*\nالمشاريع: ${state.projects.length}\nمعتمدة: ${tasks.filter(t => t.status === "completed").length}\nقيد التنفيذ: ${tasks.filter(t => t.status === "progress").length}\nبانتظار باسم: ${pending.length}\nمتأخرة بموعد مسجل: ${overdue.length}\nبدون موعد: ${tasks.filter(t => !t.dueDate && t.status !== "completed").length}\n🔴 قصوى: ${tasks.filter(t => t.priority === "red").length} • 🟡 متوسطة: ${tasks.filter(t => t.priority === "yellow").length} • 🟢 عادية: ${tasks.filter(t => t.priority === "green").length}\n` : `${greeting}المهام المتاحة إلك: ${tasks.length}\n`;
-  const ordered = [...tasks].sort((a, b) => Number(overdue.includes(b)) - Number(overdue.includes(a)) || Number(pending.includes(b)) - Number(pending.includes(a)));
+  const ordered = orderedTasks(state, now);
   if (plan.kind === "summary") {
     const list = numberedTaskList(ordered, state, now);
     const reply = `${header.trimEnd()}${list ? `\n${list}` : "\nما في مهام متاحة إلك حاليًا."}\n\nتم عرض جميع المهام (${ordered.length}).\nاختار رقم المهمة كما هو مكتوب، مثل: «رقم 12».`;
@@ -579,7 +594,7 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
     pendingMessagePreview: pendingCommand?.action === "message_team" && typeof pendingCommand.text === "string" && Array.isArray(pendingCommand.recipientIds) ? { text: pendingCommand.text, recipientIds: pendingCommand.recipientIds } : null,
     tasks: initial.tasks.map(t => ({ id: t.id, title: t.title, projectId: t.projectId, status: t.status, priority: t.priority })),
     projects: initial.projects.map(p => ({ id: p.id, name: p.name, status: p.status })), users: initial.users.filter(u => u.active === 1).map(u => ({ id: u.id, name: u.name })), history, now: new Date(now).toISOString(),
-    ownershipCandidates: review ? [] : ownershipCandidates(db, actor),
+    ownershipCandidates: review ? [] : ownershipCandidates(initial, now),
     pendingApprovals: safeApprovals(db, actor), rules: safeRules(db),
     personalContext: actor.id === "basem" && actor.role === "admin" && event.groupId === null ? personalMemory(db, actor.id) : [],
     learningMemory: event.groupId === null ? recallSecretaryMemory(db, { conversation: key, role: actor.role,

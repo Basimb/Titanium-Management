@@ -155,6 +155,26 @@ export function validateSecretaryIntent(value: unknown, input: SecretaryModelInp
   if (review && (!["chat", "clarify", "help", "details", "summary", "report", "projects", "message_status", "search"].includes(plan.kind)
     || plan.action !== null || plan.intakeMode !== null || !Array.isArray(plan.recipientIds) || plan.recipientIds.length
     || Object.values(plan.fields).some(field => field !== null))) return emptySecretaryIntent("clarify", "أي نقطة في جوابي السابق تحتاج تصحيحًا؟");
+  // Basim has no ownership_request path below (he assigns directly), but the
+  // model still cannot safely resolve a bare list number to a real task id --
+  // no positional guess from list order is ever trusted from the model,
+  // admin included. Resolve "خذلي/استلم مهمة رقم N" locally against the
+  // exact numbered list he was just shown, then hand back a direct
+  // reassign-to-self command; it still flows through the normal command
+  // checks below, including the SENSITIVE "reassign" confirmation step.
+  if (!review && (input.actor.id === "basem" || input.actor.role === "admin") && input.ownershipCandidates?.length
+    && /(?:اخذ|أخذ|اخد|أخد|استلم|خذلي|خذها|احمل)/u.test(normalizedArabic(input.text))) {
+    const match = /(?:رقم|مهم[ةه])\s*[:#-]?\s*([0-9٠-٩۰-۹]{1,3})/u.exec(input.text);
+    if (match) {
+      const ordinal = Number(match[1].normalize("NFKC").replace(/[٠-٩]/g, digit => String(digit.charCodeAt(0) - 0x660)).replace(/[۰-۹]/g, digit => String(digit.charCodeAt(0) - 0x6f0)));
+      const candidate = Number.isInteger(ordinal) && ordinal >= 1 ? input.ownershipCandidates[ordinal - 1] : undefined;
+      if (!candidate) return emptySecretaryIntent("clarify", "ما لقيت مهمة بهذا الرقم بالقائمة الحالية. اطلب القائمة من جديد وجرب رقمها.");
+      if (candidate.status === "completed") return emptySecretaryIntent("clarify", "هاي المهمة معتمدة خلص، ما بينفع تاخدها من جديد.");
+      if (candidate.status === "approval") return emptySecretaryIntent("clarify", "هاي المهمة بانتظار اعتمادك حاليًا، خلص القرار عليها الأول.");
+      const base = emptySecretaryIntent("command");
+      plan = { ...base, action: "reassign", taskId: candidate.id, fields: { ...base.fields, ownerId: "basem" } };
+    }
+  }
   if (![null, "start", "continue"].includes(plan.intakeMode)) throw new Error("Invalid task intake mode.");
   const creation = plan.kind === "task_draft" || (plan.kind === "command" && plan.action === "add_task");
   if (!creation && plan.intakeMode !== null) throw new Error("Unexpected task intake mode.");
@@ -186,7 +206,7 @@ export function validateSecretaryIntent(value: unknown, input: SecretaryModelInp
     // When an employee explicitly says "رقم 12", resolve that number against the
     // server-issued candidate list instead of trusting the model's interpretation.
     if (plan.kind === "ownership_request" && input.ownershipCandidates?.length) {
-      const match = /(?:رقم|المهمة)\s*[:#-]?\s*([0-9٠-٩۰-۹]{1,3})/u.exec(input.text);
+      const match = /(?:رقم|مهم[ةه])\s*[:#-]?\s*([0-9٠-٩۰-۹]{1,3})/u.exec(input.text);
       if (match) {
         const ordinal = Number(match[1].normalize("NFKC").replace(/[٠-٩]/g, digit => String(digit.charCodeAt(0) - 0x660)).replace(/[۰-۹]/g, digit => String(digit.charCodeAt(0) - 0x6f0)));
         const candidate = Number.isInteger(ordinal) && ordinal >= 1 ? input.ownershipCandidates[ordinal - 1] : undefined;
@@ -194,6 +214,11 @@ export function validateSecretaryIntent(value: unknown, input: SecretaryModelInp
       }
     }
     if (plan.kind === "ownership_request" && (plan.taskId === null || !input.ownershipCandidates?.some(t => t.id === plan.taskId))) return emptySecretaryIntent("clarify", "أي مهمة بدك تستلم مسؤوليتها؟ اذكر اسم المهمة والمشروع.");
+    if (plan.kind === "ownership_request") {
+      const chosen = input.ownershipCandidates?.find(t => t.id === plan.taskId);
+      if (chosen?.status === "completed") return emptySecretaryIntent("clarify", "هاي المهمة معتمدة خلص، ما بينفع تاخدها من جديد.");
+      if (chosen?.status === "approval") return emptySecretaryIntent("clarify", "هاي المهمة بانتظار اعتماد باسم حاليًا، ما بينفع استلامها الآن.");
+    }
     if (plan.kind === "extension" && !plan.fields.dueDate) return emptySecretaryIntent("clarify", "لأي تاريخ بدك التمديد؟ اكتب اليوم أو التاريخ والسبب.");
     if (plan.kind === "rule" && (!plan.fields.body?.trim() || (input.actor.id !== "basem"))) return emptySecretaryIntent("clarify", "القواعد الدائمة يعتمدها باسم. اكتب نص القاعدة بوضوح.");
     if (plan.kind === "correction" && input.actor.id !== "basem") return emptySecretaryIntent("clarify", "التصحيحات الدائمة من باسم فقط؛ أقدر أسجّل ملاحظتك كتعليق على المهمة.");
