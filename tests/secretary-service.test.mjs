@@ -46,9 +46,9 @@ test('owner personal preferences persist privately and can be replaced and forgo
  let seen;
  await f.run(emptySecretaryIntent('chat'),{...owner,text:'مرحبا'},async input=>{seen=input;return emptySecretaryIntent('chat','أهلًا');});
  assert.equal(seen.personalContext[0].body,'مختصرة');
- // Group-origin, even from the owner himself, gets a silent denial before
- // personalContext (or anything else) is ever built -- the blanket
- // event.groupId gate never calls infer at all.
+ // Group-origin chatter that never names the secretary, even from the owner
+ // himself, gets a silent denial before personalContext (or anything else)
+ // is ever built -- the event.groupId gate never calls infer for it.
  const groupResult=await f.run(emptySecretaryIntent('chat'),{...owner,groupId:'12345@g.us',text:'مرحبا'},async()=>{throw Error('group messages must never reach the model');});
  assert.equal(groupResult.status,'denied');assert.equal(groupResult.reply,'');
  await f.run(emptySecretaryIntent('chat'),{text:'مرحبا'},async input=>{seen=input;return emptySecretaryIntent('chat','أهلًا');});
@@ -157,10 +157,33 @@ test('only authenticated exact phone and approved group can invoke model',async 
 test('history isolated by actor and never contains phone table; group messages never reach the model',async t=>{
  const f=fixture(t);await f.run();let seen;
  await f.run(undefined,{senderNumber:'12025550102'},async input=>{seen=input;return emptySecretaryIntent('help');});assert.equal(seen.history.length,0);assert.doesNotMatch(JSON.stringify(seen),/1202555010/);assert.ok(seen.tasks.every(x=>x.id==='private'));
- // The blanket event.groupId gate returns before ever building model input --
- // a group-origin message from the same actor gets a silent denial instead.
+ // The event.groupId gate returns before ever building model input for
+ // ordinary group chatter that never names the secretary.
  const groupResult=await f.run(undefined,{senderNumber:'12025550102',groupId:'12345@g.us'},async()=>{throw Error('group messages must never reach the model');});
  assert.equal(groupResult.status,'denied');assert.equal(groupResult.reply,'');
+});
+test('a direct call by name is the one thing that earns a reply from the group; still scoped per actor and per-action group rules',async t=>{
+ const f=fixture(t);
+ // Not addressed by name: silent denial, exactly as ordinary group chatter.
+ const unaddressed=await f.run(emptySecretaryIntent('chat'),{groupId:'12345@g.us',text:'شو رأيكم نطلع بكرا'},async()=>{throw Error('unaddressed group chatter must never reach the model');});
+ assert.equal(unaddressed.status,'denied');assert.equal(unaddressed.reply,'');
+ // Addressed by name, in any natural form, reaches the model and gets an
+ // actual reply back -- delivered to the group (chatJid stays the group's).
+ for(const text of ['يا سكرتير شو مهامي؟','السكرتير ممكن تساعدني؟','سكرتير باسم، شو الوضع']){
+  let seen;
+  const r=await f.run(emptySecretaryIntent('chat','تمام، هذي مهامك'),{groupId:'12345@g.us',text},async input=>{seen=input;return emptySecretaryIntent('chat','تمام، هذي مهامك');});
+  assert.equal(r.status,'summary');assert.match(r.reply,/تمام/);
+  assert.equal(seen.tasks.every(x=>x.id==='t'),true); // still scoped to this actor's own visible tasks
+ }
+ // Naming it still cannot reach the private-only flows: canMessageTeam stays
+ // false for any group origin, so validateSecretaryIntent downgrades
+ // message_team/announce_team to an explicit clarify instead of acting on
+ // them -- addressing the secretary by name never unlocks those.
+ const admin={senderNumber:'12025550103'};
+ const announce=await f.run(announceTeam(),{...admin,text:'يا سكرتير اعلن على الجروب: صباح الخير',groupId:'12345@g.us'});
+ assert.equal(announce.status,'clarify');assert.match(announce.reply,/محادثته الخاصة فقط/);
+ const teamMsg=await f.run(teamMessage(),{...admin,text:'يا سكرتير ابعث للتيم مرحبا',groupId:'12345@g.us'});
+ assert.equal(teamMsg.status,'clarify');assert.match(teamMsg.reply,/محادثته الخاصة فقط/);
 });
 test('comment uses shared engine, no implicit completion, receipt duplicate does not repeat',async t=>{
  const f=fixture(t);const e=f.event({messageId:'COMMENT',text:'حكيت مع المحامي ولسه بستنى الرد'});const plan=command('comment',{body:e.text});const deps={infer:async()=>plan,now:()=>f.now};
@@ -583,5 +606,26 @@ test('closeDirect on a never-claimed task broadcasts one final approval notice, 
  assert.equal(otherResult.status,'applied');
  rows=outbox(f.db);
  assert.ok(rows.some(r=>r.toUser==='other'),'شادي should be privately told his task was closed');
+});
+function announceTeam(text='إعلان تجريبي للفريق') { const p=emptySecretaryIntent('announce_team');p.fields.body=text;return p; }
+test('owner announce_team previews the exact text then posts to the shared group only after confirmation, and is denied to members/group-origin',async t=>{
+ const f=fixture(t);const admin={senderNumber:'12025550103'};
+ assert.equal((await f.run(announceTeam(),{text:'اعلن للفريق مرحبا'})).status,'clarify');assert.equal(pending(f.db),undefined);
+ // Same one-way group gate as message_team: even the admin's own group-origin request is a silent denial.
+ const groupResult=await f.run(announceTeam(),{...admin,text:'اعلن على الجروب',groupId:'12345@g.us'});
+ assert.equal(groupResult.status,'denied');assert.equal(groupResult.reply,'');assert.equal(pending(f.db),undefined);
+ const first=await f.run(announceTeam('صباح الخير يا فريق'),{...admin,text:'اعلن على الجروب: صباح الخير يا فريق'});
+ assert.equal(first.status,'confirmation');assert.match(first.reply,/صباح الخير يا فريق/);assert.match(first.reply,/جروب الفريق/);assert.match(first.reply,/لم أنشر شيئًا/);
+ assert.equal(outbox(f.db).length,0,'nothing is queued before confirmation');
+ const token=pending(f.db).token;
+ const queued=await f.run(undefined,{...admin,text:`موافق ${token}`});
+ assert.equal(queued.status,'queued');
+ const rows=outbox(f.db);
+ const group=rows.find(r=>r.toUser==='group');
+ assert.ok(group,'announce_team must enqueue exactly one group post');assert.equal(group.text,'صباح الخير يا فريق');
+ assert.ok(!rows.some(r=>r.toUser==='basem'),'the admin never notifies himself');
+ // Duplicate confirmation never enqueues a second post.
+ await f.run(undefined,{...admin,text:`موافق ${token}`});
+ assert.equal(outbox(f.db).filter(r=>r.toUser==='group').length,1);
 });
 

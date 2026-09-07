@@ -66,3 +66,16 @@ test('team messaging schema accepts only authorized staff IDs or the exclusive a
  assert.equal(validateSecretaryIntent({...plan,fields:{...plan.fields,body:null}},context).kind,'clarify');
  assert.throws(()=>validateSecretaryIntent({...plan,recipientIds:['employee-one','employee-one']},context));
 });
+
+test('announce_team schema requires body text, admin-private access, and never carries recipients',()=>{
+ const context={...input('اعلن على الجروب مرحبا'),canMessageTeam:true};
+ const plan=emptySecretaryIntent('announce_team');plan.fields.body='صباح الخير يا فريق';
+ assert.equal(validateSecretaryIntent(plan,context).kind,'announce_team');
+ assert.equal(validateSecretaryIntent(plan,{...context,canMessageTeam:false}).kind,'clarify');
+ assert.equal(validateSecretaryIntent(plan,{...context,actor:{...context.actor,role:'member'}}).kind,'clarify');
+ assert.equal(validateSecretaryIntent({...plan,fields:{...plan.fields,body:null}},context).kind,'clarify');
+ assert.equal(validateSecretaryIntent({...plan,fields:{...plan.fields,body:'  '}},context).kind,'clarify');
+ assert.equal(validateSecretaryIntent(plan,{...context,text:'اكتب مسودة إعلان للجروب'}).kind,'clarify');
+ assert.throws(()=>validateSecretaryIntent({...plan,recipientIds:['employee-one']},context));
+ assert.throws(()=>validateSecretaryIntent({...plan,taskId:'t'},context));
+});

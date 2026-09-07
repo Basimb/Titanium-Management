@@ -84,3 +84,12 @@ export function isSecretaryIdentityQuery(text: string): boolean {
   return /^(?:مين انت|انت مين|من انت|شو اسمك|ايش اسمك|ما اسمك|اسمك شو|عرفني عليك|عرف عن نفسك|مين السكرتير|شو اسم السكرتير|هل انت (?:شات جي بي تي|chatgpt)|انت (?:شات جي بي تي|chatgpt))$/u.test(value);
 }
 
+// The team group chat is otherwise one-way (see handleSecretaryEvent): a
+// direct call by name is the one exception that earns a reply there. Matches
+// "سكرتير" in any natural form (يا سكرتير, السكرتير, سكرتيرنا, سكرتير باسم...)
+// after the same diacritic/alef/tatweel normalization used above.
+export function isAddressedToSecretary(text: string): boolean {
+  if (typeof text !== "string" || !text.trim() || text.length > 2000) return false;
+  return /سكرتير/u.test(normalized(unquoted(text)));
+}
+

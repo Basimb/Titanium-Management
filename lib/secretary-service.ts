@@ -13,7 +13,7 @@ import { searchKnowledge, formatKnowledgeHits } from "./knowledge.ts";
 import { migrateSecretaryMemory, rememberSecretaryMistake, recallSecretaryMemory, personalMemoryCommand, updatePersonalMemory, personalMemory } from "./secretary-memory.ts";
 import { enqueueAgentMessage } from "./agent-followups.ts";
 import { safeConversationalReply } from "./secretary-conversation-policy.ts";
-import { secretaryReviewRequest, isSecretaryIdentityQuery, SECRETARY_IDENTITY } from "./secretary-review.ts";
+import { secretaryReviewRequest, isSecretaryIdentityQuery, isAddressedToSecretary, SECRETARY_IDENTITY } from "./secretary-review.ts";
 import { migrateSecretaryOutbox, getSecretaryOutboxRecipients, createSecretaryOutboxPreview, confirmSecretaryOutboxPreview, getSecretaryOutboxStatus, secretaryOutboxDeliveryLabel, SecretaryOutboxError } from "./secretary-outbox.ts";
 import { migrateSecretaryChoices, createSecretaryChoices, consumeSecretaryChoice, clearSecretaryChoices, secretaryChoiceOptions, SecretaryChoiceError, type SecretaryChoices, type SecretaryChoiceField } from "./secretary-choices.ts";
 
@@ -553,13 +553,16 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
 }): Promise<Result> {
   migrateSecretary(db); const now = (dependencies.now || Date.now)();
   const actor = actorFor(db, event, config); if (!actor) return { status: "denied", reply: "" };
-  // The team group is one-way: automated notices only (task/project
+  // The team group is one-way by default: automated notices only (task/project
   // open/close broadcasts, sent separately as groupNotice from a DM-side
-  // action). The secretary never replies to a message it receives FROM the
-  // group -- not chat, not a command, not even Basim's own -- so there is
-  // no live back-and-forth there at all; every actual exchange happens on
-  // the private chat instead.
-  if (event.groupId !== null) return { status: "denied", reply: "" };
+  // action). The secretary does not reply to ordinary chatter it receives FROM
+  // the group -- there is no live back-and-forth there for a message that
+  // isn't for it. The one exception: someone directly calling it by name
+  // ("يا سكرتير...") gets an actual reply, in the group, from everything below
+  // -- which already has its own per-action/per-actor rules for group origin
+  // (task/project drafting and message_team/announce_group all stay
+  // private-chat-only regardless).
+  if (event.groupId !== null && !isAddressedToSecretary(event.text)) return { status: "denied", reply: "" };
   const initial = stateFor(db, actor); const previous = lookup(db, event, actor, initial); if (previous) return previous;
   const key = conversation(event, actor); const initialHash = fingerprint(initial);
   const profileCommand = personalMemoryCommand(event.text);
@@ -703,6 +706,12 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
           return save(db, event, freshActor, { status: "queued", batchId: batch.batchId, reply: `أكدت الطلب وأضفت الرسالة لطابور الإرسال على الخاص إلى ${batch.recipientCount} موظفين، كل واحد لحاله. هذا ليس تأكيد وصول؛ رح يوصلك تقرير بنتيجة الإرسال.` }, [], now);
         } catch (error) { if (!(error instanceof SecretaryOutboxError)) throw error; return save(db, event, freshActor, { status: "clarify", reply: error.message }, [], now); }
       }
+      if (command.action === "announce_group") {
+        if (freshActor.id !== "basem" || freshActor.role !== "admin" || event.groupId !== null) return save(db, event, freshActor, { status: "denied", reply: "نشر إعلان على جروب الفريق متاح لباسم من محادثته الخاصة فقط." }, [], now);
+        enqueueAgentMessage(db, { toUser: "group", text: String(command.text || "") }, now);
+        log(db, freshActor, event, "secretary_announce_queued", { summary: "أكد نشر إعلان على جروب الفريق" }, now);
+        return save(db, event, freshActor, { status: "queued", reply: "أكدت الطلب وأضفت الإعلان لطابور النشر على جروب الفريق. هذا ليس تأكيد نشر فعلي؛ لو تجاوزنا الحد اليومي لرسائل الجروب ممكن يتأخر أو يتجاهل." }, [], now);
+      }
       if (command.action === "schedule_reminder") return reminder(db, event, freshActor, state, command.taskId, command.dueAt, now);
       if (command.action === "close_direct") return closeDirect(db, event, freshActor, state, String(command.taskId), now, { originalText: live.original_text, sourceMessageId: live.source_message_id, confirmationRequired: true, confirmedBy: freshActor.id, confirmationMessageId: event.messageId });
       if (command.action === "claim_multi") return claimMultiple(db, event, freshActor, state, Array.isArray(command.taskIds) ? command.taskIds.map(String) : [], now, { originalText: live.original_text, sourceMessageId: live.source_message_id, confirmationRequired: true, confirmedBy: freshActor.id, confirmationMessageId: event.messageId });
@@ -819,7 +828,7 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
         return save(db, event, freshActor, { status: "summary", ...(batch ? { batchId: batch.batchId } : {}), reply: batch ? `نتيجة آخر طلب إرسال وافقت عليه للتيم:\n${batch.recipients.map(user => `• ${clean(user.name, 80)}: ${secretaryOutboxDeliveryLabel(user)}`).join("\n")}\nإقرار خادم واتساب: ${batch.acceptedCount}؛ وصول للجهاز: ${batch.deliveredCount}؛ قراءة: ${batch.readCount}. نجاح محاولة النقل وحده لا يثبت الوصول أو القراءة.` : "ما في طلب إرسال للتيم وافقت عليه ومسجّل بعد." }, [], now);
       } catch(error) { if (!(error instanceof SecretaryOutboxError)) throw error; return save(db, event, freshActor, { status: "clarify", reply: error.message }, [], now); }
     }
-    if (plan.kind === "command" || plan.kind === "remind" || plan.kind === "message_team" || plan.kind === "claim_multiple") db.prepare("DELETE FROM secretary_pending WHERE conversation_key=?").run(key);
+    if (plan.kind === "command" || plan.kind === "remind" || plan.kind === "message_team" || plan.kind === "announce_team" || plan.kind === "claim_multiple") db.prepare("DELETE FROM secretary_pending WHERE conversation_key=?").run(key);
     if (plan.kind === "claim_multiple") {
       const { items, failed } = JSON.parse(plan.message || "{}") as { items?: Array<{ n: number; id: string; title: string }>; failed?: Array<{ n: number; reason: string }> };
       if (!items?.length) return save(db, event, freshActor, { status: "clarify", reply: "ما قدرت آخذ ولا مهمة من الأرقام يلي ذكرتها." }, [], now);
@@ -843,6 +852,15 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
         log(db, freshActor, event, "secretary_message_preview", { summary: "عرض رسالة للتيم قبل الإرسال", batchId: preview.batchId, recipientIds: preview.recipients.map(user => user.userId), confirmationRequired: true }, now);
         return save(db, event, freshActor, { status: "confirmation", batchId: preview.batchId, reply }, [], now);
       } catch(error) { if (!(error instanceof SecretaryOutboxError)) throw error; return save(db, event, freshActor, { status: "clarify", reply: error.message }, [], now); }
+    }
+    if (plan.kind === "announce_team") {
+      const text = String(plan.fields.body || "").replace(/[ --‪-‮⁦-⁩]/g, "").replace(/\r\n?/g, "\n").replace(/\n{4,}/g, "\n\n\n").trim().slice(0, 3800);
+      if (!text) return save(db, event, freshActor, { status: "clarify", reply: "شو نص الإعلان بالضبط يلي بدك تنشره على جروب الفريق؟" }, [], now);
+      const token = "T" + randomBytes(3).toString("hex").toUpperCase();
+      const command = { action: "announce_group", text };
+      db.prepare("INSERT INTO secretary_pending VALUES(?,?,?,?,?,?,?)").run(key, token, JSON.stringify(command), initialHash, event.text, event.messageId, now + CONFIRM_MS);
+      log(db, freshActor, event, "secretary_announce_preview", { summary: "عرض إعلان على جروب الفريق قبل النشر", confirmationRequired: true }, now);
+      return save(db, event, freshActor, { status: "confirmation", reply: `رح أنشر هالنص على جروب الفريق من رقم الإدارة (مو على الخاص):\n\n${text}\n\nلم أنشر شيئًا بعد. اكتب «موافق ${token}» أو رد بالموافقة مباشرة على هذه المعاينة؛ وللتراجع اكتب «إلغاء». التأكيد صالح 10 دقائق.` }, [], now);
     }
     if (plan.kind === "project_draft" && event.groupId !== null && !(freshActor.id === "basem" && freshActor.role === "admin")) return save(db, event, freshActor, { status: "denied", reply: "فتح مشروع جديد لازم يكون من رسالة خاصة معي، مش من الجروب. راسلني عالخاص." }, [], now);
     if (AGENT_KINDS.has(plan.kind)) {
