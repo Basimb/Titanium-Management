@@ -3,7 +3,9 @@ import { isDiscussionOnlyRequest } from "./secretary-conversation-policy.ts";
 export const SECRETARY_ACTIONS = ["add_project", "edit_project", "approve_project", "reject_project", "restore_project", "archive_project", "delete_project", "add_task", "edit_task", "claim", "cancel_claim", "comment", "submit", "approve", "reject", "reopen", "reassign", "move_task", "archive_task", "restore_task", "delete_task"] as const;
 export type SecretaryIntent = {
   kind: "summary" | "details" | "projects" | "report" | "help" | "chat" | "search" | "remind" | "command" | "clarify" | "message_team" | "message_status" | "task_draft"
-    | "approvals" | "decide" | "extension" | "close_request" | "ownership_request" | "rule" | "correction" | "knowledge" | "project_draft";
+    | "approvals" | "decide" | "extension" | "close_request" | "ownership_request" | "rule" | "correction" | "knowledge" | "project_draft"
+    /** Locally resolved only (never produced by the model, never in KINDS) -- see validateSecretaryIntent's admin take-task-by-number override. */
+    | "claim_multiple";
   intakeMode: "start" | "continue" | null;
   action: typeof SECRETARY_ACTIONS[number] | null;
   taskId: string | null; projectId: string | null;
@@ -158,21 +160,37 @@ export function validateSecretaryIntent(value: unknown, input: SecretaryModelInp
   // Basim has no ownership_request path below (he assigns directly), but the
   // model still cannot safely resolve a bare list number to a real task id --
   // no positional guess from list order is ever trusted from the model,
-  // admin included. Resolve "خذلي/استلم مهمة رقم N" locally against the
-  // exact numbered list he was just shown, then hand back a direct
-  // reassign-to-self command; it still flows through the normal command
-  // checks below, including the SENSITIVE "reassign" confirmation step.
+  // admin included. Resolve "خذلي/استلم مهمة رقم N" (one number or several)
+  // locally against the exact numbered list he was just shown, then hand
+  // back a real self-claim -- never "reassign", which only proposes and
+  // leaves the task open pending its own acceptance. A single number and
+  // several numbers both go through the same claim_multiple path (see
+  // "claim_multiple" handling in secretary-service.ts) so the behavior and
+  // the confirmation step are identical either way.
   if (!review && (input.actor.id === "basem" || input.actor.role === "admin") && input.ownershipCandidates?.length
-    && /(?:اخذ|أخذ|اخد|أخد|استلم|خذلي|خذها|احمل)/u.test(normalizedArabic(input.text))) {
-    const match = /(?:رقم|مهم[ةه])\s*[:#-]?\s*([0-9٠-٩۰-۹]{1,3})/u.exec(input.text);
-    if (match) {
-      const ordinal = Number(match[1].normalize("NFKC").replace(/[٠-٩]/g, digit => String(digit.charCodeAt(0) - 0x660)).replace(/[۰-۹]/g, digit => String(digit.charCodeAt(0) - 0x6f0)));
-      const candidate = Number.isInteger(ordinal) && ordinal >= 1 ? input.ownershipCandidates[ordinal - 1] : undefined;
-      if (!candidate) return emptySecretaryIntent("clarify", "ما لقيت مهمة بهذا الرقم بالقائمة الحالية. اطلب القائمة من جديد وجرب رقمها.");
-      if (candidate.status === "completed") return emptySecretaryIntent("clarify", "هاي المهمة معتمدة خلص، ما بينفع تاخدها من جديد.");
-      if (candidate.status === "approval") return emptySecretaryIntent("clarify", "هاي المهمة بانتظار اعتمادك حاليًا، خلص القرار عليها الأول.");
-      const base = emptySecretaryIntent("command");
-      plan = { ...base, action: "reassign", taskId: candidate.id, fields: { ...base.fields, ownerId: "basem" } };
+    && /(?:اخذ|أخذ|اخد|أخد|استلم|خذلي|خذها|احمل|بدي\s*(?:مهم[ةه]|مهام))/u.test(normalizedArabic(input.text))) {
+    const toOrdinal = (raw: string) => Number(raw.normalize("NFKC").replace(/[٠-٩]/g, digit => String(digit.charCodeAt(0) - 0x660)).replace(/[۰-۹]/g, digit => String(digit.charCodeAt(0) - 0x6f0)));
+    // "مهمة 20 و15 و1 و2" names several tasks in one message -- resolve every
+    // number found, not just the first, so one confirmation can claim all of
+    // them at once. A lone number still requires the "رقم"/"مهمة" word right
+    // before it, same as before.
+    const numbers = [...new Set([...input.text.matchAll(/[0-9٠-٩۰-۹]{1,3}/gu)].map(match => toOrdinal(match[0])))];
+    const candidatesFor = numbers.length > 1 ? numbers : (() => {
+      const match = /(?:رقم|مهم[ةه])\s*[:#-]?\s*([0-9٠-٩۰-۹]{1,3})/u.exec(input.text);
+      return match ? [toOrdinal(match[1])] : [];
+    })();
+    if (candidatesFor.length) {
+      const items: Array<{ n: number; id: string; title: string }> = [];
+      const failed: Array<{ n: number; reason: string }> = [];
+      for (const n of candidatesFor) {
+        const candidate = Number.isInteger(n) && n >= 1 ? input.ownershipCandidates[n - 1] : undefined;
+        if (!candidate) failed.push({ n, reason: "ما لقيتها بالقائمة الحالية" });
+        else if (candidate.status === "completed") failed.push({ n, reason: "معتمدة خلص" });
+        else if (candidate.status === "approval") failed.push({ n, reason: "بانتظار اعتمادك حاليًا" });
+        else items.push({ n, id: candidate.id, title: candidate.title });
+      }
+      if (!items.length) return emptySecretaryIntent("clarify", failed.length === 1 ? `ما قدرت آخذها: ${failed[0].reason === "ما لقيتها بالقائمة الحالية" ? "ما لقيت مهمة بهذا الرقم بالقائمة الحالية. اطلب القائمة من جديد وجرب رقمها." : failed[0].reason === "معتمدة خلص" ? "هاي المهمة معتمدة خلص، ما بينفع تاخدها من جديد." : "هاي المهمة بانتظار اعتمادك حاليًا، خلص القرار عليها الأول."}` : `ما قدرت آخذ ولا وحدة من هالأرقام:\n${failed.map(f => `رقم ${f.n}: ${f.reason}`).join("\n")}`);
+      plan = { ...emptySecretaryIntent("claim_multiple"), message: JSON.stringify({ items, failed }) };
     }
   }
   if (![null, "start", "continue"].includes(plan.intakeMode)) throw new Error("Invalid task intake mode.");

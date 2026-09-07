@@ -36,6 +36,9 @@ const SENSITIVE = new Set(["edit_project", "approve_project", "reject_project", 
 const LABELS: Record<string, string> = { open: "بانتظار الاستلام", progress: "قيد التنفيذ", approval: "بانتظار اعتماد باسم", completed: "معتمدة", active: "نشط", pending: "بانتظار الموافقة", rejected: "مرفوض" };
 const ACTION_LABELS: Record<string, string> = { add_project: "إنشاء مشروع", edit_project: "تعديل المشروع", approve_project: "اعتماد المشروع", reject_project: "رفض المشروع", restore_project: "إعادة فتح المشروع", archive_project: "أرشفة المشروع", delete_project: "حذف المشروع نهائيًا", add_task: "إنشاء مهمة", edit_task: "تعديل المهمة", claim: "استلام المهمة", cancel_claim: "إرجاع المهمة", comment: "إضافة تعليق", submit: "إرسال المهمة لاعتماد باسم", approve: "اعتماد إنجاز المهمة", reject: "رفض الإنجاز", reopen: "إعادة فتح المهمة", reassign: "تغيير المسؤول", move_task: "نقل المهمة", archive_task: "أرشفة المهمة", restore_task: "استعادة المهمة", delete_task: "حذف المهمة نهائيًا" };
 const clean = (value: unknown, max = 200) => String(value ?? "").replace(/[\x00-\x1f\u202a-\u202e\u2066-\u2069]/g, " ").slice(0, max);
+// Arabic count agreement for "\u0645\u0647\u0645\u0629" -- 1 and 2 have their own words, 3-10
+// take the plural, 11+ reverts to the singular after the number.
+const taskCountPhrase = (n: number) => n === 1 ? "\u0645\u0647\u0645\u0629 \u0648\u0627\u062d\u062f\u0629" : n === 2 ? "\u0645\u0647\u0645\u062a\u064a\u0646" : n <= 10 ? `${n} \u0645\u0647\u0627\u0645` : `${n} \u0645\u0647\u0645\u0629`;
 const hash = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 const conversation = (event: Event, actor: ChatUser) => hash([normalizeContactNumber(event.senderNumber), event.groupId, actor.id]);
 const eventKey = (event: Event) => hash([event.senderNumber, event.groupId, event.messageId]);
@@ -575,6 +578,7 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
       }
       if (command.action === "schedule_reminder") return reminder(db, event, freshActor, state, command.taskId, command.dueAt, now);
       if (command.action === "close_direct") return closeDirect(db, event, freshActor, state, String(command.taskId), now, { originalText: live.original_text, sourceMessageId: live.source_message_id, confirmationRequired: true, confirmedBy: freshActor.id, confirmationMessageId: event.messageId });
+      if (command.action === "claim_multi") return claimMultiple(db, event, freshActor, state, Array.isArray(command.taskIds) ? command.taskIds.map(String) : [], now, { originalText: live.original_text, sourceMessageId: live.source_message_id, confirmationRequired: true, confirmedBy: freshActor.id, confirmationMessageId: event.messageId });
       if (command.action === "create_project_bundle" || command.action === "decide_approval") {
         try {
           const result = command.action === "create_project_bundle"
@@ -681,7 +685,18 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
         return save(db, event, freshActor, { status: "summary", ...(batch ? { batchId: batch.batchId } : {}), reply: batch ? `نتيجة آخر طلب إرسال وافقت عليه للتيم:\n${batch.recipients.map(user => `• ${clean(user.name, 80)}: ${secretaryOutboxDeliveryLabel(user)}`).join("\n")}\nإقرار خادم واتساب: ${batch.acceptedCount}؛ وصول للجهاز: ${batch.deliveredCount}؛ قراءة: ${batch.readCount}. نجاح محاولة النقل وحده لا يثبت الوصول أو القراءة.` : "ما في طلب إرسال للتيم وافقت عليه ومسجّل بعد." }, [], now);
       } catch(error) { if (!(error instanceof SecretaryOutboxError)) throw error; return save(db, event, freshActor, { status: "clarify", reply: error.message }, [], now); }
     }
-    if (plan.kind === "command" || plan.kind === "remind" || plan.kind === "message_team") db.prepare("DELETE FROM secretary_pending WHERE conversation_key=?").run(key);
+    if (plan.kind === "command" || plan.kind === "remind" || plan.kind === "message_team" || plan.kind === "claim_multiple") db.prepare("DELETE FROM secretary_pending WHERE conversation_key=?").run(key);
+    if (plan.kind === "claim_multiple") {
+      const { items, failed } = JSON.parse(plan.message || "{}") as { items?: Array<{ n: number; id: string; title: string }>; failed?: Array<{ n: number; reason: string }> };
+      if (!items?.length) return save(db, event, freshActor, { status: "clarify", reply: "ما قدرت آخذ ولا مهمة من الأرقام يلي ذكرتها." }, [], now);
+      const token = "T" + randomBytes(3).toString("hex").toUpperCase();
+      const command = { action: "claim_multi", taskIds: items.map(item => item.id) };
+      db.prepare("INSERT INTO secretary_pending VALUES(?,?,?,?,?,?,?)").run(key, token, JSON.stringify(command), initialHash, event.text, event.messageId, now + CONFIRM_MS);
+      log(db, freshActor, event, "secretary_proposal", { summary: "عرض استلام عدة مهام دفعة واحدة", proposedCommand: command, confirmationRequired: true }, now);
+      const list = items.map(item => `${item.n}. ${clean(item.title, 90)}`).join("\n");
+      const skipped = failed?.length ? `\n\nما قدرت آخذ:\n${failed.map(f => `${f.n}. ${f.reason}`).join("\n")}` : "";
+      return save(db, event, freshActor, { status: "confirmation", reply: `استلام ${taskCountPhrase(items.length)}:\n${list}${skipped}\n\nاكتب «موافق ${token}» للتنفيذ أو «إلغاء». الطلب صالح 10 دقائق ولن يُنفَّذ إذا تغيّرت بياناته.` }, items.map(item => "t:" + item.id), now);
+    }
     if (plan.kind === "message_team") {
       try {
         const preview = createSecretaryOutboxPreview(db, { actor: freshActor, origin: { senderNumber: event.senderNumber, groupId: event.groupId },
@@ -764,6 +779,33 @@ function closeDirect(db: DatabaseSync, event: Event, actor: ChatUser, state: Sna
     if (!(error instanceof ManagementActionError)) throw error;
     return save(db, event, actor, { status: "clarify", reply: error.message }, [], now);
   }
+}
+// "claim_multiple" (see secretary-intent.ts) resolves one or several list
+// numbers against one numbered list and stashes this pseudo-action so
+// Basim's single "موافق" actually claims every valid one for himself right
+// now -- a real "claim" (open -> progress, owner set), not "reassign" (which
+// only proposes and leaves the task open pending its own future acceptance,
+// the right behavior for assigning to someone else, but wrong when he is
+// taking it himself). A task that fails (already taken, deleted since the
+// preview, etc.) is reported by name instead of aborting the whole batch --
+// one bad number should never block the rest.
+function claimMultiple(db: DatabaseSync, event: Event, actor: ChatUser, state: Snapshot, taskIds: string[], now: number, context: Record<string, unknown>): Result {
+  const done: string[] = []; const failed: Array<{ title: string; reason: string }> = [];
+  for (const taskId of taskIds) {
+    const task = state.tasks.find(t => t.id === taskId);
+    try {
+      if (!task) throw new ManagementActionError(404, "task_missing", "المهمة غير موجودة أو غير متاحة لك");
+      executeManagementAction(db, actor, { action: "claim", taskId } as ManagementCommand, { now, source: "whatsapp_secretary", auditContext: context });
+      done.push(task.title);
+    } catch (error) {
+      if (!(error instanceof ManagementActionError)) throw error;
+      failed.push({ title: task?.title || taskId, reason: error.message });
+    }
+  }
+  const scope = taskIds.filter(id => state.tasks.some(t => t.id === id)).map(id => "t:" + id);
+  const reply = [done.length ? `✅ استلمت ${taskCountPhrase(done.length)}:\n${done.map(title => `• ${clean(title)}`).join("\n")}` : null,
+    failed.length ? `تعذّر استلام:\n${failed.map(f => `• ${clean(f.title)}: ${f.reason}`).join("\n")}` : null].filter(Boolean).join("\n\n");
+  return save(db, event, actor, { status: done.length ? "applied" : "clarify", reply: reply || "ما قدرت أستلم ولا مهمة." }, scope, now);
 }
 function safeApprovals(db: DatabaseSync, actor: ChatUser) {
   try { return listApprovals(db, actor, { status: "pending", limit: 20 }).map(a => ({ id: a.id, type: a.type, summary: a.summary, requestedBy: a.requestedByName })); } catch { return []; }
