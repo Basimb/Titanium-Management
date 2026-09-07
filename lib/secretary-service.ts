@@ -1,6 +1,6 @@
 import { createHash, randomBytes } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
-import { executeManagementAction, getManagementSnapshot, migrateManagementActions, ManagementActionError, type ManagementCommand } from "./management-actions.ts";
+import { executeManagementAction, getManagementSnapshot, migrateManagementActions, ManagementActionError, type ManagementCommand, type ManagementResult } from "./management-actions.ts";
 import { resolveChatUser, normalizeContactNumber, type ChatUser } from "./team-chat-policy.ts";
 import type { TeamChatConfig, TeamChatEnvelope } from "./team-chat-gateway.ts";
 import { directTaskCreationIntent, emptySecretaryIntent, validateSecretaryIntent, PROJECT_NAME_QUESTION, type SecretaryIntent, type SecretaryModelInput } from "./secretary-intent.ts";
@@ -884,6 +884,57 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
     const read = readReply(plan, freshActor, state, now); return save(db, event, freshActor, read.result, read.scope, now);
   });
 }
+// The web dashboard (app/api/state/route.ts) already relays
+// executeManagementAction()'s result.notification to the WhatsApp group for
+// every action it exposes, using lib/whatsapp.ts's taskNotification(). The
+// chat-driven paths below (perform/closeDirect/claimMultiple) call the exact
+// same engine but used to discard result.notification entirely, so a task
+// created/claimed/submitted/approved/rejected/reassigned/archived directly
+// through the secretary chat produced no group broadcast and no heads-up to
+// the task's own owner. formatManagementNotice + dispatchManagementNotice
+// close that gap, reusing the group's existing emoji/wording conventions
+// (see lib/secretary-agent.ts and lib/approvals.ts's notifyGroup strings)
+// rather than lib/whatsapp.ts's format, since group delivery here goes
+// through the chat outbox (enqueueAgentMessage), not the Meta Cloud API.
+function formatManagementNotice(notification: NonNullable<ManagementResult["notification"]>, projectName: string | null): string {
+  const title = clean(notification.title, 200);
+  const who = clean(notification.actor, 100);
+  switch (notification.action) {
+    case "create": return `🆕 مهمة جديدة: ${title}${projectName ? ` — ${projectName}` : ""}${notification.extra ? ` — ${notification.extra}` : ""}`;
+    case "claim": return `👋 ${who} استلم مهمة «${title}»`;
+    case "submit": return `📤 ${who} أنهى «${title}» وبانتظار اعتماد باسم`;
+    case "approve": return `✅ اعتُمد إنجاز «${title}» (${who})`;
+    case "reject": return `❌ رُفض إنجاز «${title}»${notification.extra ? ` — ${notification.extra}` : ""}`;
+    case "reassign": return `🔄 تغيّر المسؤول عن «${title}»${notification.extra ? ` — ${notification.extra}` : ""}`;
+    case "archive": return `🗄️ ${who} أرشف مهمة «${title}»`;
+    case "comment": return `💬 ${who} علّق على «${title}»${notification.extra ? `: ${notification.extra}` : ""}`;
+    case "blocker": return `🚧 ${who} سجّل عائق على «${title}»${notification.extra ? `: ${notification.extra}` : ""}`;
+    default: return `📌 تحديث على «${title}» (${who})`;
+  }
+}
+/** Broadcasts result.notification to the group and privately heads-up the
+ * task's CURRENT owner (freshly read from the DB, since the action just
+ * changed it for add_task/reassign) -- never the actor about his own action. */
+function dispatchManagementNotice(db: DatabaseSync, actor: ChatUser, state: Snapshot, result: ManagementResult, context: { projectId?: string | null; ownerId?: string | null }, now: number) {
+  if (!result.notification) return;
+  const taskId = result.entityType === "task" ? result.entityId : null;
+  const projectId = context.projectId ?? (taskId ? state.tasks.find(t => t.id === taskId)?.projectId ?? null : null);
+  const projectName = projectId ? state.projects.find(p => p.id === projectId)?.name ?? null : null;
+  const notice = formatManagementNotice(result.notification, projectName);
+  enqueueAgentMessage(db, { toUser: "group", text: notice }, now);
+  // create/reassign hand the task to a NEW suggested owner (it stays "open",
+  // never actually claimed yet) -- context.ownerId already carries that
+  // userId straight from the command that was just executed. Every other
+  // notifying action (submit/approve/reject/archive/comment/blocker) leaves
+  // an EXISTING owner unchanged; tasks.owner stores that owner as a NAME,
+  // never a userId, so resolve it back through state.users. "claim" always
+  // makes the actor himself the owner, so it never needs a lookup here.
+  const targetId = result.notification.action === "create" || result.notification.action === "reassign" ? context.ownerId ?? null
+    : taskId && result.notification.action !== "claim"
+      ? (() => { const ownerName = state.tasks.find(t => t.id === taskId)?.owner ?? null; return ownerName ? state.users.find(u => u.name === ownerName)?.id ?? null : null; })()
+      : null;
+  if (targetId && targetId !== actor.id) enqueueAgentMessage(db, { toUser: targetId, text: `📌 تحديث على مهمتك:\n${notice}` }, now);
+}
 function perform(db: DatabaseSync, event: Event, actor: ChatUser, state: Snapshot, command: Record<string, unknown>, now: number, context: Record<string, unknown>): Result {
   try {
     const result = executeManagementAction(db, actor, command as ManagementCommand, { now, source: "whatsapp_secretary", auditContext: { ...context, senderNumber: event.senderNumber, origin: "whatsapp", proposedCommand: command } });
@@ -895,6 +946,7 @@ function perform(db: DatabaseSync, event: Event, actor: ChatUser, state: Snapsho
       const projectName = state.projects.find(p => p.id === command.projectId)?.name ?? String(command.projectId);
       rememberLastProject(db, conversation(event, actor), command.projectId, projectName, now);
     }
+    dispatchManagementNotice(db, actor, state, result, { projectId: typeof command.projectId === "string" ? command.projectId : null, ownerId: typeof command.ownerId === "string" ? command.ownerId : null }, now);
     const scope = [...(taskId && state.tasks.some(t => t.id === taskId) && command.action !== "delete_task" ? ["t:" + taskId] : []), ...(typeof command.projectId === "string" && command.action !== "delete_project" ? ["p:" + command.projectId] : [])];
     // File blobs from confirmed deletions remain recoverable on disk; DB links are removed atomically.
     return save(db, event, actor, { status: "applied", reply: `✅ ${result.message}`, ...(taskId ? { taskId } : {}) }, scope, now);
@@ -922,6 +974,10 @@ function closeDirect(db: DatabaseSync, event: Event, actor: ChatUser, state: Sna
     if (task.status === "open" || task.status === "progress") executeManagementAction(db, actor, { action: "submit", taskId } as ManagementCommand, { now, source: "whatsapp_secretary", auditContext: context });
     const approved = executeManagementAction(db, actor, { action: "approve", taskId } as ManagementCommand, { now, source: "whatsapp_secretary", auditContext: context });
     db.prepare("UPDATE secretary_reminders SET responded_at=? WHERE actor_id=? AND task_id=? AND group_id IS ? AND state='sent' AND responded_at IS NULL").run(now, actor.id, taskId, event.groupId);
+    // Only the final approve is announced -- the claim/submit steps this
+    // chains through are an implementation detail of "close it in one go",
+    // not separate events worth their own group messages.
+    dispatchManagementNotice(db, actor, state, approved, { projectId: task.projectId }, now);
     return save(db, event, actor, { status: "applied", reply: `✅ ${approved.message}`, taskId }, ["t:" + taskId], now);
   } catch (error) {
     if (!(error instanceof ManagementActionError)) throw error;
@@ -943,7 +999,8 @@ function claimMultiple(db: DatabaseSync, event: Event, actor: ChatUser, state: S
     const task = state.tasks.find(t => t.id === taskId);
     try {
       if (!task) throw new ManagementActionError(404, "task_missing", "المهمة غير موجودة أو غير متاحة لك");
-      executeManagementAction(db, actor, { action: "claim", taskId } as ManagementCommand, { now, source: "whatsapp_secretary", auditContext: context });
+      const claimed = executeManagementAction(db, actor, { action: "claim", taskId } as ManagementCommand, { now, source: "whatsapp_secretary", auditContext: context });
+      dispatchManagementNotice(db, actor, state, claimed, { projectId: task.projectId }, now);
       done.push(task.title);
     } catch (error) {
       if (!(error instanceof ManagementActionError)) throw error;

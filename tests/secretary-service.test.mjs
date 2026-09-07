@@ -511,3 +511,77 @@ test('general summary groups all 25 short tasks under one bold heading without t
  assert.doesNotMatch(r.reply,/&#x20;| +\n|\*مهمة/);assert.ok(r.reply.length<4000);
 });
 
+// Direct chat actions (add_task/claim/reassign/close_direct) used to silently
+// discard executeManagementAction()'s result.notification -- the same field
+// the web dashboard (app/api/state/route.ts) already relays to the group.
+// These lock in the fix: a group broadcast for every notification-bearing
+// action performed directly through the secretary, plus a private heads-up
+// to the task's owner whenever that owner isn't the person who just acted.
+const outbox = db => db.prepare("SELECT to_user AS toUser, text FROM agent_outbox ORDER BY id").all();
+function closeRequest(taskId,details) { const p=emptySecretaryIntent('close_request'); p.taskId=taskId; p.fields.details=details; return p; }
+test('admin reassigning a task directly through chat now broadcasts to the group and privately notifies the new owner, never himself',async t=>{
+ const f=fixture(t); const admin={senderNumber:'12025550103'};
+ const preview=await f.run(command('reassign',{ownerId:'other'},'t'),{...admin,text:'حول اللوحة لشادي'});
+ assert.equal(preview.status,'confirmation');
+ const token=pending(f.db).token;
+ const result=await f.run(undefined,{...admin,text:`موافق ${token}`});
+ assert.equal(result.status,'applied');
+ const rows=outbox(f.db);
+ const group=rows.find(r=>r.toUser==='group');
+ assert.ok(group,'reassign must broadcast to the group');assert.match(group.text,/🔄/);assert.match(group.text,/شادي/);
+ const toNewOwner=rows.find(r=>r.toUser==='other');
+ assert.ok(toNewOwner,'the newly-assigned owner must get a private heads-up');
+ assert.ok(!rows.some(r=>r.toUser==='basem'),'the admin never notifies himself about his own action');
+});
+function taskDraftPlan(fields,projectId='p') { const p=emptySecretaryIntent('task_draft'); p.intakeMode='start'; p.projectId=projectId; Object.assign(p.fields,fields); return p; }
+test('admin adding a task directly for someone else broadcasts to the group and privately notifies that owner',async t=>{
+ const f=fixture(t); const admin={senderNumber:'12025550103'};
+ // add_task always lands here through the task_draft intake preview + "موافق
+ // TOKEN" confirm -- a raw command('add_task',...) plan gets rewritten into
+ // task_draft by validateSecretaryIntent before it ever reaches perform(),
+ // so that's the path this test has to go through too.
+ const plan=taskDraftPlan({title:'مهمة جديدة',priority:'yellow',dueDate:'unscheduled',ownerId:'other'});
+ const preview=await f.run(plan,{...admin,text:'ضيف مهمة جديدة لشادي بمشروع تجريبي'});
+ assert.equal(preview.status,'confirmation');
+ const token=pending(f.db).token;
+ const result=await f.run(undefined,{...admin,text:`موافق ${token}`});
+ assert.equal(result.status,'applied');
+ const rows=outbox(f.db);
+ const group=rows.find(r=>r.toUser==='group');
+ assert.ok(group,'a new task must broadcast to the group');assert.match(group.text,/🆕/);assert.match(group.text,/مشروع تجريبي/);assert.match(group.text,/شادي/);
+ assert.ok(rows.some(r=>r.toUser==='other'),'the assigned owner must get a private heads-up');
+ assert.ok(!rows.some(r=>r.toUser==='basem'));
+});
+test('a member claiming their own open task broadcasts to the group but never self-notifies',async t=>{
+ const f=fixture(t);
+ f.db.prepare("INSERT INTO tasks(id,project_id,title,details,priority,status,owner,suggested_owner,created_at,updated_at) VALUES('open1','p','مهمة مفتوحة','','yellow','open',NULL,'خالد',1,1)").run();
+ const result=await f.run(command('claim',{},'open1'),{text:'بستلم هاي المهمة'}); // default sender is خالد (member)
+ assert.equal(result.status,'applied');
+ const rows=outbox(f.db);
+ const group=rows.find(r=>r.toUser==='group');
+ assert.ok(group,'claiming must broadcast to the group');assert.match(group.text,/👋/);assert.match(group.text,/خالد/);
+ assert.ok(!rows.some(r=>r.toUser==='member'),'a member claiming for himself is never privately notified about his own claim');
+});
+test('closeDirect on a never-claimed task broadcasts one final approval notice, and privately notifies a non-admin owner it closes on behalf of',async t=>{
+ const f=fixture(t); const admin={senderNumber:'12025550103'};
+ // Basim closing a task he owns himself (claims it along the way): only the group hears about it, never a self-notify.
+ f.db.prepare("INSERT INTO tasks(id,project_id,title,details,priority,status,owner,suggested_owner,created_at,updated_at) VALUES('open2','p','مهمة باسم','','green','open',NULL,NULL,1,1)").run();
+ const own=await f.run(closeRequest('open2','خلصت'),{...admin,text:'قفل هاي المهمة، خلصت'});
+ assert.equal(own.status,'confirmation');
+ const ownToken=pending(f.db).token;
+ const ownResult=await f.run(undefined,{...admin,text:`موافق ${ownToken}`});
+ assert.equal(ownResult.status,'applied');
+ let rows=outbox(f.db);
+ assert.equal(rows.filter(r=>r.toUser==='group').length,1);assert.match(rows.find(r=>r.toUser==='group').text,/✅/);
+ assert.ok(!rows.some(r=>r.toUser==='basem'));
+ // Basim closing a task still owned by someone else (شادي, "progress", never submitted) --
+ // the group hears about it AND شادي gets a private heads-up that his task was closed for him.
+ const other=await f.run(closeRequest('private','خلص'),{...admin,text:'قفل مهمة شادي، خلصت'});
+ assert.equal(other.status,'confirmation');
+ const otherToken=pending(f.db).token;
+ const otherResult=await f.run(undefined,{...admin,text:`موافق ${otherToken}`});
+ assert.equal(otherResult.status,'applied');
+ rows=outbox(f.db);
+ assert.ok(rows.some(r=>r.toUser==='other'),'شادي should be privately told his task was closed');
+});
+
