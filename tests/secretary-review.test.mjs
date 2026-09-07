@@ -6,6 +6,7 @@ const pair = (question, previousAnswer) => [{ role: "user", content: question },
 const original = pair("عندك أرقام فريق العمل؟", "الجواب السابق بحاجة تحقق");
 
 test("explicit Arabic objections select the previous actual question, not the criticism", () => {
+  assert.deepEqual(secretaryReviewRequest("هيك غلط", original), {kind:"review",question:original[0].content,previousAnswer:original[1].content});
   for (const text of ["جوابك غلط", "ردك مش صحيح", "إجابتك خاطئة", "معلوماتك غير دقيقة", "لا، كلامك غلط", "يا أخي جوابك خطأ", "انت فاهمني غلط", "ما فهمت علي", "غلط", "راجع جوابك", "جوابك غير صحيح، تأكد من المعلومة"]) {
     assert.deepEqual(secretaryReviewRequest(text, original), { kind: "review", question: original[0].content, previousAnswer: original[1].content }, text);
   }

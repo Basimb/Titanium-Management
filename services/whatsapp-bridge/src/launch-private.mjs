@@ -7,7 +7,7 @@ import { loadConfig } from './config.mjs';
 const SETTINGS_KEYS = new Set(['TEAM_CHAT_ENABLED', 'TEAM_CHAT_SHARED_KEY', 'TEAM_CHAT_CONTACTS_JSON',
   'TEAM_CHAT_GROUP_IDS_JSON', 'GROQ_API_KEY', 'GROQ_MODEL', 'WHATSAPP_LOGIN_ENABLED',
   'WHATSAPP_LOGIN_SECRET', 'WHATSAPP_LOGIN_DATABASE', 'WHATSAPP_LOGIN_ORIGIN',
-  'SECRETARY_ENABLED', 'SECRETARY_WEB_ENABLED', 'SECRETARY_VOICE_ENABLED']);
+  'SECRETARY_ENABLED', 'SECRETARY_WEB_ENABLED', 'SECRETARY_VOICE_ENABLED', 'SECRETARY_FOLLOWUP_ENABLED', 'TITANIUM_PUBLIC_URL', 'DASHBOARD_READONLY']);
 const MAX_BYTES = 32_768;
 const SERVICE_DIRECTORY = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -114,6 +114,8 @@ export function bridgeChildEnvironment(settings, env, pair, serviceDirectory = S
     TEAM_CHAT_STATE_DIR: env.TEAM_CHAT_STATE_DIR,
     SECRETARY_ENABLED: settings.SECRETARY_ENABLED === '1' ? '1' : '0',
     SECRETARY_VOICE_ENABLED: settings.SECRETARY_ENABLED === '1' && settings.SECRETARY_VOICE_ENABLED === '1' ? '1' : '0',
+    SECRETARY_FOLLOWUP_ENABLED: settings.SECRETARY_ENABLED === '1' && settings.SECRETARY_FOLLOWUP_ENABLED === '1' ? '1' : '0',
+    ...(typeof settings.TITANIUM_PUBLIC_URL === 'string' && /^https:\/\/[\w.-]+\/?$/.test(settings.TITANIUM_PUBLIC_URL) ? { TITANIUM_PUBLIC_URL: settings.TITANIUM_PUBLIC_URL } : {}),
   });
   // Explicit owner consent: this key is used only for bounded voice transcription on the server.
   if (childEnv.SECRETARY_VOICE_ENABLED === '1') {

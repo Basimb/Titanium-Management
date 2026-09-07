@@ -71,8 +71,8 @@ export async function deliverOne(store, row, config, { fetcher = fetch, sendRepl
       response = await fetcher(config.backendUrl, {
         method: 'POST', body: row.raw_body,
         headers: signatureHeaders(row.raw_body, config.key, now()),
-        // Cover the 18s planner plus optional 22s public search and DB/reply overhead.
-        redirect: 'error', signal: AbortSignal.timeout(50_000),
+        // Cover one bounded schema repair plus public search/review and DB overhead.
+        redirect: 'error', signal: AbortSignal.timeout(80_000),
       });
     } catch {
       if (row.backend_attempts + 1 >= 5) backendUnavailable(store, row, 'backend_network');
@@ -80,9 +80,13 @@ export async function deliverOne(store, row, config, { fetcher = fetch, sendRepl
       return;
     }
     if (response.status === 429 || response.status === 503) {
+      const header = response.headers.get('retry-after');
+      const seconds = header && /^\d+(?:\.\d+)?$/.test(header) ? Number(header) : header ? (Date.parse(header) - now()) / 1000 : NaN;
+      const wait = Math.max(Math.min(60_000, 2000 * 2 ** row.backend_attempts),
+        Number.isFinite(seconds) ? Math.max(1000, Math.min(180_000, Math.ceil(seconds * 1000))) : 0);
       await response.body?.cancel().catch(() => {});
       if (row.backend_attempts + 1 >= 5) backendUnavailable(store, row, `backend_${response.status}`);
-      else store.retry(row.id, 'backend', now() + Math.min(60_000, 2000 * 2 ** row.backend_attempts), `backend_${response.status}`);
+      else store.retry(row.id, 'backend', now() + wait, `backend_${response.status}`);
       return;
     }
     if (response.status !== 200) {

@@ -9,8 +9,9 @@ import type { ParsedIntent } from "./whatsapp-intent";
 export type ChatUser = {
   id: string;
   name: string;
-  role: "admin" | "member";
+  role: "admin" | "manager" | "member";
   active: number;
+  department?: string | null;
 };
 
 export type ChatTask = {
@@ -117,4 +118,33 @@ export function planChatTaskUpdate(
     claimFirst: task.status === "open",
     originalText: originalText.trim(),
   };
+}
+
+/* ----------------------------------------------------------------------------
+ * Group notification policy. The group is for important events only.
+ * Anything not in the allowlist stays private. A daily budget caps volume.
+ * -------------------------------------------------------------------------- */
+export type GroupEvent = "project_new" | "task_new" | "delay" | "reassign" | "approval_request" | "blocker" | "milestone" | "project_closed";
+export const GROUP_EVENT_ALLOWLIST: ReadonlySet<GroupEvent> = new Set<GroupEvent>(["project_new", "task_new", "delay", "reassign", "approval_request", "blocker", "milestone", "project_closed"]);
+export const GROUP_DAILY_BUDGET = 12;
+const ACTION_TO_GROUP_EVENT: Record<string, GroupEvent> = { create: "task_new", reassign: "reassign", blocker: "blocker", approve: "milestone", archive_project: "project_closed" };
+
+/** Map an audited action to a group event, or null when it should stay private. */
+export function groupEventFor(action: string, entityType: "task" | "project"): GroupEvent | null {
+  if (entityType === "project" && action === "create") return "project_new";
+  if (entityType === "project" && action === "archive") return "project_closed";
+  return ACTION_TO_GROUP_EVENT[action] ?? null;
+}
+
+export function isGroupWorthy(action: string, entityType: "task" | "project"): boolean {
+  const event = groupEventFor(action, entityType);
+  return !!event && GROUP_EVENT_ALLOWLIST.has(event);
+}
+
+/** Remaining group messages for the current day (counted from agent_followups + team_chat sends when present). */
+export function groupBudgetRemaining(db: { prepare(sql: string): { get(...args: unknown[]): unknown } }, at: number): number {
+  const since = at - 24 * 60 * 60_000;
+  let used = 0;
+  try { used = Number((db.prepare("SELECT COUNT(*) AS n FROM agent_followups WHERE target_user='group' AND sent_at>=?").get(since) as { n: number } | undefined)?.n ?? 0); } catch { used = 0; }
+  return Math.max(0, GROUP_DAILY_BUDGET - used);
 }

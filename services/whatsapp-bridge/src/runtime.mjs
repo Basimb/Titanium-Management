@@ -2,7 +2,7 @@ import { resolvePhone, selectIncoming } from './identity.mjs';
 import { deliverOne } from './delivery.mjs';
 import { inspectGroupMembership, boundedPlainText, groupJid, withAbortSignal } from './group-privacy.mjs';
 import { processControlJob } from './control.mjs';
-import { selectVoiceIncoming } from './voice.mjs';
+import { selectVoiceIncoming, MAX_VOICE_SECONDS } from './voice.mjs';
 import { createPollChoices } from './polls.mjs';
 import { createPrivateOutboxTransport } from './private-transport.mjs';
 
@@ -18,7 +18,7 @@ function withDeadline(work) {
 export function createBridgeRuntime({ config, store, auth, makeWASocket, jidNormalizedUser,
   makeCacheableSignalKeyStore, DisconnectReason, logger, onStop = () => {}, output = console,
   now = Date.now, timers = { setTimeout, clearTimeout, setInterval, clearInterval }, fetcher = fetch, otpQueue,
-  control, isActiveNumber = () => false, secretaryJobs, secretaryOutbox, transcribeVoice,
+  control, isActiveNumber = () => false, secretaryJobs, secretaryOutbox, agentFollowups, transcribeVoice,
   proto, generateWAMessageContent, generateWAMessage, decryptPollVote, normalizeMessageContent }) {
   let socket;
   let ready = false;
@@ -83,6 +83,27 @@ export function createBridgeRuntime({ config, store, auth, makeWASocket, jidNorm
     await socket.sendMessage(`${body.senderNumber}@s.whatsapp.net`, {
       text: 'ما قدرت أعالج طلب الجروب بأمان لأن التحقق من صلاحيات جميع أعضائه غير مكتمل. ابعت طلبك هون على الخاص أو راجع باسم.', linkPreview: null,
     });
+  }
+
+  const voiceReplyAt = new Map();
+  // Private-chat only, authorized senders only, one notice per minute per sender.
+  // Tells the person the voice note was not processed instead of silently dropping it.
+  async function voiceRejectionReply(message, event, identity) {
+    try {
+      const remote = message?.key?.remoteJid;
+      if (!remote || message?.key?.fromMe || remote.endsWith('@g.us') || !ready || stopped) return;
+      const resolved = await selectIncoming({ ...message, message: { conversation: 'رسالة صوتية' } }, event, config, identity, now(), activatedAt);
+      const number = resolved?.body.senderNumber;
+      if (!number || !await isActiveNumber(number)) return;
+      const last = voiceReplyAt.get(number) || 0;
+      if (now() - last < 60_000) return;
+      voiceReplyAt.set(number, now());
+      const seconds = Number(message?.message?.audioMessage?.seconds) || 0;
+      const text = seconds > MAX_VOICE_SECONDS
+        ? `ما قدرت أسمع الرسالة الصوتية لأنها أطول من ${Math.round(MAX_VOICE_SECONDS / 60)} دقائق. سجّلها أقصر أو اكتبها لي.`
+        : 'ما قدرت أسمع الرسالة الصوتية. جرّب تسجّلها مرة ثانية أو اكتبها لي.';
+      await socket.sendMessage(remote, { text, linkPreview: null });
+    } catch { /* never let a courtesy reply break intake */ }
   }
 
   function stop(code) {
@@ -190,7 +211,11 @@ export function createBridgeRuntime({ config, store, auth, makeWASocket, jidNorm
                 authorize: async body => ready && !stopped && current === socket && await isActiveNumber(body.senderNumber)
                   && (body.groupId === null || (await inspectGroup(body.groupId)).allowed),
               });
-            } catch { output.info('Titanium voice: unavailable_or_rejected. No audio or transcript logged.'); }
+            } catch (error) {
+              const code = /^(?:voice_[a-z_]+|AbortError|TimeoutError)$/.test(error?.message || '') ? error.message : 'unavailable_or_rejected';
+              output.info(`Titanium voice: ${code}. No audio or transcript logged.`);
+            }
+            if (!incoming) await voiceRejectionReply(message, event, identity);
           }
           if (incoming && await isActiveNumber(incoming.body.senderNumber) && ready && !stopped && current === socket) store.enqueue(incoming);
         }
@@ -231,21 +256,21 @@ export function createBridgeRuntime({ config, store, auth, makeWASocket, jidNorm
   }
 
   async function drainBackground() {
-    const jobs = preferOutbox ? ['outbox', 'reminder'] : ['reminder', 'outbox'];
+    const jobs = preferOutbox ? ['outbox', 'reminder', 'followup'] : ['reminder', 'outbox', 'followup'];
     for (const kind of jobs) {
       if (!ready || stopped) return false;
-      const queue = kind === 'outbox' ? secretaryOutbox : secretaryJobs;
+      const queue = kind === 'outbox' ? secretaryOutbox : kind === 'followup' ? agentFollowups : secretaryJobs;
       if (!queue) continue;
       let result;
       try { result = await queue.deliverNext(message => sendScheduled(message, kind === 'outbox')); }
       catch (error) {
-        if (kind !== 'outbox') throw error;
+        if (kind === 'reminder') throw error;
         // A broadcast worker failure must not tear down the linked account or OTP.
         result = { status: 'failed' };
       }
       if (result.status !== 'idle') {
         preferOutbox = kind !== 'outbox';
-        const label = kind === 'outbox' ? 'outbox' : 'delivery';
+        const label = kind === 'outbox' ? 'outbox' : kind === 'followup' ? 'followup' : 'delivery';
         const status = result.status === 'sent' ? 'sent' : result.status === 'submitted' ? 'submitted' : result.status === 'uncertain' ? 'uncertain' : 'failed';
         output.info(`Titanium secretary ${label}: ${status}.`);
         return true;

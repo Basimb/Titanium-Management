@@ -105,6 +105,15 @@ test('child receives normalized allowlists and no Groq/config/inherited runtime 
   assert.equal(JSON.stringify(child).includes('synthetic-secret'), false);
 });
 
+test('shared read-only dashboard config does not disable bridge or leak into child environment', () => {
+  const f = fixture({ DASHBOARD_READONLY: '1', SECRETARY_ENABLED: '1' });
+  const config = readPrivateConfig(configFile, f.fs);
+  assert.equal(readOutboxConfig(configFile, f.fs).enabled, true);
+  const child = bridgeChildEnvironment(config, env, false, serviceDirectory);
+  assert.equal(child.TEAM_CHAT_BRIDGE_ENABLED, '1');
+  assert.equal(child.DASHBOARD_READONLY, undefined);
+});
+
 test('outbox policy re-reads remapping, contact flags and disable switches without retaining private settings', () => {
   const current = { ...settings, SECRETARY_ENABLED: '1' };
   const f = fixture({ SECRETARY_ENABLED: '1' });

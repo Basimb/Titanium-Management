@@ -183,3 +183,9 @@ test('nonretriable HTTP failures preserve existing terminal behavior rather than
     assert.equal(f.row().result, null);
   }
 });
+
+test('backend respects Retry-After and preserves the original request',async t=>{
+ const f=fixture(t);await f.deliver({fetcher:async()=>new Response('',{status:503,headers:{'retry-after':'90'}})});
+ const row=f.row();assert.equal(row.next_at,f.now+90000);assert.equal(row.raw_body,f.initial.raw_body);assert.equal(row.backend_attempts,1);
+ assert.equal(f.store.next(f.now+89000),undefined);
+});

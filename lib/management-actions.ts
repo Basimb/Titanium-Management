@@ -1,7 +1,9 @@
 import { randomUUID } from "node:crypto";
 import type { DatabaseSync, SQLInputValue } from "node:sqlite";
+import { migrateAgentSchema } from "./agent-schema.ts";
+import { ACTION_CAPABILITY, can, inScope, isOwner, type PermissionActor } from "./permissions.ts";
 
-export type ManagementActor = { id: string; name: string; role: "admin" | "member"; active: number };
+export type ManagementActor = { id: string; name: string; role: "admin" | "manager" | "member"; active: number; department?: string | null };
 type Expected = { expectedUpdatedAt?: number | null; expectedStatus?: string; expectedProjectId?: string;
   expectedProjectUpdatedAt?: number | null; expectedProjectStatus?: string; expectedTargetProjectUpdatedAt?: number | null };
 type TaskFields = { title?: string; details?: string; priority?: "red" | "yellow" | "green"; dueDate?: string | null;
@@ -19,6 +21,9 @@ export type ManagementCommand = Expected & (
   | { action: "reassign"; taskId: string; ownerId: string | null }
   | { action: "move_task"; taskId: string; projectId: string }
   | { action: "comment"; taskId: string; comment: string }
+  | { action: "set_watcher"; taskId: string; watcherId: string | null }
+  | { action: "set_blocker"; taskId: string; blocker: string | null }
+  | { action: "set_expected"; taskId: string; expectedAt: string | null }
 );
 
 export type ManagementProject = { id: string; name: string; status: string; createdBy: string; createdAt: number;
@@ -27,7 +32,8 @@ export type ManagementProject = { id: string; name: string; status: string; crea
 export type ManagementTask = { id: string; projectId: string; title: string; details: string; priority: string; status: string;
   owner: string | null; suggestedOwner: string | null; startedAt: number | null; dueDate: string | null;
   completedAt: number | null; rejectionReason: string | null; createdAt: number; updatedAt: number | null;
-  archivedAt: number | null; archivedBy: string | null };
+  archivedAt: number | null; archivedBy: string | null;
+  watcher: string | null; expectedAt: string | null; blocker: string | null; lastUpdateAt: number | null };
 export type ManagementResult = { ok: true; action: ManagementCommand["action"]; entityType: "task" | "project";
   entityId: string; message: string; deletedObjectKeys: string[];
   notification?: { action: string; title: string; actor: string; extra?: string } };
@@ -39,7 +45,7 @@ export class ManagementActionError extends Error {
 }
 const fail = (status: number, code: string, message: string): never => { throw new ManagementActionError(status, code, message); };
 const PROJECT_SELECT = "SELECT id,name,status,created_by AS createdBy,created_at AS createdAt,COALESCE(updated_at,created_at) AS updatedAt,rejection_reason AS rejectionReason,rejected_by AS rejectedBy,rejected_at AS rejectedAt,archived_at AS archivedAt,archived_by AS archivedBy FROM projects";
-const TASK_SELECT = "SELECT id,project_id AS projectId,title,details,priority,status,owner,suggested_owner AS suggestedOwner,started_at AS startedAt,due_date AS dueDate,completed_at AS completedAt,rejection_reason AS rejectionReason,created_at AS createdAt,updated_at AS updatedAt,archived_at AS archivedAt,archived_by AS archivedBy FROM tasks";
+const TASK_SELECT = "SELECT id,project_id AS projectId,title,details,priority,status,owner,suggested_owner AS suggestedOwner,started_at AS startedAt,due_date AS dueDate,completed_at AS completedAt,rejection_reason AS rejectionReason,created_at AS createdAt,updated_at AS updatedAt,archived_at AS archivedAt,archived_by AS archivedBy,watcher,expected_at AS expectedAt,blocker,last_update_at AS lastUpdateAt FROM tasks";
 const EXPECTED_KEYS = ["expectedUpdatedAt", "expectedStatus", "expectedProjectId", "expectedProjectUpdatedAt", "expectedProjectStatus", "expectedTargetProjectUpdatedAt"];
 const ACTION_KEYS: Record<ManagementCommand["action"], readonly string[]> = {
   add_project: ["name"], edit_project: ["projectId", "name"], approve_project: ["projectId"], reject_project: ["projectId", "reason"],
@@ -49,6 +55,7 @@ const ACTION_KEYS: Record<ManagementCommand["action"], readonly string[]> = {
   claim: ["taskId"], cancel_claim: ["taskId"], submit: ["taskId"], approve: ["taskId"], reject: ["taskId", "reason"],
   reopen: ["taskId", "reason"], reassign: ["taskId", "ownerId"], move_task: ["taskId", "projectId"],
   archive_task: ["taskId"], restore_task: ["taskId"], delete_task: ["taskId"], comment: ["taskId", "comment"],
+  set_watcher: ["taskId", "watcherId"], set_blocker: ["taskId", "blocker"], set_expected: ["taskId", "expectedAt"],
 };
 
 export function isManagementAction(action: unknown): action is ManagementCommand["action"] {
@@ -93,6 +100,7 @@ export function migrateManagementActions(sqlite: DatabaseSync): void {
       if (!columns.has(column)) sqlite.exec(`ALTER TABLE projects ADD COLUMN ${column} ${type}`);
     }
   });
+  migrateAgentSchema(sqlite);
 }
 
 export function isManagementAdmin(actor: ManagementActor): boolean {
@@ -102,14 +110,14 @@ export function isManagementAdmin(actor: ManagementActor): boolean {
 /** Re-read trusted actor identity. Payload names/roles cannot grant authority. */
 export function resolveManagementActor(sqlite: DatabaseSync, claimed: ManagementActor): ManagementActor {
   const actor = claimed && typeof claimed.id === "string"
-    ? sqlite.prepare("SELECT id,name,role,active FROM users WHERE id=?").get(claimed.id) as ManagementActor | undefined : undefined;
+    ? sqlite.prepare("SELECT id,name,role,active,department FROM users WHERE id=?").get(claimed.id) as ManagementActor | undefined : undefined;
   if (!actor || actor.active !== 1 || actor.name !== claimed.name || actor.role !== claimed.role || claimed.active !== 1
-    || !["admin", "member"].includes(actor.role)) return fail(403, "actor_unavailable", "الحساب غير مفعّل أو تغيّرت صلاحياته؛ سجّل الدخول من جديد");
+    || !["admin", "manager", "member"].includes(actor.role)) return fail(403, "actor_unavailable", "الحساب غير مفعّل أو تغيّرت صلاحياته؛ سجّل الدخول من جديد");
   return actor;
 }
 
-export function canViewManagementTask(actor: ManagementActor, task: Pick<ManagementTask, "owner" | "suggestedOwner">): boolean {
-  return actor.active === 1 && (isManagementAdmin(actor) || task.owner === actor.name || (task.owner === null && task.suggestedOwner === actor.name));
+export function canViewManagementTask(actor: ManagementActor, task: Pick<ManagementTask, "owner" | "suggestedOwner"> & { watcher?: string | null }): boolean {
+  return inScope(actor as PermissionActor, task);
 }
 
 export function getManagementSnapshot(sqlite: DatabaseSync, claimed: ManagementActor) {
@@ -125,8 +133,8 @@ export function getManagementSnapshot(sqlite: DatabaseSync, claimed: ManagementA
       .map(project => ({ ...project, status: project.archivedAt === null ? project.status : "archived" }));
     const comments = sqlite.prepare("SELECT id,task_id AS taskId,author,body,created_at AS createdAt FROM comments ORDER BY created_at DESC,id DESC")
       .all().filter(row => manager || taskIds.has(String(row.taskId)));
-    const users = sqlite.prepare("SELECT id,name,role,active,CASE WHEN pin_hash IS NULL THEN 0 ELSE 1 END AS pinSet,created_at AS createdAt,updated_at AS updatedAt FROM users ORDER BY role,created_at,name")
-      .all().filter(row => manager || row.id === actor.id);
+    const users = sqlite.prepare("SELECT id,name,role,active,department,CASE WHEN pin_hash IS NULL THEN 0 ELSE 1 END AS pinSet,created_at AS createdAt,updated_at AS updatedAt FROM users ORDER BY role,created_at,name")
+      .all().filter(row => manager || actor.role === "manager" || row.id === actor.id);
     const attachments = sqlite.prepare("SELECT id,task_id AS taskId,file_name AS fileName,content_type AS contentType,size,uploaded_by AS uploadedBy,created_at AS createdAt FROM attachments ORDER BY created_at DESC")
       .all().filter(row => manager || taskIds.has(String(row.taskId)));
     const activity = sqlite.prepare("SELECT id,actor_user_id AS actorUserId,actor_name AS actorName,action,entity_type AS entityType,entity_id AS entityId,details,created_at AS createdAt FROM audit_logs ORDER BY created_at DESC,id DESC")
@@ -219,7 +227,8 @@ export function executeManagementAction(sqlite: DatabaseSync, claimed: Managemen
   return atomic(sqlite, true, () => {
     const actor = resolveManagementActor(sqlite, claimed);
     const manager = isManagementAdmin(actor);
-    if (!["claim", "cancel_claim", "comment", "submit"].includes(command.action) && !manager) return fail(403, "admin_required", "هذه العملية خاصة بباسم فقط");
+    const capability = ACTION_CAPABILITY[command.action];
+    if (!capability || !can(actor as PermissionActor, capability)) return fail(403, manager ? "unknown_action" : "admin_required", isOwner(actor as PermissionActor) ? "هذا الإجراء غير متاح" : "هذه العملية تحتاج صلاحية أعلى؛ اطلبها من باسم");
     const at = typeof options.now === "function" ? options.now() : options.now ?? Date.now();
     if (!Number.isSafeInteger(at) || at < 0) return fail(400, "invalid_time", "وقت العملية غير صالح");
     const context: Record<string, unknown> = {};
@@ -249,8 +258,9 @@ export function executeManagementAction(sqlite: DatabaseSync, claimed: Managemen
       entityType = "project";
       if (command.action === "add_project") {
         const name = required(command.name, "اسم المشروع"); entityId = randomUUID();
-        sqlite.prepare("INSERT INTO projects (id,name,status,created_by,created_at,updated_at) VALUES (?,?,'active',?,?,?)").run(entityId, name, actor.name, at, at);
-        message = `أضاف مشروع: ${name}`; auditAction = "create";
+        const status = manager ? "active" : "pending";
+        sqlite.prepare("INSERT INTO projects (id,name,status,created_by,created_at,updated_at) VALUES (?,?,?,?,?,?)").run(entityId, name, status, actor.name, at, at);
+        message = manager ? `أضاف مشروع: ${name}` : `اقترح مشروعًا بانتظار اعتماد باسم: ${name}`; auditAction = "create";
       } else {
         const projectCommand = command as Exclude<Extract<ManagementCommand, { projectId: string }>, { action: "add_task" | "move_task" }>;
         const project = projectById(sqlite, projectCommand.projectId); previous = project; entityId = project.id;
@@ -320,7 +330,7 @@ export function executeManagementAction(sqlite: DatabaseSync, claimed: Managemen
           case "claim":
             if (task.status !== "open" || (task.owner !== null && task.owner !== actor.name)) return fail(409, "invalid_transition", "المهمة ليست متاحة للاستلام");
             if (!manager && task.suggestedOwner !== actor.name) return fail(403, "not_assigned", "هذه المهمة لم يعيّنها باسم لك");
-            Object.assign(changes, { status: "progress", owner: actor.name, started_at: at, completed_at: null, rejection_reason: null });
+            Object.assign(changes, { status: "progress", owner: actor.name, started_at: at, completed_at: null, rejection_reason: null, last_update_at: at });
             message = `استلم المهمة وبدأ تنفيذها: ${task.title}`; auditAction = "claim"; break;
           case "cancel_claim": {
             if (task.status !== "progress") return fail(409, "invalid_transition", "المهمة ليست قيد التنفيذ");
@@ -332,16 +342,17 @@ export function executeManagementAction(sqlite: DatabaseSync, claimed: Managemen
             message = `ألغى استلام المهمة: ${task.title}`; auditAction = "unclaim"; break;
           }
           case "comment": {
-            if (!manager && (task.owner !== actor.name || task.status !== "progress")) return fail(403, "not_owned", "يمكنك إضافة تحديث فقط على مهمة استلمتها وهي قيد التنفيذ");
+            if (!manager && task.watcher !== actor.name && (task.owner !== actor.name || task.status !== "progress")) return fail(403, "not_owned", "يمكنك إضافة تحديث فقط على مهمة استلمتها وهي قيد التنفيذ");
             const comment = required(command.comment, "التعليق", 10_000);
             const inserted = sqlite.prepare("INSERT INTO comments (task_id,author,body,created_at) VALUES (?,?,?,?)").run(task.id, actor.name, comment, at);
+            changes.last_update_at = at;
             message = `أضاف تعليق #${String(inserted.lastInsertRowid)} على المهمة: ${task.title}`; auditAction = "comment";
             notification = { action: "comment", title: task.title, actor: actor.name, extra: comment.slice(0, 300) }; break;
           }
           case "submit":
             if (!manager && task.owner !== actor.name) return fail(403, "not_owned", "المهمة ليست مستلمة باسمك");
             if (task.status !== "progress") return fail(409, "invalid_transition", "المهمة ليست قيد التنفيذ");
-            Object.assign(changes, { status: "approval", completed_at: null, rejection_reason: null });
+            Object.assign(changes, { status: "approval", completed_at: null, rejection_reason: null, last_update_at: at });
             message = `أرسل المهمة لاعتماد باسم: ${task.title}`; auditAction = "submit"; break;
           case "approve":
             if (task.status !== "approval") return fail(409, "invalid_transition", "المهمة ليست بانتظار الاعتماد");
@@ -373,6 +384,28 @@ export function executeManagementAction(sqlite: DatabaseSync, claimed: Managemen
             message = `نقل المهمة «${task.title}» من «${project.name}» إلى «${destination.name}»`; auditAction = "move"; break;
           }
           case "archive_task": changes.archived_at = at; changes.archived_by = actor.name; message = `أرشف المهمة: ${task.title}`; auditAction = "archive"; break;
+          case "set_watcher": {
+            let watcher: string | null = null;
+            if (command.watcherId !== null && command.watcherId !== "") {
+              const user = sqlite.prepare("SELECT name FROM users WHERE id=? AND active=1").get(identifier(command.watcherId));
+              if (!user) return fail(400, "assignee_unavailable", "الموظف المختار غير متاح");
+              watcher = String(user.name);
+            }
+            changes.watcher = watcher; message = watcher ? `عيّن ${watcher} متابعًا للمهمة: ${task.title}` : `ألغى متابع المهمة: ${task.title}`; auditAction = "watch"; break;
+          }
+          case "set_blocker": {
+            if (!manager && task.owner !== actor.name) return fail(403, "not_owned", "المهمة ليست مستلمة باسمك");
+            const blocker = command.blocker === null || command.blocker === "" ? null : required(command.blocker, "سبب التعطيل", 1000);
+            changes.blocker = blocker; changes.last_update_at = at;
+            message = blocker ? `سجّل معطّلًا على المهمة «${task.title}»: ${blocker}` : `أزال المعطّل عن المهمة: ${task.title}`; auditAction = "blocker";
+            if (blocker) notification = { action: "blocker", title: task.title, actor: actor.name, extra: blocker.slice(0, 300) }; break;
+          }
+          case "set_expected": {
+            if (!manager && task.owner !== actor.name) return fail(403, "not_owned", "المهمة ليست مستلمة باسمك");
+            const expected = dateValue(command.expectedAt);
+            changes.expected_at = expected; changes.last_update_at = at;
+            message = expected ? `حدّد موعدًا متوقعًا للإنجاز ${expected}: ${task.title}` : `أزال الموعد المتوقع: ${task.title}`; auditAction = "expected"; break;
+          }
           case "restore_task":
             if (task.archivedAt === null) return fail(409, "invalid_transition", "المهمة ليست مؤرشفة");
             changes.archived_at = null; changes.archived_by = null; message = `استرجع المهمة من الأرشيف: ${task.title}`; auditAction = "restore"; break;

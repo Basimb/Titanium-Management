@@ -30,8 +30,43 @@ function command(action,fields={},taskId='t',projectId=null) { const p=emptySecr
 function teamMessage(text='الاجتماع بكرا الساعة 10',recipientIds=['all-team']) { const p=emptySecretaryIntent('message_team');p.fields.body=text;p.recipientIds=recipientIds;return p; }
 const pending = db => db.prepare('SELECT * FROM secretary_pending').get();
 
+test('caller identity with projects comes from authenticated sender without model IDs or guessed identity',async t=>{
+ const f=fixture(t);
+ const result=await f.run(emptySecretaryIntent('chat','إنت مين؟'),{senderNumber:'12025550103',text:'مرحبا، مين أنا وشو المشاريع الموجودة عندنا؟'},async()=>{throw Error('Identity needs no inference');});
+ assert.match(result.reply,/أهلًا باسم/);assert.match(result.reply,/مشروع تجريبي/);
+ assert.doesNotMatch(result.reply,/ID:|إنت مين|أنا بخير/);
+ const member=await f.run(emptySecretaryIntent('chat'),{text:'مين أنا؟'},async()=>{throw Error('No inference');});
+ assert.match(member.reply,/أهلًا خالد/);assert.doesNotMatch(member.reply,/أهلًا باسم/);
+});
+
+test('owner personal preferences persist privately and can be replaced and forgotten',async t=>{
+ const f=fixture(t); const owner={senderNumber:'12025550103'};
+ const saved=await f.run(emptySecretaryIntent('chat'),{...owner,text:'احفظ عني: الردود: مختصرة'});
+ assert.equal(saved.status,'applied');
+ let seen;
+ await f.run(emptySecretaryIntent('chat'),{...owner,text:'مرحبا'},async input=>{seen=input;return emptySecretaryIntent('chat','أهلًا');});
+ assert.equal(seen.personalContext[0].body,'مختصرة');
+ await f.run(emptySecretaryIntent('chat'),{...owner,groupId:'12345@g.us',text:'مرحبا'},async input=>{seen=input;return emptySecretaryIntent('chat','أهلًا');});
+ assert.deepEqual(seen.personalContext,[]);
+ await f.run(emptySecretaryIntent('chat'),{text:'مرحبا'},async input=>{seen=input;return emptySecretaryIntent('chat','أهلًا');});
+ assert.deepEqual(seen.personalContext,[]);
+ await f.run(emptySecretaryIntent('chat'),{...owner,text:'انس عني: الردود'});
+ assert.equal(f.db.prepare('SELECT count(*) n FROM secretary_personal_memory').get().n,0);
+});
+
+test('a disputed private answer is recalled across days without turning criticism into an action',async t=>{
+ const f=fixture(t); const owner={senderNumber:'12025550103'};
+ await f.run(emptySecretaryIntent('chat','اقتراح سابق'),{...owner,text:'كيف أرتب اللوحات؟'});
+ await f.run(emptySecretaryIntent('chat','براجعها'),{...owner,text:'جوابك غلط'});
+ assert.equal(f.db.prepare('SELECT count(*) n FROM secretary_learning_memory').get().n,1);
+ f.tick(2*86400000);let seen;
+ await f.run(emptySecretaryIntent('chat'),{...owner,text:'كيف أرتب اللوحات؟'},async input=>{seen=input;return emptySecretaryIntent('chat','نراجع التفاصيل');});
+ assert.equal(seen.learningMemory.length,1);assert.equal(seen.learningMemory[0].disputedAnswer,'اقتراح سابق');
+ assert.equal(f.db.prepare('SELECT count(*) n FROM tasks').get().n,2);
+});
+
 test('secretary scoped friendly summary has direct link and no foreign data', async t=>{
- const f=fixture(t); const result=await f.run(); assert.equal(result.status,'summary'); assert.match(result.reply,/خالد/);assert.match(result.reply,/project=p&task=t/);assert.doesNotMatch(result.reply,/مهمة شادي|تفاصيل سرية/);
+ const f=fixture(t); const result=await f.run(); assert.equal(result.status,'summary'); assert.match(result.reply,/خالد/);assert.match(result.reply,/🔴 لوحة/);assert.doesNotMatch(result.reply,/https?:\/\/|مهمة شادي|تفاصيل سرية/);
 });
 test('task card colors are actual priority, never completion or lateness',()=>{
  const state={projects:[{id:'p',name:'مشروع'}],comments:[]};
@@ -39,7 +74,7 @@ test('task card colors are actual priority, never completion or lateness',()=>{
   ['red','completed',null,'🔴','قصوى'],['green','progress','2020-01-01','🟢','عادية'],['yellow','open',null,'🟡','متوسطة'],
  ]){
   const text=secretaryTaskCard({id:'t',projectId:'p',title:'مهمة',priority,status,dueDate},state,1788580000000);
-  assert.ok(text.startsWith(emoji));assert.match(text,new RegExp(`الأولوية: ${label}`));
+  assert.ok(text.startsWith('🔵 *مشروع*\n\n'+emoji+' مهمة'));assert.match(text,new RegExp(`الأولوية: ${label}`));
   if(priority==='green')assert.match(text,/متأخرة عن الموعد/);
  }
  assert.ok(secretaryTaskCard({id:'t',priority:'invalid'},state,1788580000000).startsWith('⚪'));
@@ -48,8 +83,8 @@ test('explicit color lists use DB without inference, exclude archive, and never 
  const f=fixture(t);f.db.exec("UPDATE tasks SET status='completed' WHERE id='t'; UPDATE tasks SET priority='green',due_date='2020-01-01' WHERE id='private'");
  const before=JSON.stringify(f.db.prepare('SELECT * FROM tasks ORDER BY id').all());
  const run=text=>f.run(undefined,{text,senderNumber:'12025550103'},async()=>{throw Error('color read must not ask model');});
- const red=await run('اعطيني المهام الحمراء');assert.match(red.reply,/🔴 \*لوحة\*/);assert.match(red.reply,/معتمدة/);assert.doesNotMatch(red.reply,/مهمة شادي/);
- const green=await run('وريني المهام الخضراء');assert.match(green.reply,/🟢 \*مهمة شادي الخاصة\*/);assert.match(green.reply,/متأخرة عن الموعد/);assert.doesNotMatch(green.reply,/\*لوحة\*/);
+ const red=await run('اعطيني المهام الحمراء');assert.match(red.reply,/🔴 لوحة/);assert.match(red.reply,/معتمدة/);assert.doesNotMatch(red.reply,/مهمة شادي/);
+ const green=await run('وريني المهام الخضراء');assert.match(green.reply,/🟢 مهمة شادي الخاصة/);assert.match(green.reply,/متأخرة عن الموعد/);assert.doesNotMatch(green.reply,/\*لوحة\*/);
  const yellow=await run('بدي المهام الصفراء');assert.match(yellow.reply,/المطابق ضمن صلاحياتك \(دون الأرشيف\): 0/);assert.match(yellow.reply,/ما في مهام تطابق/);
  assert.equal(JSON.stringify(f.db.prepare('SELECT * FROM tasks ORDER BY id').all()),before);
  assert.equal(f.db.prepare('SELECT count(*) n FROM audit_logs').get().n,0);
@@ -76,7 +111,7 @@ test('priority pagination declares counts, stays bounded and preserves every tas
  let text='المهام الحمراء';const seen=new Set();let pages=0;
  for(;;){
   const r=await run(text);pages++;assert.ok(r.reply.length<=3800);assert.match(r.reply,/المطابق ضمن صلاحياتك \(دون الأرشيف\): 19/);
-  for(const match of r.reply.matchAll(/&task=([^\s]+)/g)){assert.ok(!seen.has(match[1]));seen.add(match[1]);}
+  for(const match of r.reply.matchAll(/^🔴 ((?:لوحة|تجربة قائمة \d+))$/gm)){assert.ok(!seen.has(match[1]));seen.add(match[1]);}
   const next=/للتكملة اكتب: «([^»]+)»/.exec(r.reply);if(!next)break;text=next[1];assert.ok(pages<10);
  }
  assert.equal(seen.size,19);assert.ok(pages>=2);
@@ -180,7 +215,7 @@ test('explicit reminder is durable, sent once and not sent for completed work',a
 });
 test('provider search never receives catalog or history and requires actual web tool evidence',async()=>{
  let body;const reply=await searchSecretaryWeb('LG televisions Jordan',{apiKey:'synthetic',fetcher:async(url,options)=>{body=JSON.parse(options.body);return Response.json({choices:[{message:{content:'نتيجة https://example.com/product',executed_tools:[]}}]});}});
- assert.equal(body.model,'groq/compound-mini');assert.deepEqual(body.compound_custom.tools.enabled_tools,['web_search']);assert.doesNotMatch(JSON.stringify(body),/taskCatalog|senderNumber|contacts/);assert.match(reply,/ما قدرت أتحقق/);
+ assert.equal(body.model,'openai/gpt-oss-120b');assert.deepEqual(body.tools,[{type:'browser_search'}]);assert.equal(body.tool_choice,'required');assert.doesNotMatch(JSON.stringify(body),/taskCatalog|senderNumber|contacts/);assert.match(reply,/ما قدرت أتحقق/);
 });
 test('planner response limits reject tool calls and success cannot come from model JSON',async()=>{
  const input={text:'مرحبا',tasks:[],projects:[],users:[],actor:{id:'member',name:'خالد',role:'member'},history:[],now:new Date().toISOString()};
@@ -403,4 +438,61 @@ test('duplicate message confirmation never enqueues twice; mapping changed after
  assert.equal((await handleSecretaryEvent(f.db,e,f.config,deps)).status,'duplicate');
  const s=getSecretaryOutboxStatus(f.db,{actor:{id:'basem',name:'باسم',role:'admin',active:1},origin:{senderNumber:manager.senderNumber,groupId:null}},f.config);
  assert.equal(s.recipientCount,1);
+});
+
+
+
+test('general task question recovers from inference failure with scoped live data only',async t=>{
+ const f=fixture(t);const fail=async()=>{throw Error('provider unavailable');};
+ for(const text of ['شو المهام المطلوبه','شو المهام المطلوبة؟','شو مهامي؟']){
+   const r=await f.run(null,{text},fail);assert.equal(r.status,'summary');
+   assert.match(r.reply,/🔵 \*مشروع تجريبي\*/);assert.match(r.reply,/🔴 لوحة/);
+   assert.doesNotMatch(r.reply,/مهمة شادي|تفاصيل سرية|https?:/);
+ }
+ for(const text of ['احذف المهام','شو المهام المطلوبة في مشروع ثان','شو المهام المطلوبة بكرا']){
+   await assert.rejects(f.run(null,{text},fail),/provider unavailable/);
+ }
+ assert.equal(f.db.prepare('SELECT count(*) n FROM tasks').get().n,2);
+});
+
+test('conversational lists enforce bold project headings with ordinary task names', async()=>{
+ const {formatSecretaryProjectHeadings}=await import('../lib/secretary-service.ts');
+ const state={projects:[{name:'مشروع تجريبي'}],tasks:[{title:'مهمة أولى'}]};
+ assert.equal(formatSecretaryProjectHeadings('🔵 مشروع تجريبي\n🔴 **مهمة أولى**',state),'🔵 *مشروع تجريبي*\n🔴 مهمة أولى');
+ assert.equal(formatSecretaryProjectHeadings('🔵 **مشروع تجريبي**:\n🟢 مهمة أولى',state),'🔵 *مشروع تجريبي*:\n🟢 مهمة أولى');
+ assert.equal(formatSecretaryProjectHeadings('ناقشنا مشروع تجريبي اليوم',state),'ناقشنا مشروع تجريبي اليوم');
+});
+
+test('project test request survives model start metadata and confirms once without team notices',async t=>{
+ const f=fixture(t);
+ const plan=emptySecretaryIntent('project_draft');plan.intakeMode='start';plan.fields.name='تجربة السكرتير';plan.message='اختبار فقط | - | green | -';
+ const preview=await f.run(plan,{senderNumber:'12025550103',text:'افتح مشروع اسمه تجربة السكرتير، فيه مهمة اختبار فقط، ولا تبعت أي رسالة للفريق'});
+ assert.equal(preview.status,'confirmation');assert.match(preview.reply,/بدون إرسال إشعارات/);
+ assert.equal(f.db.prepare('SELECT count(*) n FROM projects').get().n,2);
+ const token=pending(f.db).token;
+ const event=f.event({senderNumber:'12025550103',text:'موافق '+token});
+ const run=()=>handleSecretaryEvent(f.db,event,f.config,{now:()=>f.now,infer:async()=>assert.fail('confirmation must not infer')});
+ const result=await run();assert.equal(result.status,'applied');await run();
+ assert.equal(f.db.prepare('SELECT count(*) n FROM projects').get().n,3);
+ assert.equal(f.db.prepare('SELECT count(*) n FROM tasks').get().n,3);
+ assert.equal(f.db.prepare('SELECT count(*) n FROM agent_outbox').get().n,0);
+});
+
+
+test('ordinary task listing bypasses unavailable provider without dropping filters',async t=>{
+ const f=fixture(t);
+ const r=await f.run(null,{text:'وريني المهام كلها كمان مره'},async()=>assert.fail('list does not need inference'));
+ assert.equal(r.status,'summary');assert.match(r.reply,/لوحة/);assert.doesNotMatch(r.reply,/مهمة شادي/);
+ let called=false;await f.run(null,{text:'وريني المهام كلها بكرا'},async()=>{called=true;return emptySecretaryIntent('clarify','أي موعد؟')});
+ assert.equal(called,true);
+});
+
+test('general summary groups all 25 short tasks under one bold heading without trailing spaces',async t=>{
+ const f=fixture(t);
+ f.db.prepare("DELETE FROM tasks WHERE id='private'").run();
+ for(let i=2;i<=25;i++)f.db.prepare("INSERT INTO tasks(id,project_id,title,details,priority,status,owner,suggested_owner,created_at,updated_at) VALUES(?, 'p', ?, '', 'green', 'open', NULL, 'خالد', 1, 1)").run('grouped-'+i,'مهمة تجريبية '+i);
+ const r=await f.run(null,{text:'وريني المهام كلها كمان مره'},async()=>assert.fail());
+ assert.equal((r.reply.match(/🔵 \*مشروع تجريبي\*/g)||[]).length,1);
+ assert.match(r.reply,/مهمة تجريبية 25/);assert.match(r.reply,/جميع المهام \(25\)/);
+ assert.doesNotMatch(r.reply,/&#x20;| +\n|\*مهمة/);assert.ok(r.reply.length<4000);
 });

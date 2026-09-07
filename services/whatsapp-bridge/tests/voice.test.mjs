@@ -11,10 +11,18 @@ function ogg(seconds=1) {
 }
 function audio(bytes=ogg()){return {ptt:true,mimetype:'audio/ogg; codecs=opus',seconds:1,fileLength:bytes.length,mediaKey:Buffer.alloc(32,1),fileSha256:createHash('sha256').update(bytes).digest(),directPath:'/v/t62/voice.enc'};}
 test('voice metadata excludes redirects, arbitrary hosts, huge files and nonPTT',()=>{
- const a=audio();assert.equal(validVoiceMetadata(a),true);for(const change of[{seconds:61},{fileLength:3*1024*1024},{ptt:false},{url:'https://evil.example/file'},{directPath:'//evil.example/file'},{mimetype:'video/mp4'}])assert.equal(validVoiceMetadata({...a,...change}),false);
+ const a=audio();assert.equal(validVoiceMetadata(a),true);for(const change of[{seconds:301},{fileLength:11*1024*1024},{ptt:false},{url:'https://evil.example/file'},{directPath:'//evil.example/file'},{mimetype:'video/mp4'}])assert.equal(validVoiceMetadata({...a,...change}),false);
 });
 test('actual Ogg duration is checked, malformed/chained/overlong streams rejected',()=>{
- assert.equal(opusDuration(ogg(1)),1);assert.throws(()=>opusDuration(ogg(61)));assert.throws(()=>opusDuration(Buffer.from('fake')));assert.throws(()=>opusDuration(Buffer.concat([ogg(),ogg()])));
+ assert.equal(opusDuration(ogg(1)),1);assert.throws(()=>opusDuration(ogg(301)));assert.throws(()=>opusDuration(Buffer.from('fake')));assert.throws(()=>opusDuration(Buffer.concat([ogg(),ogg()])));
+});
+
+test('complete voice pages without EOS retain duration validation while truncated pages fail',()=>{
+ const bytes=ogg(2);bytes[47+5]=0;
+ assert.equal(opusDuration(bytes),2);
+ assert.throws(()=>opusDuration(bytes.subarray(0,bytes.length-1)));
+ const long=ogg(301);long[47+5]=0;assert.throws(()=>opusDuration(long),/voice_duration_exceeded/);
+ const invalid=ogg(0);invalid[47+5]=0;assert.throws(()=>opusDuration(invalid),/voice_duration_invalid/);
 });
 test('login codes and obvious credentials cannot become work transcripts',()=>{
  for(const text of['123456','١٢٣٤٥٦','رمز الدخول 123456','my password is secret','gsk_1234567890123456'])assert.equal(safeVoiceTranscript(text),null);assert.equal(safeVoiceTranscript('خلصت اللوحة'),'خلصت اللوحة');

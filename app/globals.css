@@ -271,3 +271,14 @@ button, input, textarea, select { font-family:"Cairo", Arial, sans-serif; }
   .titanium-secretary-badge { margin-inline-start:0; margin-top:3px; display:table; }
 }
 
+
+.titanium-monitoring { margin:18px 0; }
+.titanium-monitor-grid { display:grid; gap:12px; grid-template-columns:repeat(auto-fit,minmax(280px,1fr)); }
+.titanium-monitor-card { background:#fff; border:1px solid #e3e5df; border-radius:14px; padding:12px 14px; }
+.titanium-monitor-card h3 { margin:0 0 8px; font-size:.95rem; font-weight:700; color:#252a22; }
+.titanium-monitor-row { display:flex; flex-direction:column; gap:6px; padding:8px 0; border-top:1px solid #f0f1ee; }
+.titanium-monitor-row > div { display:flex; flex-direction:column; gap:2px; }
+.titanium-monitor-row strong { font-size:.88rem; color:#252a22; }
+.titanium-monitor-row span { font-size:.76rem; color:#70766c; }
+.titanium-monitor-actions { display:flex; gap:6px; align-items:center; flex-wrap:wrap; }
+.titanium-rules { margin:8px 0 0; padding-inline-start:18px; font-size:.82rem; color:#3b4038; }

@@ -1,4 +1,5 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
+import { SecretaryProviderError } from "./secretary-intent.ts";
 import type { DatabaseSync } from "node:sqlite";
 import { inferWhatsAppIntent, type IntentInput, type ParsedIntent } from "./whatsapp-intent.ts";
 import { normalizeContactNumber, type ChatContact } from "./team-chat-policy.ts";
@@ -164,7 +165,13 @@ export async function handleTeamChatRequest(request: Request, dependencies: {
     });
     const result = applyTeamChatIntent(sqlite, { ...eventKey, intent, catalog }, config);
     return response(result, result.status === "denied" ? 403 : 200);
-  } catch {
+  } catch (error) {
+    if (error instanceof SecretaryProviderError) {
+      console.warn("secretary_provider_failure", error.code);
+      if (error.retryAfterSeconds) return new Response(JSON.stringify({ error: error.code }), { status: 503,
+        headers: { ...RESPONSE_HEADERS, "content-type": "application/json", "retry-after": String(error.retryAfterSeconds) } });
+      return response({ status: "unavailable", reply: "ما قدرت أفهم الطلب بشكل موثوق، وما نفّذت تغييرًا. وضّح المطلوب بجملة ثانية." });
+    }
     // Never leak DB paths, provider credentials, employee text, or provider responses.
     return response({ error: "Message could not be processed. No success is being claimed." }, 503);
   }

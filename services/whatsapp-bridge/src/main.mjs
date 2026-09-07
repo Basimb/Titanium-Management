@@ -26,6 +26,7 @@ async function main() {
   let isActiveNumber = () => false;
   let secretaryJobs;
   let secretaryOutbox;
+  let agentFollowups;
   if (process.env.TEAM_CHAT_AUTH_DATABASE) {
     const { DatabaseSync } = await import('node:sqlite');
     const { lstatSync, realpathSync } = await import('node:fs');
@@ -46,6 +47,10 @@ async function main() {
         contacts, allowedGroupIds: [...config.allowedGroups] } });
       const outboxSettingsPath = process.env.TEAM_CHAT_AUTH_CONFIG_PATH;
       secretaryOutbox = createSecretaryOutboxJobs({ db: jobsDb, config: () => readOutboxConfig(outboxSettingsPath) });
+      const { createFollowupJobs } = await import('../../../lib/agent-followups.ts');
+      agentFollowups = createFollowupJobs({ db: jobsDb, config: () => ({
+        enabled: process.env.SECRETARY_FOLLOWUP_ENABLED === '1', contacts,
+        groupId: [...config.allowedGroups][0] ?? null, publicUrl: process.env.TITANIUM_PUBLIC_URL || undefined }) });
     }
   }
   let otpQueue;
@@ -64,7 +69,7 @@ async function main() {
   }
   const runtime = createBridgeRuntime({
     config, store, auth, makeWASocket, jidNormalizedUser, makeCacheableSignalKeyStore, DisconnectReason, logger, otpQueue,
-    control, isActiveNumber, secretaryJobs, secretaryOutbox, proto, generateWAMessageContent, generateWAMessage, decryptPollVote, normalizeMessageContent,
+    control, isActiveNumber, secretaryJobs, secretaryOutbox, agentFollowups, proto, generateWAMessageContent, generateWAMessage, decryptPollVote, normalizeMessageContent,
     ...(config.voiceEnabled ? { transcribeVoice: createVoiceTranscriber({ apiKey: process.env.GROQ_API_KEY, downloadContent: downloadContentFromMessage }) } : {}),
     onStop: code => { process.exitCode = code === 'service_shutdown' ? 0 : 78; },
   });

@@ -262,3 +262,14 @@ test("integration: malicious cross-task model output cannot alter another employ
   assert.equal(f.sqlite.prepare("SELECT status FROM tasks WHERE id='private-task'").get().status, "progress");
   assert.deepEqual(f.counts(), [0, 0, 1]);
 });
+
+test("provider failures expose only safe codes and preserve retry timing", async t => {
+  const {SecretaryProviderError}=await import('../lib/secretary-intent.ts');
+  const db=new DatabaseSync(':memory:');t.after(()=>db.close());
+  db.exec("CREATE TABLE users(id TEXT,name TEXT,role TEXT,active INTEGER); INSERT INTO users VALUES('tester','Test','member',1)");
+  for(const [error,status,wait] of [[new SecretaryProviderError('rate_limited',41),503,'41'],[new SecretaryProviderError('invalid_plan'),200,null]]){
+    const r=await handleTeamChatRequest(request(),{config:configuration,getDatabase:()=>db,now:()=>now+60000,secretary:async()=>{throw error}});
+    assert.equal(r.status,status);assert.equal(r.headers.get('retry-after'),wait);
+    const body=await r.text();assert.doesNotMatch(body,/gsk_|fields|json_validate|stack/);
+  }
+});

@@ -110,8 +110,8 @@ test('search remains evidence-based: no tool results means no invented verificat
     seen = JSON.parse(options.body);
     return Response.json({ choices: [{ message: { content: 'بحثت وصححت الجواب https://invented.invalid', executed_tools: [] } }] });
   } });
-  assert.equal(seen.model, 'groq/compound-mini'); assert.equal(seen.max_completion_tokens, 1000);
-  assert.deepEqual(seen.compound_custom.tools.enabled_tools, ['web_search']);
+  assert.equal(seen.model, 'openai/gpt-oss-120b'); assert.equal(seen.max_completion_tokens, 2048);
+  assert.deepEqual(seen.tools, [{type:'browser_search'}]); assert.equal(seen.tool_choice, 'required');
   assert.equal(seen.messages[1].content, 'سؤال عام اصطناعي');
   assert.doesNotMatch(JSON.stringify(seen), /previousQuestion|previousAnswer|تقرير داخلي|موظف اصطناعي/);
   assert.match(answer, /ما قدرت أتحقق/); assert.doesNotMatch(answer, /invented|صححت/);

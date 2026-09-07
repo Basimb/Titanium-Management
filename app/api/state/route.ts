@@ -15,6 +15,20 @@ import { notifyManagementGroup, taskNotification } from "@/lib/whatsapp";
 import { readTeamChatSettings } from "@/lib/team-chat-settings";
 import { whatsappLoginSettings } from "@/lib/whatsapp-login-settings";
 import { executeManagementAction, getManagementSnapshot, isManagementAction, ManagementActionError, parseManagementCommand } from "@/lib/management-actions";
+import { listApprovals, decideApproval } from "@/lib/approvals";
+import { activeRules } from "@/lib/rules";
+
+/** DASHBOARD_READONLY=1 turns the site into a monitoring screen: only the owner may write, and only approvals decisions. */
+function dashboardReadonly() { return (readTeamChatSettings().DASHBOARD_READONLY ?? process.env.DASHBOARD_READONLY) === "1"; }
+function monitoring(user: TitaniumUser) {
+  const sqlite = chatDatabase();
+  const safe = <T,>(work: () => T, fallback: T): T => { try { return work(); } catch { return fallback; } };
+  const approvals = safe(() => listApprovals(sqlite, user, { status: "pending", limit: 50 }), []);
+  const rules = user.id === "basem" ? safe(() => activeRules(sqlite).map(rule => ({ id: rule.id, statement: rule.statement, kind: rule.kind })), []) : [];
+  const followups = user.id === "basem" ? safe(() => sqlite.prepare("SELECT id,kind,target_user AS targetUser,entity_id AS entityId,sent_at AS sentAt,response FROM agent_followups ORDER BY sent_at DESC LIMIT 30").all(), []) : [];
+  const agentActions = safe(() => sqlite.prepare("SELECT id,actor_name AS actorName,action,entity_type AS entityType,entity_id AS entityId,details,created_at AS createdAt FROM audit_logs WHERE details LIKE '%\"source\":\"whatsapp_secretary\"%' OR details LIKE '%\"source\":\"approval\"%' ORDER BY created_at DESC LIMIT 30").all(), []);
+  return { readonly: dashboardReadonly(), approvals, rules, followups, agentActions };
+}
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -82,7 +96,7 @@ async function bootstrap() {
 }
 
 function loadState(user: TitaniumUser) {
-  return privateJson(getManagementSnapshot(chatDatabase(), user));
+  return privateJson({ ...getManagementSnapshot(chatDatabase(), user), monitoring: monitoring(user) });
 }
 
 export async function GET(request: Request) {
@@ -110,6 +124,14 @@ export async function POST(request: Request) {
     const now = Date.now();
     let waNotification:string|null = null;
 
+    if (action === "decide_approval") {
+      const denied = requireAdmin(user); if (denied) return denied;
+      const decision = body.decision === "approved" ? "approved" : body.decision === "rejected" ? "rejected" : null;
+      if (!decision) return bad("حدد القرار: اعتماد أو رفض");
+      decideApproval(chatDatabase(), user, { approvalId: text(body.approvalId), decision, note: text(body.note) || undefined }, { now });
+      return loadState(user);
+    }
+    if (dashboardReadonly() && user.id !== "basem") return forbidden("اللوحة للعرض فقط. التحديثات تتم عبر سكرتير باسم على واتساب.");
     if (isManagementAction(action)) {
       const result = executeManagementAction(chatDatabase(), user, parseManagementCommand(body), { source: "site", now });
       // The database transaction has committed; object storage operations must stay outside it.

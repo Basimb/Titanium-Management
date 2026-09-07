@@ -5,6 +5,13 @@ import { resolveChatUser, normalizeContactNumber, type ChatUser } from "./team-c
 import type { TeamChatConfig, TeamChatEnvelope } from "./team-chat-gateway.ts";
 import { directTaskCreationIntent, emptySecretaryIntent, validateSecretaryIntent, type SecretaryIntent, type SecretaryModelInput } from "./secretary-intent.ts";
 import { priorityTaskQuery, type PriorityTaskQuery } from "./secretary-priority-query.ts";
+import { AGENT_KINDS } from "./secretary-intent.ts";
+import { applyDecision, createProjectBundle, handleAgentIntent, type AgentResult } from "./secretary-agent.ts";
+import { listApprovals } from "./approvals.ts";
+import { activeRules } from "./rules.ts";
+import { searchKnowledge, formatKnowledgeHits } from "./knowledge.ts";
+import { migrateSecretaryMemory, rememberSecretaryMistake, recallSecretaryMemory, personalMemoryCommand, updatePersonalMemory, personalMemory } from "./secretary-memory.ts";
+import { enqueueAgentMessage } from "./agent-followups.ts";
 import { safeConversationalReply } from "./secretary-conversation-policy.ts";
 import { secretaryReviewRequest, isSecretaryIdentityQuery, SECRETARY_IDENTITY } from "./secretary-review.ts";
 import { migrateSecretaryOutbox, getSecretaryOutboxRecipients, createSecretaryOutboxPreview, confirmSecretaryOutboxPreview, getSecretaryOutboxStatus, secretaryOutboxDeliveryLabel, SecretaryOutboxError } from "./secretary-outbox.ts";
@@ -35,6 +42,7 @@ const eventKey = (event: Event) => hash([event.senderNumber, event.groupId, even
 const eventHash = (event: Event) => hash([event.senderNumber, event.groupId, event.text, event.replyToMessageId ?? null, event.responseMessageId ?? null, event.inputKind || "text", ...(event.choice ? [event.choice] : [])]);
 function transaction<T>(db: DatabaseSync, work: () => T): T { db.exec("BEGIN IMMEDIATE"); try { const result = work(); db.exec("COMMIT"); return result; } catch (error) { db.exec("ROLLBACK"); throw error; } }
 export function migrateSecretary(db: DatabaseSync) {
+  migrateSecretaryMemory(db);
   migrateManagementActions(db);
   migrateSecretaryOutbox(db);
   migrateSecretaryChoices(db);
@@ -50,6 +58,12 @@ function actorFor(db: DatabaseSync, event: Event, config: TeamChatConfig) {
   return resolveChatUser({ senderNumber: event.senderNumber, groupId: event.groupId }, config.contacts, db.prepare("SELECT id,name,role,active FROM users").all() as ChatUser[], config.allowedGroupIds);
 }
 function stateFor(db: DatabaseSync, actor: ChatUser): Snapshot { return getManagementSnapshot(db, actor) as unknown as Snapshot; }
+function ownershipCandidates(db: DatabaseSync, actor: ChatUser): NonNullable<SecretaryModelInput["ownershipCandidates"]> {
+  if (actor.id === "basem" || actor.role === "admin") return [];
+  const projects = new Map((db.prepare("SELECT id,name FROM projects WHERE archived_at IS NULL").all() as Array<{ id: string; name: string }>).map(p => [p.id, p.name]));
+  return (db.prepare("SELECT id,title,project_id AS projectId,status,owner,suggested_owner AS suggestedOwner FROM tasks WHERE archived_at IS NULL AND status NOT IN ('completed','approval') ORDER BY created_at,id").all() as Array<{ id: string; title: string; projectId: string; status: string; owner: string | null; suggestedOwner: string | null }>)
+    .slice(0, 80).map(task => ({ id: task.id, title: task.title, projectName: projects.get(task.projectId) || "مشروع غير محدد", status: task.status, assignee: task.owner || task.suggestedOwner }));
+}
 function fingerprint(state: Snapshot) { return hash({ tasks: state.tasks, projects: state.projects, users: state.users.map(u => ({ id: u.id, name: u.name, role: u.role, active: u.active })), comments: state.comments }); }
 function scopeAllowed(scope: string[], state: Snapshot) { const ids = new Set([...state.tasks.map(t => "t:" + t.id), ...state.projects.map(p => "p:" + p.id)]); return scope.every(id => ids.has(id)); }
 function conversationHistory(db: DatabaseSync, key: string, state: Snapshot, now: number, anchor?: { created_at: number; sequence: number }): HistoryRow[] {
@@ -113,12 +127,23 @@ const PRIORITIES: Record<string, { icon: string; label: string; color: string }>
   yellow: { icon: "🟡", label: "متوسطة", color: "الصفراء" },
   green: { icon: "🟢", label: "عادية", color: "الخضراء" },
 };
+export function formatSecretaryProjectHeadings(reply: string, state: Pick<Snapshot, "projects" | "tasks">) {
+  return reply.split("\n").map(line => {
+    const plain = line.replace(/\*/g, "");
+    const content = plain.replace(/^\s*(?:(?:[-•]|\d+[.)])\s*)?(?:[🔵🔴🟡🟢⚪]\s*)?(?:المشروع:\s*)?/u, "");
+    const project = [...state.projects].sort((a, b) => b.name.length - a.name.length).find(p =>
+      content === p.name || content.startsWith(p.name + ":") || content.startsWith(p.name + " —") || content.startsWith(p.name + " -"));
+    if (project) return `🔵 *${project.name.replace(/\*/g, "")}*${content.slice(project.name.length)}`;
+    if (state.tasks.some(t => content === t.title || content.startsWith(t.title + " —") || content.startsWith(t.title + ":"))) return plain;
+    return line;
+  }).join("\n");
+}
 export function secretaryTaskCard(task: Task, state: Snapshot, now: number, detailed = false) {
   const project = state.projects.find(p => p.id === task.projectId);
   const latest = state.comments.filter(c => c.taskId === task.id).sort((a, b) => b.createdAt - a.createdAt)[0];
   const priority = PRIORITIES[task.priority];
   const overdue = task.status !== "completed" && task.dueDate && task.dueDate < new Date(now + 3 * 3600_000).toISOString().slice(0, 10);
-  return `${priority?.icon || "⚪"} *${clean(task.title, 150)}*\n${clean(project?.name, 90)} • ${LABELS[task.status] || clean(task.status)}${overdue ? " • متأخرة عن الموعد" : ""}\nالأولوية: ${priority?.label || "غير محددة"}\nالمسؤول: ${clean(task.owner || task.suggestedOwner || "لم يُعيّن")} ${task.dueDate ? `• الموعد: ${clean(task.dueDate, 10)}` : ""}${detailed ? `\nالمطلوب: ${clean(task.details || "لا توجد تفاصيل إضافية", 600)}${latest ? `\nآخر تحديث (${clean(latest.author, 50)}): ${clean(latest.body, 500)}` : "\nلا يوجد تحديث مسجّل بعد."}` : ""}\n${taskLink(task)}`;
+  return `${project ? `🔵 *${clean(project.name, 90)}*\n\n` : ""}${priority?.icon || "⚪"} ${clean(task.title, 150)}\n${LABELS[task.status] || clean(task.status)}${overdue ? " • متأخرة عن الموعد" : ""}\nالأولوية: ${priority?.label || "غير محددة"}\nالمسؤول: ${clean(task.owner || task.suggestedOwner || "لم يُعيّن")} ${task.dueDate ? `• الموعد: ${clean(task.dueDate, 10)}` : ""}${detailed ? `\nالمطلوب: ${clean(task.details || "لا توجد تفاصيل إضافية", 600)}${latest ? `\nآخر تحديث (${clean(latest.author, 50)}): ${clean(latest.body, 500)}` : "\nلا يوجد تحديث مسجّل بعد."}` : ""}`;
 }
 function priorityReadReply(query: Extract<PriorityTaskQuery, { kind: "query" }>, state: Snapshot, now: number, text: string): { result: Result; scope: string[] } {
   const priority = PRIORITIES[query.priority];
@@ -130,7 +155,7 @@ function priorityReadReply(query: Extract<PriorityTaskQuery, { kind: "query" }>,
     && (!query.status || (query.status === "overdue" ? t.status !== "completed" && !!t.dueDate && t.dueDate < today : t.status === query.status)))
     .sort((a, b) => a.projectId.localeCompare(b.projectId) || a.id.localeCompare(b.id, "en", { numeric: true }));
   const project = state.projects.find(p => p.id === query.projectId);
-  const header = `${priority.icon} *المهام ${priority.color} — أولوية ${priority.label}*${project ? `\nالمشروع: ${clean(project.name, 100)}` : ""}${owner ? `\nالمسؤول: ${clean(owner.name, 60)}` : ""}${query.status ? `\nالحالة: ${query.status === "overdue" ? "متأخرة عن الموعد" : LABELS[query.status]}` : ""}\nالمطابق ضمن صلاحياتك (دون الأرشيف): ${tasks.length}\nاللون للأولوية؛ حالة التنفيذ مذكورة لكل مهمة.\n`;
+  const header = `${priority.icon} *المهام ${priority.color} — أولوية ${priority.label}*${project ? `\n🔵 *${clean(project.name, 100)}*` : ""}${owner ? `\nالمسؤول: ${clean(owner.name, 60)}` : ""}${query.status ? `\nالحالة: ${query.status === "overdue" ? "متأخرة عن الموعد" : LABELS[query.status]}` : ""}\nالمطابق ضمن صلاحياتك (دون الأرشيف): ${tasks.length}\nاللون للأولوية؛ حالة التنفيذ مذكورة لكل مهمة.\n`;
   const offset = query.offset || 0;
   const cards: string[] = [];
   for (const task of tasks.slice(offset, offset + 10)) {
@@ -148,11 +173,11 @@ function priorityReadReply(query: Extract<PriorityTaskQuery, { kind: "query" }>,
 function readReply(plan: SecretaryIntent, actor: ChatUser, state: Snapshot, now: number): { result: Result; scope: string[] } {
   const greeting = `أهلًا يا ${clean(actor.name, 60)}، `;
   if (plan.kind === "help") return { result: { status: "summary", reply: `${greeting}${SECRETARY_IDENTITY}\nاحكيلي بطريقتك: شو مهامي؟ اشرح المهمة، سجل تحديث، أو افتح مشروعًا (لباسم). وإذا قلت «جوابك غلط» براجع السؤال وجوابي على ضوء المعلومات المتاحة، وبستوضح أي نقص.\nالدخول للموقع برمز خاص على واتسابك المسجّل:\n${ORIGIN}/` }, scope: [] };
-  if (plan.kind === "projects") return { result: { status: "summary", reply: greeting + (state.projects.length ? state.projects.slice(0, 16).map(p => `• *${clean(p.name, 100)}* — ${LABELS[p.status] || clean(p.status)}\n${ORIGIN}/?project=${encodeURIComponent(p.id)}`).join("\n\n") : "ما في مشاريع متاحة إلك حاليًا.") }, scope: state.projects.map(p => "p:" + p.id) };
+  if (plan.kind === "projects") return { result: { status: "summary", reply: greeting + "\n\n*المشاريع المتاحة إلك*\n\n" + (state.projects.length ? state.projects.slice(0, 16).map(p => `🔵 *${clean(p.name, 100)}* — ${LABELS[p.status] || clean(p.status)}`).join("\n\n") : "ما في مشاريع متاحة إلك حاليًا.") }, scope: state.projects.map(p => "p:" + p.id) };
   if (plan.kind === "details") {
     const task = state.tasks.find(t => t.id === plan.taskId);
     if (task) return { result: { status: "summary", reply: `${greeting}\n${secretaryTaskCard(task, state, now, true)}\n\nاحكيلي شو صار معك أو شو بدك أعمل عليها.`, taskId: task.id }, scope: ["t:" + task.id, "p:" + task.projectId] };
-    if (plan.projectId) { const project = state.projects.find(p => p.id === plan.projectId); if (project) { const tasks = state.tasks.filter(t => t.projectId === project.id); return { result: { status: "summary", reply: `*${clean(project.name)}* — ${LABELS[project.status] || clean(project.status)}\n${tasks.length} مهام متاحة إلك، ${tasks.filter(t => t.status === "completed").length} معتمدة.\n\n${tasks.slice(0, 6).map(t => secretaryTaskCard(t, state, now)).join("\n\n")}` }, scope: ["p:" + project.id, ...tasks.map(t => "t:" + t.id)] }; } }
+    if (plan.projectId) { const project = state.projects.find(p => p.id === plan.projectId); if (project) { const tasks = state.tasks.filter(t => t.projectId === project.id); return { result: { status: "summary", reply: `🔵 *${clean(project.name)}* — ${LABELS[project.status] || clean(project.status)}\n${tasks.length} مهام متاحة إلك، ${tasks.filter(t => t.status === "completed").length} معتمدة.\n\n${tasks.slice(0, 6).map(t => secretaryTaskCard(t, state, now)).join("\n\n")}` }, scope: ["p:" + project.id, ...tasks.map(t => "t:" + t.id)] }; } }
     return { result: { status: "clarify", reply: "أي مهمة أو مشروع بدك أشرح لك؟" }, scope: [] };
   }
   const tasks = state.tasks.filter(t => !t.archivedAt);
@@ -161,7 +186,23 @@ function readReply(plan: SecretaryIntent, actor: ChatUser, state: Snapshot, now:
   const pending = tasks.filter(t => t.status === "approval");
   const header = plan.kind === "report" ? `📋 *ملخص الإدارة*\nالمشاريع: ${state.projects.length}\nمعتمدة: ${tasks.filter(t => t.status === "completed").length}\nقيد التنفيذ: ${tasks.filter(t => t.status === "progress").length}\nبانتظار باسم: ${pending.length}\nمتأخرة بموعد مسجل: ${overdue.length}\nبدون موعد: ${tasks.filter(t => !t.dueDate && t.status !== "completed").length}\n🔴 قصوى: ${tasks.filter(t => t.priority === "red").length} • 🟡 متوسطة: ${tasks.filter(t => t.priority === "yellow").length} • 🟢 عادية: ${tasks.filter(t => t.priority === "green").length}\n` : `${greeting}المهام المتاحة إلك: ${tasks.length}\n`;
   const ordered = [...tasks].sort((a, b) => Number(overdue.includes(b)) - Number(overdue.includes(a)) || Number(pending.includes(b)) - Number(pending.includes(a)));
-  return { result: { status: "summary", reply: `${header}\n${ordered.slice(0, 6).map(t => secretaryTaskCard(t, state, now)).join("\n\n")}${tasks.length > 6 ? `\n\nبقية المهام: ${ORIGIN}/\nحدد مشروعًا أو مهمة لأعرض التفاصيل.` : ""}${tasks.length === 0 ? "ما في مهام متاحة إلك حاليًا." : ""}` }, scope: tasks.map(t => "t:" + t.id) };
+  let body = "", shown = 0;
+  const groups = new Map<string, Task[]>();
+  for (const task of ordered) { const group = groups.get(task.projectId) || []; group.push(task); groups.set(task.projectId, group); }
+  outer: for (const [projectId, group] of groups) {
+    const name = state.projects.find(p => p.id === projectId)?.name || "مشروع غير محدد";
+    let section = `\n\n🔵 *${clean(name, 100).replace(/\*/g, "")}*`;
+    for (const task of group) {
+      const priority = PRIORITIES[task.priority];
+      const days = task.status !== "completed" && task.dueDate && task.dueDate < today ? Math.floor((Date.parse(today) - Date.parse(task.dueDate)) / 86400000) : 0;
+      const item = `\n\n${priority?.icon || "⚪"} ${clean(task.title, 150).replace(/\*/g, "")}\n${LABELS[task.status] || clean(task.status)} • ${clean(task.owner || task.suggestedOwner || "غير معيّن", 50)}${days ? ` • 🔴 متأخرة ${days} يوم` : task.dueDate ? ` • الموعد: ${clean(task.dueDate, 10)}` : ""}`;
+      if (header.length + body.length + section.length + item.length > 3500) break outer;
+      section += item; shown++;
+      body += section; section = "";
+    }
+  }
+  const footer = shown < tasks.length ? `\n\nعرضت ${shown} من ${tasks.length} بسبب طول الرسالة. حدد اسم مشروع لأعرض مهامه.` : tasks.length ? `\n\nتم عرض جميع المهام (${shown}).` : "\nما في مهام متاحة إلك حاليًا.";
+  return { result: { status: "summary", reply: header.trimEnd() + body + footer }, scope: tasks.map(t => "t:" + t.id) };
 }
 function commandFrom(plan: SecretaryIntent, state: Snapshot): Record<string, unknown> {
   const command: Record<string, unknown> = { action: plan.action };
@@ -356,6 +397,18 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
   const actor = actorFor(db, event, config); if (!actor) return { status: "denied", reply: "" };
   const initial = stateFor(db, actor); const previous = lookup(db, event, actor, initial); if (previous) return previous;
   const key = conversation(event, actor); const initialHash = fingerprint(initial);
+  const profileCommand = personalMemoryCommand(event.text);
+  if (profileCommand && actor.id === "basem" && actor.role === "admin" && event.groupId === null && !event.replyToMessageId) {
+    return transaction(db, () => {
+      const fresh = actorFor(db, event, config);
+      if (!config.enabled || !fresh || JSON.stringify(fresh) !== JSON.stringify(actor)) return { status: "denied", reply: "" };
+      const duplicate = lookup(db, event, fresh, stateFor(db, fresh)); if (duplicate) return duplicate;
+      updatePersonalMemory(db, fresh.id, profileCommand, now);
+      return save(db, event, fresh, { status: "applied", reply: profileCommand.body === null
+        ? `حذفت «${profileCommand.topic}» من ذاكرتك الشخصية.`
+        : `حفظت في ذاكرتك الشخصية: ${profileCommand.topic} — ${profileCommand.body}\nتقدر تعدّل نفس الموضوع أو تقول «انس عني: ${profileCommand.topic}».` }, [], now);
+    });
+  }
   const pending = db.prepare("SELECT * FROM secretary_pending WHERE conversation_key=?").get(key) as Pending | undefined;
   const storedIntake = intakeRow(db, key);
   const pendingDraft = pendingTaskDraft(pending, initialHash, now);
@@ -395,14 +448,21 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
   const reviewRequest = reviewingReview
     ? secretaryReviewRequest(event.text, boundedHistory(conversationHistory(db, key, initial, now, quote)))
     : secretaryReviewRequest(event.text, history, quote ? { question: quote.original_text, previousAnswer: String(JSON.parse(quote.result_json).reply) } : undefined);
-  const earlyRead = (result: Result) => transaction(db, () => {
+  const earlyRead = (result: Result, scope: string[] = []) => transaction(db, () => {
     const freshActor = actorFor(db, event, config);
     if (!config.enabled || !freshActor || JSON.stringify(freshActor) !== JSON.stringify(actor)) return { status: "denied", reply: "" };
     const state = stateFor(db, freshActor); const duplicate = lookup(db, event, freshActor, state); if (duplicate) return duplicate;
     if (fingerprint(state) !== initialHash) return save(db, event, freshActor, { status: "stale", reply: "تغيّرت بيانات العمل؛ خلينا نراجع آخر وضع." }, [], now);
     rememberPendingPreview(db, event, key, db.prepare("SELECT * FROM secretary_pending WHERE conversation_key=?").get(key) as Pending | undefined);
-    return save(db, event, freshActor, result, [], now);
+    return save(db, event, freshActor, result, scope, now);
   });
+  const callerQuestion = event.text.normalize("NFKC").replace(/[أإآ]/g, "ا").replace(/[\u064b-\u065f\u0670\u0640]/g, "").trim();
+  const callerMatch = /^(?:(?:مرحبا|هلا|اهلا)[،,!\s]+)?(?:مين انا|بتعرفني|من انا)[؟?،,\s]*(?:(?:و\s*)?(?:شو|ايش|ما هي)\s+المشاريع(?:\s+(?:الموجودة|الموجوده|النشطة|النشطه))?(?:\s+(?:عندنا|عنا))?[؟?!.\s]*)?$/u.exec(callerQuestion);
+  if (callerMatch && !event.replyToMessageId) {
+    const projects = callerQuestion.includes("المشاريع") ? initial.projects : [];
+    return earlyRead({ status: "summary", reply: `أهلًا ${clean(actor.name, 60)}، بعرفك من رقمك المسجّل عندنا.` + (callerQuestion.includes("المشاريع")
+      ? `\n\n*المشاريع المتاحة إلك*\n\n${projects.length ? projects.map(p => `🔵 *${clean(p.name, 100)}*\nالحالة: ${LABELS[p.status] || clean(p.status)}`).join("\n\n") : "ما في مشاريع متاحة حاليًا."}` : "") }, projects.map(p => "p:" + p.id));
+  }
   if (isSecretaryIdentityQuery(event.text)) return earlyRead({ status: "summary", reply: SECRETARY_IDENTITY });
   if (reviewRequest?.kind === "clarify") return earlyRead({ status: "clarify", reply: reviewRequest.reply });
   const review = reviewRequest?.kind === "review" ? reviewRequest : null;
@@ -470,6 +530,15 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
         } catch (error) { if (!(error instanceof SecretaryOutboxError)) throw error; return save(db, event, freshActor, { status: "clarify", reply: error.message }, [], now); }
       }
       if (command.action === "schedule_reminder") return reminder(db, event, freshActor, state, command.taskId, command.dueAt, now);
+      if (command.action === "create_project_bundle" || command.action === "decide_approval") {
+        try {
+          const result = command.action === "create_project_bundle"
+            ? createProjectBundle(db, freshActor, { name: String(command.name), goal: String(command.goal ?? ""), tasks: Array.isArray(command.tasks) ? command.tasks : [], suppressNotices: command.suppressNotices === true }, now, { originalText: live.original_text, sourceMessageId: live.source_message_id, confirmationRequired: true, confirmedBy: freshActor.id, confirmationMessageId: event.messageId, senderNumber: event.senderNumber, origin: "whatsapp" })
+            : applyDecision(db, freshActor, { approvalId: String(command.approvalId), decision: command.decision === "approved" ? "approved" : "rejected", note: typeof command.note === "string" ? command.note : undefined }, now);
+          deliverAgentSideEffects(db, freshActor, result, now);
+          return save(db, event, freshActor, { status: result.status, reply: result.reply }, [], now);
+        } catch (error) { if (!(error instanceof ManagementActionError)) throw error; return save(db, event, freshActor, { status: "clarify", reply: error.message }, [], now); }
+      }
       return perform(db, event, freshActor, state, command, now, { originalText: live.original_text, sourceMessageId: live.source_message_id, confirmationRequired: true, confirmedBy: freshActor.id, confirmationMessageId: event.messageId });
     });
   }
@@ -480,19 +549,38 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
     canMessageTeam, messageRecipients: canMessageTeam ? getSecretaryOutboxRecipients(db, config).map(user => ({ id: user.userId, name: user.name })) : [],
     pendingMessagePreview: pendingCommand?.action === "message_team" && typeof pendingCommand.text === "string" && Array.isArray(pendingCommand.recipientIds) ? { text: pendingCommand.text, recipientIds: pendingCommand.recipientIds } : null,
     tasks: initial.tasks.map(t => ({ id: t.id, title: t.title, projectId: t.projectId, status: t.status, priority: t.priority })),
-    projects: initial.projects.map(p => ({ id: p.id, name: p.name, status: p.status })), users: initial.users.filter(u => u.active === 1).map(u => ({ id: u.id, name: u.name })), history, now: new Date(now).toISOString() };
+    projects: initial.projects.map(p => ({ id: p.id, name: p.name, status: p.status })), users: initial.users.filter(u => u.active === 1).map(u => ({ id: u.id, name: u.name })), history, now: new Date(now).toISOString(),
+    ownershipCandidates: review ? [] : ownershipCandidates(db, actor),
+    pendingApprovals: safeApprovals(db, actor), rules: safeRules(db),
+    personalContext: actor.id === "basem" && actor.role === "admin" && event.groupId === null ? personalMemory(db, actor.id) : [],
+    learningMemory: event.groupId === null ? recallSecretaryMemory(db, { conversation: key, role: actor.role,
+      query: review?.question || event.text, now,
+      allowedScope: new Set([...initial.tasks.map(t => "t:" + t.id), ...initial.projects.map(p => "p:" + p.id)]) }) : [],
+    knowledgeContext: event.groupId === null ? safeKnowledge(db, actor, review?.question || event.text)
+      .slice(0, 3).map(hit => ({ title: hit.title, snippet: hit.snippet.slice(0, 600) })) : [] };
   const directCreation = !review && event.inputKind !== "voice" && !event.replyToMessageId ? directTaskCreationIntent(input) : null;
   // A bare color can answer an active creation question; explicit list requests switch topic.
   const readQuestion = review?.question || event.text;
   const priorityQuery = review ? priorityTaskQuery(readQuestion, input)
     : !event.replyToMessageId && (!taskDraft || /مهام|اعط|أعط|وريني|اعرض|اسرد/u.test(event.text)) ? priorityTaskQuery(event.text, input) : null;
   let plan: SecretaryIntent;
+  const listText = event.text.normalize("NFKC").replace(/[أإآ]/g, "ا").replace(/[\u064B-\u065F\u0670ـ؟?!.،,]/g, "").replace(/\s+/g, " ").trim();
+  const directTaskList = !review && !taskDraft && !event.replyToMessageId
+    && /^(?:وريني|اعرض|اعرضلي|اعطيني|شو) المهام(?: المطلوبة| المطلوبه| المتاحة| المتاحه| الموجودة| الموجوده)?(?: كلها| جميعها)?(?: كمان مره| كمان مرة| مرة ثانية| مره ثانيه)?$/.test(listText);
   try {
     plan = priorityQuery ? emptySecretaryIntent(priorityQuery.kind === "clarify" ? "clarify" : "summary", priorityQuery.kind === "clarify" ? priorityQuery.reply : null)
-      : directCreation ?? validateSecretaryIntent(await dependencies.infer(input), input);
+      : directTaskList ? emptySecretaryIntent("summary") : directCreation ?? validateSecretaryIntent(await dependencies.infer(input), input);
   } catch (error) {
-    if (!review) throw error;
-    plan = emptySecretaryIntent("clarify", "ما قدرت أكمل مراجعة الجواب الآن، وما بدي أخمّن أو أكرر نتيجة غير مؤكدة. حدد النقطة المختلف عليها لنراجعها؛ لم أنفّذ أي تغيير.");
+    // Only standalone, unqualified read questions may recover from provider failure.
+    // Never reinterpret a write, project filter, quoted reply, or active intake.
+    const generalTasks = event.text.normalize("NFKC").replace(/[أإآ]/g, "ا").replace(/[\u064B-\u065F\u0670ـ]/g, "").replace(/[؟?!.،,]/g, "").replace(/\s+/g, " ").trim();
+    if (!review && !event.replyToMessageId && !taskDraft
+      && /^(?:(?:شو|ايش|ما هي|اعرض|اعرضلي|وريني) )?(?:المهام(?: المطلوب[ةه]| المتاح[ةه]| الموجود[ةه])?|مهامي)(?: عندنا| عندي)?$/.test(generalTasks)) {
+      plan = emptySecretaryIntent("summary");
+    } else {
+      if (!review) throw error;
+      plan = emptySecretaryIntent("clarify", "ما قدرت أكمل مراجعة الجواب الآن، وما بدي أخمّن أو أكرر نتيجة غير مؤكدة. حدد النقطة المختلف عليها لنراجعها؛ لم أنفّذ أي تغيير.");
+    }
   }
   // Independent of the provider validator: criticism never grants a write/replay.
   if (review && !["summary", "details", "projects", "report", "help", "chat", "clarify", "search", "message_status"].includes(plan.kind)) {
@@ -501,7 +589,9 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
   let publicReply: string | null = null;
   if (plan.kind === "search") {
     const query = readQuestion.trim(); // Exact current/prior user question, not plan.message.
-    if (privateSearchQuestion(query, initial)) publicReply = "هذا السؤال قد يتضمن معلومات داخلية؛ ما أرسلته لبحث عام. حدد المهمة أو المعلومة العامة المطلوبة بدون بيانات خاصة.";
+    const internal = review ? [] : safeKnowledge(db, actor, query);
+    if (internal.length) publicReply = `من قاعدة المعرفة الداخلية:\n\n${formatKnowledgeHits(internal)}\n\n(قل «ابحث على الإنترنت» إذا بدك مصادر عامة.)`;
+    else if (privateSearchQuestion(query, initial)) publicReply = "هذا السؤال قد يتضمن معلومات داخلية؛ ما أرسلته لبحث عام. حدد المهمة أو المعلومة العامة المطلوبة بدون بيانات خاصة.";
     else if (!dependencies.search) publicReply = "البحث العام غير مفعّل حاليًا؛ ما عملت بحثًا. أقدر أراجع بيانات الموقع أو أوضح ما يلزم للتحقق.";
     else try { publicReply = await dependencies.search(query); }
     catch (error) {
@@ -516,6 +606,9 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
     if (fingerprint(state) !== initialHash) return save(db, event, freshActor, { status: "stale", reply: "تغيّرت بيانات العمل أثناء قراءة رسالتك. ما عدّلتها؛ أعد الطلب لأراجع آخر وضع." }, [], now);
     if (hash(intakeRow(db, key) ?? null) !== hash(storedIntake ?? null)) return save(db, event, freshActor, { status: "stale", reply: "تغيّرت مسودة المهمة أثناء قراءة رسالتك. لم أنشئ شيئًا؛ أعد آخر جواب لنكمل على التفاصيل الحالية." }, [], now);
     if ((plan.kind === "task_draft" || pendingDraft) && hash(db.prepare("SELECT * FROM secretary_pending WHERE conversation_key=?").get(key) ?? null) !== hash(pending ?? null)) return save(db, event, freshActor, { status: "stale", reply: "تغيّرت معاينة التأكيد أثناء قراءة رسالتك. لم أنشئ شيئًا؛ أعد التصحيح على المعاينة الحالية." }, [], now);
+    if (review && event.groupId === null) rememberSecretaryMistake(db, { conversation: key, role: freshActor.role,
+      question: review.question, answer: review.previousAnswer, now,
+      scope: [...initial.tasks.map(t => "t:" + t.id), ...initial.projects.map(p => "p:" + p.id)] });
     rememberPendingPreview(db, event, key, db.prepare("SELECT * FROM secretary_pending WHERE conversation_key=?").get(key) as Pending | undefined);
     if (plan.kind === "task_draft") return taskIntake(db, event, freshActor, state, plan, key, taskDraft, now);
     // Only an explicit task_draft plan may continue intake; unrelated subjects cannot revive it later.
@@ -548,6 +641,12 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
         return save(db, event, freshActor, { status: "confirmation", batchId: preview.batchId, reply }, [], now);
       } catch(error) { if (!(error instanceof SecretaryOutboxError)) throw error; return save(db, event, freshActor, { status: "clarify", reply: error.message }, [], now); }
     }
+    if (AGENT_KINDS.has(plan.kind)) {
+      db.prepare("DELETE FROM secretary_pending WHERE conversation_key=?").run(key);
+      const result = handleAgentIntent(plan, { db, actor: freshActor, now, inputKind: event.inputKind, suppressNotices: event.groupId === null && /(?:لا|ما)\s+(?:تبعت|تبعث|ترسل)|بدون\s+(?:رسائل|إشعارات|اشعارات)/u.test(event.text), users: state.users, tasks: state.tasks, projects: state.projects,
+        stash: command => { const token = "T" + randomBytes(3).toString("hex").toUpperCase(); db.prepare("INSERT INTO secretary_pending VALUES(?,?,?,?,?,?,?)").run(key, token, JSON.stringify(command), initialHash, event.text, event.messageId, now + CONFIRM_MS); log(db, freshActor, event, "secretary_proposal", { summary: "عرض تغييرًا ينتظر التأكيد", proposedCommand: command, confirmationRequired: true }, now); return token; } });
+      if (result) { deliverAgentSideEffects(db, freshActor, result, now); return save(db, event, freshActor, { status: result.status, reply: result.reply, ...(result.taskId ? { taskId: result.taskId } : {}) }, result.taskId ? ["t:" + result.taskId] : [], now); }
+    }
     if (plan.kind === "command") {
       const command = commandFrom(plan, state);
       if (freshActor.id !== "basem" && !["claim", "cancel_claim", "comment", "submit"].includes(String(command.action))) return save(db, event, freshActor, { status: "denied", reply: "هذا القرار من صلاحيات باسم. أقدر أساعدك بتحديث مهامك أو إرسالها للمراجعة." }, [], now);
@@ -572,7 +671,7 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
     }
     if (plan.kind === "chat" || plan.kind === "clarify" || plan.kind === "search") {
       let reply = publicReply || plan.message || "أي مهمة أو مشروع تقصد، وشو المطلوب؟";
-      if (plan.kind === "chat" || plan.kind === "clarify") reply = safeConversationalReply(reply);
+      if (plan.kind === "chat" || plan.kind === "clarify") reply = formatSecretaryProjectHeadings(safeConversationalReply(reply), state);
       // The planner explicitly identifies contextual replies; an unrelated topic has no focus.
       const contextTaskId = plan.kind !== "search" && state.tasks.some(task => task.id === plan.taskId) ? plan.taskId : null;
       return save(db, event, freshActor, { status: plan.kind === "clarify" ? "clarify" : "summary", reply, ...(contextTaskId ? { taskId: contextTaskId } : {}) }, plan.kind !== "search" ? [...state.tasks.map(t => "t:" + t.id), ...state.projects.map(p => "p:" + p.id)] : [], now);
@@ -592,4 +691,19 @@ function perform(db: DatabaseSync, event: Event, actor: ChatUser, state: Snapsho
     if (!(error instanceof ManagementActionError)) throw error;
     return save(db, event, actor, { status: "clarify", reply: error.message }, [], now);
   }
+}
+
+function safeApprovals(db: DatabaseSync, actor: ChatUser) {
+  try { return listApprovals(db, actor, { status: "pending", limit: 20 }).map(a => ({ id: a.id, type: a.type, summary: a.summary, requestedBy: a.requestedByName })); } catch { return []; }
+}
+function safeRules(db: DatabaseSync) {
+  try { return activeRules(db).slice(0, 30).map(rule => ({ id: rule.id, statement: rule.statement })); } catch { return []; }
+}
+function safeKnowledge(db: DatabaseSync, actor: ChatUser, query: string) {
+  try { return searchKnowledge(db, actor, query, 3); } catch { return []; }
+}
+/** Private notifications and group notices produced by agent actions go to the durable queue; the bridge delivers them. */
+function deliverAgentSideEffects(db: DatabaseSync, actor: ChatUser, result: AgentResult, now: number) {
+  for (const item of result.notify ?? []) if (item.userId !== actor.id) enqueueAgentMessage(db, { toUser: item.userId, text: item.text }, now);
+  if (result.groupNotice) enqueueAgentMessage(db, { toUser: "group", text: result.groupNotice }, now);
 }
