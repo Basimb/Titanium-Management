@@ -595,7 +595,7 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
     ? Number(listText.replace(/[٠-٩]/g, digit => String(digit.charCodeAt(0) - 0x660)).replace(/[۰-۹]/g, digit => String(digit.charCodeAt(0) - 0x6f0))) : null;
   const bareOwnershipCandidate = bareOwnershipOrdinal && bareOwnershipOrdinal >= 1 ? input.ownershipCandidates?.[bareOwnershipOrdinal - 1] : undefined;
   const directTaskList = !review && !taskDraft && !event.replyToMessageId
-    && /^(?:وريني|اعرض|اعرضلي|اعطيني|شو) المهام(?: المطلوبة| المطلوبه| المتاحة| المتاحه| الموجودة| الموجوده)?(?: كلها| جميعها)?(?: كمان مره| كمان مرة| مرة ثانية| مره ثانيه)?$/.test(listText);
+    && /^(?:(?:وريني|اعرض|اعرضلي|اعطيني|شو|ارسل|ارسللي|ابعث|ابعثلي|ابعت|ابعتلي) )?المهام(?: المطلوبة| المطلوبه| المتاحة| المتاحه| الموجودة| الموجوده)?(?: كلها| جميعها)?(?: كمان مره| كمان مرة| مرة ثانية| مره ثانيه)?$/.test(listText);
   try {
     plan = priorityQuery ? emptySecretaryIntent(priorityQuery.kind === "clarify" ? "clarify" : "summary", priorityQuery.kind === "clarify" ? priorityQuery.reply : null)
       : directTaskList ? emptySecretaryIntent("summary")
