@@ -145,11 +145,14 @@ test('review cannot borrow another actor or group conversation, even with a know
   for (const extra of [
     {text:'جوابك غلط'},
     {text:'جوابك غلط',replyToMessageId:'OWNER-PRIVATE'},
-    {...owner,groupId:'12345@g.us',text:'جوابك غلط',replyToMessageId:'OWNER-PRIVATE'},
   ]) {
     const result=await handleSecretaryEvent(f.db,f.event(extra),f.config,noProviders(t,f));
     assert.equal(result.status,'clarify');assert.doesNotMatch(result.reply,/تفاصيل سرية|مهمة شادي|private/);
   }
+  // Group-origin, even the owner's own, never reaches the review/borrow logic
+  // at all -- the blanket event.groupId gate returns a silent denial first.
+  const groupResult=await handleSecretaryEvent(f.db,f.event({...owner,groupId:'12345@g.us',text:'جوابك غلط',replyToMessageId:'OWNER-PRIVATE'}),f.config,noProviders(t,f));
+  assert.equal(groupResult.status,'denied');assert.equal(groupResult.reply,'');
 });
 
 test('current member scope limits review history and rejects a model-selected foreign task', async t => {

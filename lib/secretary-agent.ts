@@ -133,9 +133,11 @@ export function handleAgentIntent(plan: SecretaryIntent, ctx: AgentContext): Age
           if (task.status === "completed") return { status: "clarify", reply: `«${clean(task.title)}» معتمدة خلص.`, taskId: task.id };
           // "approve" only ever applies to a task already sitting in approval
           // (an employee submitted it). Basim can also be the task's own
-          // worker now, in which case it's still "progress" -- never
-          // submitted -- so chain submit+approve in one confirmed step
-          // instead of a bare approve that would fail on that precondition.
+          // worker now, in which case it may still be "open" (never even
+          // claimed) or "progress" (claimed, never submitted) -- so
+          // close_direct chains whichever of claim/submit/approve is
+          // missing in one confirmed step, instead of a bare approve that
+          // would fail on either of those preconditions.
           const token = ctx.stash(task.status === "approval" ? { action: "approve", taskId: task.id } : { action: "close_direct", taskId: task.id });
           return { status: "confirmation", reply: `اعتماد إغلاق «${clean(task.title)}».\nاكتب «موافق ${token}» للتنفيذ.`, taskId: task.id };
         }

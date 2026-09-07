@@ -46,8 +46,11 @@ test('owner personal preferences persist privately and can be replaced and forgo
  let seen;
  await f.run(emptySecretaryIntent('chat'),{...owner,text:'مرحبا'},async input=>{seen=input;return emptySecretaryIntent('chat','أهلًا');});
  assert.equal(seen.personalContext[0].body,'مختصرة');
- await f.run(emptySecretaryIntent('chat'),{...owner,groupId:'12345@g.us',text:'مرحبا'},async input=>{seen=input;return emptySecretaryIntent('chat','أهلًا');});
- assert.deepEqual(seen.personalContext,[]);
+ // Group-origin, even from the owner himself, gets a silent denial before
+ // personalContext (or anything else) is ever built -- the blanket
+ // event.groupId gate never calls infer at all.
+ const groupResult=await f.run(emptySecretaryIntent('chat'),{...owner,groupId:'12345@g.us',text:'مرحبا'},async()=>{throw Error('group messages must never reach the model');});
+ assert.equal(groupResult.status,'denied');assert.equal(groupResult.reply,'');
  await f.run(emptySecretaryIntent('chat'),{text:'مرحبا'},async input=>{seen=input;return emptySecretaryIntent('chat','أهلًا');});
  assert.deepEqual(seen.personalContext,[]);
  await f.run(emptySecretaryIntent('chat'),{...owner,text:'انس عني: الردود'});
@@ -151,9 +154,13 @@ test('bare draft color remains an intake answer while explicit task-color list s
 test('only authenticated exact phone and approved group can invoke model',async t=>{
  const f=fixture(t);let calls=0;for(const extra of[{senderNumber:'12025550999'},{groupId:'999@g.us'}]){const r=await f.run(undefined,extra,async()=>{calls++;throw Error();});assert.equal(r.status,'denied');}assert.equal(calls,0);
 });
-test('history isolated by actor/group and never contains phone table',async t=>{
+test('history isolated by actor and never contains phone table; group messages never reach the model',async t=>{
  const f=fixture(t);await f.run();let seen;
- await f.run(undefined,{senderNumber:'12025550102',groupId:'12345@g.us'},async input=>{seen=input;return emptySecretaryIntent('help');});assert.equal(seen.history.length,0);assert.doesNotMatch(JSON.stringify(seen),/1202555010/);assert.ok(seen.tasks.every(x=>x.id==='private'));
+ await f.run(undefined,{senderNumber:'12025550102'},async input=>{seen=input;return emptySecretaryIntent('help');});assert.equal(seen.history.length,0);assert.doesNotMatch(JSON.stringify(seen),/1202555010/);assert.ok(seen.tasks.every(x=>x.id==='private'));
+ // The blanket event.groupId gate returns before ever building model input --
+ // a group-origin message from the same actor gets a silent denial instead.
+ const groupResult=await f.run(undefined,{senderNumber:'12025550102',groupId:'12345@g.us'},async()=>{throw Error('group messages must never reach the model');});
+ assert.equal(groupResult.status,'denied');assert.equal(groupResult.reply,'');
 });
 test('comment uses shared engine, no implicit completion, receipt duplicate does not repeat',async t=>{
  const f=fixture(t);const e=f.event({messageId:'COMMENT',text:'حكيت مع المحامي ولسه بستنى الرد'});const plan=command('comment',{body:e.text});const deps={infer:async()=>plan,now:()=>f.now};
@@ -407,9 +414,13 @@ test('owner private team message previews exact recipients and text then queues 
 
 test('team sends are denied to members and group-origin requests',async t=>{
  const f=fixture(t);
- for(const extra of [{text:'ابعث للتيم مرحبا'},{text:'ابعث للتيم مرحبا',senderNumber:'12025550103',groupId:'12345@g.us'}]) {
-   assert.equal((await f.run(teamMessage(),extra)).status,'clarify');assert.equal(pending(f.db),undefined);
- }
+ assert.equal((await f.run(teamMessage(),{text:'ابعث للتيم مرحبا'})).status,'clarify');assert.equal(pending(f.db),undefined);
+ // The group is one-way now (see the blanket event.groupId gate): even the
+ // admin's own group-origin message gets a silent, empty "denied" -- never
+ // the old "private chat only" clarify text, since nothing from the group
+ // is replied to at all any more.
+ const groupResult=await f.run(teamMessage(),{text:'ابعث للتيم مرحبا',senderNumber:'12025550103',groupId:'12345@g.us'});
+ assert.equal(groupResult.status,'denied');assert.equal(groupResult.reply,'');assert.equal(pending(f.db),undefined);
  const jobs=createSecretaryOutboxJobs({db:f.db,config:f.config,now:()=>f.now});
  assert.equal((await jobs.deliverNext(async()=>{throw Error('must not send');})).status,'idle');
 });

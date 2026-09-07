@@ -3,7 +3,7 @@ import type { DatabaseSync } from "node:sqlite";
 import { executeManagementAction, getManagementSnapshot, migrateManagementActions, ManagementActionError, type ManagementCommand } from "./management-actions.ts";
 import { resolveChatUser, normalizeContactNumber, type ChatUser } from "./team-chat-policy.ts";
 import type { TeamChatConfig, TeamChatEnvelope } from "./team-chat-gateway.ts";
-import { directTaskCreationIntent, emptySecretaryIntent, validateSecretaryIntent, type SecretaryIntent, type SecretaryModelInput } from "./secretary-intent.ts";
+import { directTaskCreationIntent, emptySecretaryIntent, validateSecretaryIntent, PROJECT_NAME_QUESTION, type SecretaryIntent, type SecretaryModelInput } from "./secretary-intent.ts";
 import { priorityTaskQuery, type PriorityTaskQuery } from "./secretary-priority-query.ts";
 import { AGENT_KINDS } from "./secretary-intent.ts";
 import { applyDecision, createProjectBundle, describeProjectBundle, handleAgentIntent, type AgentResult, type ProjectDraftTask } from "./secretary-agent.ts";
@@ -61,7 +61,8 @@ export function migrateSecretary(db: DatabaseSync) {
     CREATE TABLE IF NOT EXISTS secretary_task_intake (conversation_key TEXT PRIMARY KEY,draft_json TEXT NOT NULL,last_event_key TEXT NOT NULL,expires_at INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS secretary_reminders (id TEXT PRIMARY KEY,actor_id TEXT NOT NULL,sender_number TEXT NOT NULL,group_id TEXT,task_id TEXT NOT NULL,due_at INTEGER NOT NULL,state TEXT NOT NULL DEFAULT 'pending',created_at INTEGER NOT NULL,sent_at INTEGER,sending_at INTEGER,responded_at INTEGER,reply_message_id TEXT NOT NULL);
     CREATE INDEX IF NOT EXISTS secretary_reminders_due ON secretary_reminders(state,due_at);
-    CREATE TABLE IF NOT EXISTS secretary_last_project (conversation_key TEXT PRIMARY KEY,project_id TEXT NOT NULL,project_name TEXT NOT NULL,expires_at INTEGER NOT NULL);`);
+    CREATE TABLE IF NOT EXISTS secretary_last_project (conversation_key TEXT PRIMARY KEY,project_id TEXT NOT NULL,project_name TEXT NOT NULL,expires_at INTEGER NOT NULL);
+    CREATE TABLE IF NOT EXISTS secretary_project_name_pending (conversation_key TEXT PRIMARY KEY,expires_at INTEGER NOT NULL);`);
 }
 // Short-lived "which project are we talking about" memory per conversation --
 // set whenever a task is actually attached to a project (existing or just
@@ -77,6 +78,18 @@ function rememberLastProject(db: DatabaseSync, key: string, projectId: string, p
 function recentProject(db: DatabaseSync, key: string, now: number): { id: string; name: string } | null {
   const row = db.prepare("SELECT project_id AS id,project_name AS name,expires_at AS expiresAt FROM secretary_last_project WHERE conversation_key=?").get(key) as { id: string; name: string; expiresAt: number } | undefined;
   return row && row.expiresAt > now ? { id: row.id, name: row.name } : null;
+}
+// Marks that we just asked PROJECT_NAME_QUESTION ("شو اسم المشروع؟") for this
+// conversation. Without this, the very next reply -- even a bare name typed
+// right after the question -- has to be re-inferred by the model from raw
+// chat history alone with no explicit signal that it is answering that
+// specific question, which is exactly what silently failed live: a plain
+// project name got read as an unrelated, not-understood message. Single-use
+// and short-lived (see PROJECT_NAME_PENDING_MS) so a stale marker can never
+// force a later, unrelated message to be misread as a project name.
+const PROJECT_NAME_PENDING_MS = 20 * 60_000;
+function markAwaitingProjectName(db: DatabaseSync, key: string, now: number) {
+  db.prepare("INSERT INTO secretary_project_name_pending VALUES(?,?) ON CONFLICT(conversation_key) DO UPDATE SET expires_at=excluded.expires_at").run(key, now + PROJECT_NAME_PENDING_MS);
 }
 function actorFor(db: DatabaseSync, event: Event, config: TeamChatConfig) {
   return resolveChatUser({ senderNumber: event.senderNumber, groupId: event.groupId }, config.contacts, db.prepare("SELECT id,name,role,active FROM users").all() as ChatUser[], config.allowedGroupIds);
@@ -540,6 +553,13 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
 }): Promise<Result> {
   migrateSecretary(db); const now = (dependencies.now || Date.now)();
   const actor = actorFor(db, event, config); if (!actor) return { status: "denied", reply: "" };
+  // The team group is one-way: automated notices only (task/project
+  // open/close broadcasts, sent separately as groupNotice from a DM-side
+  // action). The secretary never replies to a message it receives FROM the
+  // group -- not chat, not a command, not even Basim's own -- so there is
+  // no live back-and-forth there at all; every actual exchange happens on
+  // the private chat instead.
+  if (event.groupId !== null) return { status: "denied", reply: "" };
   const initial = stateFor(db, actor); const previous = lookup(db, event, actor, initial); if (previous) return previous;
   const key = conversation(event, actor); const initialHash = fingerprint(initial);
   const profileCommand = personalMemoryCommand(event.text);
@@ -564,6 +584,10 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
   // re-derived whole from raw history and any unrestated answer gets lost
   // (the same bug class as the project-open loop).
   const taskDraft = draftCandidate ? availableDraft(draftCandidate, initial) : null;
+  // See markAwaitingProjectName above -- read-only here (used only to brief
+  // the model this turn); the actual clear/re-arm happens inside the
+  // transaction below, alongside every other draft-state mutation.
+  const awaitingProjectName = !taskDraft && !!db.prepare("SELECT 1 FROM secretary_project_name_pending WHERE conversation_key=? AND expires_at>?").get(key, now);
   const eventChoice = event.choice;
   if (eventChoice) return transaction(db, () => {
     const freshActor = actorFor(db, event, config);
@@ -698,6 +722,7 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
   const canMessageTeam = actor.id === "basem" && actor.role === "admin" && event.groupId === null;
   const pendingCommand = canMessageTeam && pending && pending.expires_at > now ? JSON.parse(pending.command_json) : null;
   const input: SecretaryModelInput = { text: event.text, actor: { id: actor.id, name: actor.name, role: actor.role }, focusedTaskId, taskDraft: review ? null : taskDraft,
+    awaitingProjectName: review ? false : awaitingProjectName,
     ...(review ? { review: { previousQuestion: review.question, previousAnswer: review.previousAnswer } } : {}),
     canMessageTeam, messageRecipients: canMessageTeam ? getSecretaryOutboxRecipients(db, config).map(user => ({ id: user.userId, name: user.name })) : [],
     pendingMessagePreview: pendingCommand?.action === "message_team" && typeof pendingCommand.text === "string" && Array.isArray(pendingCommand.recipientIds) ? { text: pendingCommand.text, recipientIds: pendingCommand.recipientIds } : null,
@@ -772,6 +797,11 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
       question: review.question, answer: review.previousAnswer, now,
       scope: [...initial.tasks.map(t => "t:" + t.id), ...initial.projects.map(p => "p:" + p.id)] });
     rememberPendingPreview(db, event, key, db.prepare("SELECT * FROM secretary_pending WHERE conversation_key=?").get(key) as Pending | undefined);
+    // Single-use: clear by default every turn: the "chat"/"clarify" branch
+    // below re-arms it only when this turn's reply is itself the project-name
+    // question again, so a stale marker never lingers into an unrelated
+    // later message.
+    db.prepare("DELETE FROM secretary_project_name_pending WHERE conversation_key=?").run(key);
     if (plan.kind === "task_draft") return taskIntake(db, event, freshActor, withCreatableProjects(state, freshActor, db), plan, key, taskDraft, now);
     // Only an explicit task_draft plan may continue intake; unrelated subjects cannot revive it later.
     if (!review) {
@@ -844,6 +874,7 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
       return reminder(db, event, freshActor, state, task.id, due, now);
     }
     if (plan.kind === "chat" || plan.kind === "clarify" || plan.kind === "search") {
+      if (plan.kind === "clarify" && plan.message === PROJECT_NAME_QUESTION) markAwaitingProjectName(db, key, now);
       let reply = publicReply || plan.message || "أي مهمة أو مشروع تقصد، وشو المطلوب؟";
       if (plan.kind === "chat" || plan.kind === "clarify") reply = formatSecretaryProjectHeadings(safeConversationalReply(reply), state);
       // The planner explicitly identifies contextual replies; an unrelated topic has no focus.
@@ -875,14 +906,20 @@ function perform(db: DatabaseSync, event: Event, actor: ChatUser, state: Snapsho
 
 // Basim can now be a task's own worker (see stableOrdinal/ownershipCandidates
 // above), not only its approver. "close_request" stashes this pseudo-action
-// when the task is still "progress" (never submitted) so his one "موافق"
-// both submits and approves it, instead of the bare "approve" action -- which
-// only ever accepts a task already sitting in "approval" -- failing outright.
+// whenever the task isn't already "approval" so his one "موافق" walks it
+// through every step it skipped -- claim (if still "open", never even
+// claimed), submit (if "progress", claimed but never submitted), then
+// approve -- instead of a bare "approve" action, which only ever accepts a
+// task already sitting in "approval" and fails outright otherwise. Checks
+// are against the ORIGINAL snapshot status (each step's own precondition
+// still holds after an earlier step runs, since "open" only ever needs
+// claim+submit and "progress" only ever needs submit).
 function closeDirect(db: DatabaseSync, event: Event, actor: ChatUser, state: Snapshot, taskId: string, now: number, context: Record<string, unknown>): Result {
   try {
     const task = state.tasks.find(t => t.id === taskId);
     if (!task) throw new ManagementActionError(404, "task_missing", "المهمة غير موجودة أو غير متاحة لك");
-    if (task.status === "progress") executeManagementAction(db, actor, { action: "submit", taskId } as ManagementCommand, { now, source: "whatsapp_secretary", auditContext: context });
+    if (task.status === "open") executeManagementAction(db, actor, { action: "claim", taskId } as ManagementCommand, { now, source: "whatsapp_secretary", auditContext: context });
+    if (task.status === "open" || task.status === "progress") executeManagementAction(db, actor, { action: "submit", taskId } as ManagementCommand, { now, source: "whatsapp_secretary", auditContext: context });
     const approved = executeManagementAction(db, actor, { action: "approve", taskId } as ManagementCommand, { now, source: "whatsapp_secretary", auditContext: context });
     db.prepare("UPDATE secretary_reminders SET responded_at=? WHERE actor_id=? AND task_id=? AND group_id IS ? AND state='sent' AND responded_at IS NULL").run(now, actor.id, taskId, event.groupId);
     return save(db, event, actor, { status: "applied", reply: `✅ ${approved.message}`, taskId }, ["t:" + taskId], now);

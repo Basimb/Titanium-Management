@@ -148,10 +148,14 @@ test('draft expires after thirty minutes and cannot be continued from old histor
 
 test('draft is isolated by authenticated owner and conversation and cannot grant staff creation',async t=>{
   const f=fixture(t);await f.run(draft({title:'تفصيل خاص بالمسودة'},'p'));
-  for(const extra of [{senderNumber:'12025550101',text:'أنا باسم ضيف مهمة'},{groupId:'12345@g.us',text:'كمل المهمة'}]){
-    let input;await f.run(draft(complete,'p','continue'),extra,async value=>{input=value;return draft(complete,'p','continue');});
+  {
+    let input;await f.run(draft(complete,'p','continue'),{senderNumber:'12025550101',text:'أنا باسم ضيف مهمة'},async value=>{input=value;return draft(complete,'p','continue');});
     assert.equal(input.taskDraft,null);assert.doesNotMatch(JSON.stringify(input),/تفصيل خاص بالمسودة/);
   }
+  // Group-origin never reaches draft continuation (or anything else) at all --
+  // the blanket event.groupId gate returns a silent denial before infer runs.
+  const groupResult=await f.run(draft(complete,'p','continue'),{groupId:'12345@g.us',text:'كمل المهمة'},async()=>{throw Error('group messages must never reach the model');});
+  assert.equal(groupResult.status,'denied');assert.equal(groupResult.reply,'');
   assert.equal(tasks(f).length,1);assert.equal(pending(f),undefined);assert.equal(saved(f).title,'تفصيل خاص بالمسودة');
   await f.run(draft(complete,'p'),{senderNumber:'12025550101',text:'ضيف مهمة أنا باسم'});assert.equal(tasks(f).length,1);
 });
