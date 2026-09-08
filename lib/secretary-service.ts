@@ -643,7 +643,9 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
   // reminder broadcast -- bypasses the model since the intent is exact and
   // the action is sensitive (messages every employee + the group), so it
   // still goes through one confirmation like message_team/announce_team.
-  const teamReminderMatch = /^(?:ابعت|ارسل|أرسل|بعت)\s*(?:ال)?تذكير(?:ات)?\s*(?:المهام)?\s*(?:الآن|هلق|دلوقتي|حالا)?[.!؟\s]*$/u.test(callerQuestion);
+  // callerQuestion already normalized أ/إ/آ -> ا above, so match only the
+  // normalized alef form ("الان", never "الآن") or this never fires.
+  const teamReminderMatch = /^(?:ابعت|ارسل|بعت)\s*(?:ال)?تذكير(?:ات)?\s*(?:المهام)?\s*(?:الان|هلق|دلوقتي|حالا)?[.!؟\s]*$/u.test(callerQuestion);
   if (teamReminderMatch && actor.id === "basem" && actor.role === "admin" && event.groupId === null) return transaction(db, () => {
     const freshActor = actorFor(db, event, config); if (!freshActor || freshActor.id !== "basem" || freshActor.role !== "admin" || freshActor.active !== 1) return { status: "denied", reply: "" };
     const state = stateFor(db, freshActor); const duplicate = lookup(db, event, freshActor, state); if (duplicate) return duplicate;
@@ -986,8 +988,13 @@ function dispatchManagementNotice(db: DatabaseSync, actor: ChatUser, state: Snap
 function ownerTaskGroups(state: Snapshot): Map<string, Task[]> {
   const groups = new Map<string, Task[]>();
   for (const task of state.tasks) {
-    if (task.archivedAt || task.status === "completed" || !task.owner) continue;
-    const user = state.users.find(u => u.name === task.owner);
+    // Same "who is responsible" convention as numberedTaskList/secretaryTaskCard:
+    // a claimed owner if there is one, otherwise the suggested owner -- an
+    // open, unclaimed-but-suggested task still belongs on that person's
+    // reminder, not nobody's.
+    const responsible = task.owner || task.suggestedOwner;
+    if (task.archivedAt || task.status === "completed" || !responsible) continue;
+    const user = state.users.find(u => u.name === responsible);
     if (!user) continue;
     const list = groups.get(user.id) || []; list.push(task); groups.set(user.id, list);
   }
