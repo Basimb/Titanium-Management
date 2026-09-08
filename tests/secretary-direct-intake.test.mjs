@@ -54,9 +54,10 @@ test('live regression: expired old proposal -> literal creation -> project choic
   r=await f.run(f.pick(r,'مشروع تجريبي'));assert.match(r.choices.title,/المسؤول/);
   r=await f.run(f.pick(r,'خالد'));r=await f.run(f.pick(r,'متوسطة'));r=await f.run(f.pick(r,'بدون موعد'));
   assert.equal(r.status,'confirmation');assert.equal(r.choices,undefined);assert.equal(count(f),1);assert.notEqual(f.pending().token,old.token);
-  assert.equal((await f.run(f.event('نعم'))).status,'confirmation');assert.equal(count(f),1);
+  // The old, already-expired token can never approve the new (fresh) proposal.
   assert.equal((await f.run(f.event(`موافق ${old.token}`))).status,'clarify');assert.equal(count(f),1);
-  const confirmation=f.event(`موافق ${f.pending().token}`);assert.equal((await f.run(confirmation)).status,'applied');assert.equal((await f.run(confirmation)).status,'duplicate');
+  // A single plain affirmation now executes the fresh proposal directly -- no restatement round.
+  const confirmation=f.event('نعم');assert.equal((await f.run(confirmation)).status,'applied');assert.equal((await f.run(confirmation)).status,'duplicate');
   assert.equal(count(f),2);assert.deepEqual({...f.db.prepare("SELECT title,priority,status,suggested_owner,due_date FROM tasks WHERE id<>'old'").get()},
     {title:'تجربه',priority:'yellow',status:'open',suggested_owner:'خالد',due_date:null});
   assert.equal(f.db.prepare("SELECT priority FROM tasks WHERE id='old'").get().priority,'red');

@@ -46,8 +46,9 @@ test('single-choice intake is deterministic and never creates before final token
   assert.equal(r.status,'confirmation');assert.equal(r.choices,undefined);assert.equal(question(f),undefined);assert.equal(taskCount(f),1);
   assert.match(r.reply,/2026-09-06/);assert.match(r.reply,/خالد/);assert.match(r.reply,/متوسطة/);
   assert.equal((await f.execute({...finalEvent,messageId:'SAME-CHOICE-AGAIN'})).status,'clarify');assert.equal(taskCount(f),1);
-  assert.equal((await f.execute(f.event({text:'تمام'}))).status,'confirmation');assert.equal(taskCount(f),1);
-  assert.equal((await f.execute(f.event({text:`موافق ${pending(f).token}`}))).status,'applied');assert.equal(taskCount(f),2);
+  // A single plain affirmation now executes the pending proposal directly --
+  // no forced restatement round.
+  assert.equal((await f.execute(f.event({text:'تمام'}))).status,'applied');assert.equal(taskCount(f),2);
   const task=f.db.prepare("SELECT status,priority,suggested_owner,due_date FROM tasks WHERE id<>'old'").get();
   assert.equal(task.status,'open');assert.equal(task.priority,'yellow');assert.equal(task.suggested_owner,'خالد');assert.equal(task.due_date,'2026-09-06');
 });

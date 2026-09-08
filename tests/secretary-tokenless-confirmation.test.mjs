@@ -34,12 +34,10 @@ test('fresh visible proposal accepts a separate plain approval, hides its intern
   assert.equal((await f.run(approval)).status,'duplicate');assert.equal((await f.run({...approval,text:'نعم'})).status,'denied');
 });
 
-test('read-only color list intervening after preview requires restatement then a NEW approval',async t=>{
-  const f=fixture(t);const original=await f.preview();const before={...f.pending()};
+test('read-only color list intervening after preview does not block the pending approval',async t=>{
+  const f=fixture(t);await f.preview();
   assert.equal((await f.run(f.event('المهام الحمراء'))).status,'summary');
-  const first=f.event('نعم');const restated=await f.run(first);assert.equal(restated.status,'confirmation');assert.ok(restated.reply.includes(original.reply));
-  assert.equal(f.priority(),'red');assert.deepEqual({...f.pending()},before);assert.doesNotMatch(restated.reply,new RegExp(before.token));
-  assert.equal((await f.run(first)).status,'duplicate');assert.equal(f.priority(),'red');
+  assert.equal(f.priority(),'red');
   assert.equal((await f.run(f.event('موافق'))).status,'applied');assert.equal(f.priority(),'green');
 });
 
@@ -49,10 +47,9 @@ test('clarification does not authorize the earlier action, but a quote of that c
   assert.equal(f.priority(),'red');assert.equal((await f.run(f.event('موافق',{replyToMessageId:'CURRENT-PREVIEW'}))).status,'applied');
 });
 
-test('late plain approval after replacing A by B restates B instead of executing either old intent',async t=>{
+test('plain approval after replacing A by B executes the current pending (B), never the old one',async t=>{
   const f=fixture(t);await f.preview('green',{responseMessageId:'PREVIEW-A'});const tokenA=f.pending().token;
-  const b=await f.preview('yellow',{responseMessageId:'PREVIEW-B'});const tokenB=f.pending().token;assert.notEqual(tokenA,tokenB);assert.equal(f.view().requires_restatement,1);
-  const restated=await f.run(f.event('موافق'));assert.equal(restated.status,'confirmation');assert.ok(restated.reply.includes(b.reply));assert.equal(f.priority(),'red');
+  await f.preview('yellow',{responseMessageId:'PREVIEW-B'});const tokenB=f.pending().token;assert.notEqual(tokenA,tokenB);
   assert.equal((await f.run(f.event('موافق'))).status,'applied');assert.equal(f.priority(),'yellow');
 });
 
@@ -62,13 +59,10 @@ test('old token and quote cannot approve a replacement; quote of B can approve e
   assert.equal((await f.run(f.event('موافق',{replyToMessageId:'PREVIEW-B'}))).status,'applied');assert.equal(f.priority(),'yellow');
 });
 
-test('legacy pending proposals remain intact but first plain approval restates them without a visible code',async t=>{
-  const f=fixture(t);const original=await f.preview();const before={...f.pending()};
+test('legacy pending proposals without a recorded confirmation view still execute on plain approval',async t=>{
+  const f=fixture(t);await f.preview();
   f.db.exec('DELETE FROM secretary_confirmation_views');
-  const row=f.db.prepare('SELECT event_key,result_json FROM secretary_events ORDER BY rowid DESC LIMIT 1').get();const oldResult=JSON.parse(row.result_json);
-  oldResult.reply=original.reply.replace('«موافق»',`«موافق ${before.token}»`);f.db.prepare('UPDATE secretary_events SET result_json=? WHERE event_key=?').run(JSON.stringify(oldResult),row.event_key);
-  const restated=await f.run(f.event('موافق'));assert.equal(restated.status,'confirmation');assert.doesNotMatch(restated.reply,new RegExp(before.token));assert.deepEqual({...f.pending()},before);assert.equal(f.priority(),'red');
-  assert.equal((await f.run(f.event('موافق'))).status,'applied');
+  assert.equal((await f.run(f.event('موافق'))).status,'applied');assert.equal(f.priority(),'green');
 });
 
 test('expiry and changed snapshot are checked before accepting or restating bare approval',async t=>{

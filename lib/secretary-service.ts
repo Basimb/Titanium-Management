@@ -360,19 +360,6 @@ function visibleConfirmationReply(reply: string, token: string): string {
   const instruction = `«موافق ${token}»`, at = reply.lastIndexOf(instruction);
   return at < 0 ? reply : reply.slice(0, at) + "«موافق»" + reply.slice(at + instruction.length);
 }
-function restateConfirmation(db: DatabaseSync, event: Event, actor: ChatUser, state: Snapshot, live: Pending, key: string, now: number): Result {
-  const source = db.prepare("SELECT result_json,scope_json FROM secretary_events WHERE event_key=? AND conversation_key=?")
-    .get(eventKey({ ...event, messageId: live.source_message_id }), key) as { result_json: string; scope_json: string } | undefined;
-  const original = source ? JSON.parse(source.result_json) as Result : null;
-  if (!source || original?.status !== "confirmation" || !scopeAllowed(JSON.parse(source.scope_json), state)) {
-    db.prepare("DELETE FROM secretary_pending WHERE conversation_key=? AND token=?").run(key, live.token); clearConfirmationView(db, key);
-    return save(db, event, actor, { status: "stale", reply: "ما قدرت أسترجع المعاينة الدقيقة؛ لم أنفّذ شيئًا. اذكر الطلب من جديد." }, [], now);
-  }
-  // This acknowledgement refreshes the exact visible proposal; a separate new reply must approve it.
-  db.prepare("INSERT INTO secretary_confirmation_views VALUES(?,?,?,0) ON CONFLICT(conversation_key) DO UPDATE SET token=excluded.token,preview_event_key=excluded.preview_event_key,requires_restatement=0")
-    .run(key, live.token, eventKey(event));
-  return save(db, event, actor, { ...original, reply: "للتأكد من الطلب الحالي، راجع هذه المعاينة ثم اكتب «موافق»:\n\n" + visibleConfirmationReply(original.reply, live.token) }, JSON.parse(source.scope_json), now);
-}
 
 function intakeRow(db: DatabaseSync, key: string): IntakeRow | undefined {
   return db.prepare("SELECT draft_json,last_event_key,expires_at FROM secretary_task_intake WHERE conversation_key=?").get(key) as IntakeRow | undefined;
@@ -652,6 +639,22 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
     return earlyRead({ status: "summary", reply: `أهلًا ${clean(actor.name, 60)}، بعرفك من رقمك المسجّل عندنا.` + (callerQuestion.includes("المشاريع")
       ? `\n\n*المشاريع المتاحة إلك*\n\n${projects.length ? projects.map(p => `🔵 *${clean(p.name, 100)}*\nالحالة: ${LABELS[p.status] || clean(p.status)}`).join("\n\n") : "ما في مشاريع متاحة حاليًا."}` : "") }, projects.map(p => "p:" + p.id));
   }
+  // Admin-only, private-chat-only direct trigger for an on-demand team
+  // reminder broadcast -- bypasses the model since the intent is exact and
+  // the action is sensitive (messages every employee + the group), so it
+  // still goes through one confirmation like message_team/announce_team.
+  const teamReminderMatch = /^(?:ابعت|ارسل|أرسل|بعت)\s*(?:ال)?تذكير(?:ات)?\s*(?:المهام)?\s*(?:الآن|هلق|دلوقتي|حالا)?[.!؟\s]*$/u.test(callerQuestion);
+  if (teamReminderMatch && actor.id === "basem" && actor.role === "admin" && event.groupId === null) return transaction(db, () => {
+    const freshActor = actorFor(db, event, config); if (!freshActor || freshActor.id !== "basem" || freshActor.role !== "admin" || freshActor.active !== 1) return { status: "denied", reply: "" };
+    const state = stateFor(db, freshActor); const duplicate = lookup(db, event, freshActor, state); if (duplicate) return duplicate;
+    const groups = ownerTaskGroups(state);
+    if (!groups.size) return save(db, event, freshActor, { status: "clarify", reply: "ما في مهام مفتوحة معلّقة لأي موظف حاليًا؛ ما في شي أذكّر فيه." }, [], now);
+    const names = [...groups.keys()].map(id => state.users.find(u => u.id === id)?.name).filter(Boolean).join("، ");
+    const token = "T" + randomBytes(3).toString("hex").toUpperCase();
+    db.prepare("INSERT INTO secretary_pending VALUES(?,?,?,?,?,?,?)").run(key, token, JSON.stringify({ action: "team_reminders" }), initialHash, event.text, event.messageId, now + CONFIRM_MS);
+    log(db, freshActor, event, "secretary_team_reminders_preview", { summary: "عرض تذكير جماعي بالمهام قبل الإرسال", recipients: groups.size }, now);
+    return save(db, event, freshActor, { status: "confirmation", reply: `رح أبعت لكل موظف عنده مهام مفتوحة تذكيرًا خاصًا بمهامه (${groups.size} موظف: ${names})، وأنشر نسخة مجمّعة على جروب الفريق باسم كل موظف فوق مهامه.\n\nلم أرسل شيئًا بعد. اكتب «موافق ${token}» أو رد بالموافقة مباشرة على هذه المعاينة؛ وللتراجع اكتب «إلغاء». التأكيد صالح 10 دقائق.` }, [], now);
+  });
   if (isSecretaryIdentityQuery(event.text)) return earlyRead({ status: "summary", reply: SECRETARY_IDENTITY });
   if (reviewRequest?.kind === "clarify") return earlyRead({ status: "clarify", reply: reviewRequest.reply });
   const review = reviewRequest?.kind === "review" ? reviewRequest : null;
@@ -698,11 +701,12 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
       const matchingQuote = !!quote && JSON.parse(quote.result_json).status === "confirmation"
         && (quote.event_key === originalPreviewKey || (view?.token === live.token && quote.event_key === view.preview_event_key));
       if (quote && !matchingQuote) return save(db, event, freshActor, { status: "clarify", reply: "هذا الرد ليس على الطلب الحالي. رد بالموافقة على معاينته الحالية، أو اكتب «موافق» لأعيد عرضها قبل التنفيذ." }, [], now);
-      if (!isCancellation(event.text) && !isAffirmation(event.text, live.token, matchingQuote)) {
-        if (!AFFIRMATIONS.includes(confirmationText(event.text))) return save(db, event, freshActor, { status: "clarify", reply: "هذه الموافقة ليست للطلب الحالي. رد على معاينته الحالية، أو اكتب «موافق» لأراجعه معك." }, [], now);
-        const latest = db.prepare("SELECT event_key,result_json FROM secretary_events WHERE conversation_key=? ORDER BY created_at DESC,rowid DESC LIMIT 1").get(key) as { event_key: string; result_json: string } | undefined;
-        const latestMatches = view?.token === live.token && view.requires_restatement === 0 && !!latest && latest.event_key === view.preview_event_key && JSON.parse(latest.result_json).status === "confirmation";
-        if (!latestMatches) return restateConfirmation(db, event, freshActor, state, live, key, now);
+      // A single plain "موافق" is enough once the pending proposal is confirmed
+      // live and unchanged (expiry/staleness/quote checks around this block) --
+      // no second restatement round. Basim asked for this directly: a mistaken
+      // one-shot approval isn't worth a mandatory extra confirmation step.
+      if (!isCancellation(event.text) && !isAffirmation(event.text, live.token, matchingQuote) && !AFFIRMATIONS.includes(confirmationText(event.text))) {
+        return save(db, event, freshActor, { status: "clarify", reply: "هذه الموافقة ليست للطلب الحالي. رد على معاينته الحالية، أو اكتب «موافق» لأراجعه معك." }, [], now);
       }
       db.prepare("DELETE FROM secretary_pending WHERE conversation_key=?").run(key);
       clearConfirmationView(db, key);
@@ -723,6 +727,12 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
         enqueueAgentMessage(db, { toUser: "group", text: String(command.text || "") }, now);
         log(db, freshActor, event, "secretary_announce_queued", { summary: "أكد نشر إعلان على جروب الفريق" }, now);
         return save(db, event, freshActor, { status: "queued", reply: "أكدت الطلب وأضفت الإعلان لطابور النشر على جروب الفريق. هذا ليس تأكيد نشر فعلي؛ لو تجاوزنا الحد اليومي لرسائل الجروب ممكن يتأخر أو يتجاهل." }, [], now);
+      }
+      if (command.action === "team_reminders") {
+        if (freshActor.id !== "basem" || freshActor.role !== "admin" || event.groupId !== null) return save(db, event, freshActor, { status: "denied", reply: "إرسال تذكير الفريق متاح لباسم من محادثته الخاصة فقط." }, [], now);
+        const { recipients } = sendTeamTaskReminders(db, state, now);
+        log(db, freshActor, event, "secretary_team_reminders_sent", { summary: "أرسل تذكيرًا يدويًا لكل موظف بمهامه ونشره على الجروب", recipients }, now);
+        return save(db, event, freshActor, { status: "applied", reply: recipients ? `✅ بعت تذكيرًا خاصًا لـ${recipients} موظف بمهامهم، ونشرت نسخة مجمّعة على جروب الفريق.` : "ما في مهام مفتوحة معلّقة لأي موظف حاليًا؛ ما بعت شي." }, [], now);
       }
       if (command.action === "schedule_reminder") return reminder(db, event, freshActor, state, command.taskId, command.dueAt, now);
       if (command.action === "close_direct") return closeDirect(db, event, freshActor, state, String(command.taskId), now, { originalText: live.original_text, sourceMessageId: live.source_message_id, confirmationRequired: true, confirmedBy: freshActor.id, confirmationMessageId: event.messageId });
@@ -964,6 +974,46 @@ function dispatchManagementNotice(db: DatabaseSync, actor: ChatUser, state: Snap
       ? (() => { const ownerName = state.tasks.find(t => t.id === taskId)?.owner ?? null; return ownerName ? state.users.find(u => u.name === ownerName)?.id ?? null : null; })()
       : null;
   if (targetId && targetId !== actor.id) enqueueAgentMessage(db, { toUser: targetId, text: `📌 تحديث على مهمتك:\n${notice}` }, now);
+}
+// On-demand "remind everyone now" broadcast (Basim asking directly, not the
+// nightly agent-followups nudge cadence): groups every open, non-archived,
+// non-completed task by its resolved OWNER (tasks.owner is a NAME, resolved
+// back to a user the same way dispatchManagementNotice does), sends each
+// owner their own list privately, and posts one combined group message with
+// a 🔴 bold heading per owner -- WhatsApp text has no real color, so a bold
+// name under a red-circle emoji is the closest stand-in for "highlight the
+// responsible person in red" above their own tasks.
+function ownerTaskGroups(state: Snapshot): Map<string, Task[]> {
+  const groups = new Map<string, Task[]>();
+  for (const task of state.tasks) {
+    if (task.archivedAt || task.status === "completed" || !task.owner) continue;
+    const user = state.users.find(u => u.name === task.owner);
+    if (!user) continue;
+    const list = groups.get(user.id) || []; list.push(task); groups.set(user.id, list);
+  }
+  return groups;
+}
+function formatOwnerTaskLines(tasks: Task[], today: string): string {
+  return tasks.map((task, index) => {
+    const priority = PRIORITIES[task.priority];
+    const overdue = task.dueDate && task.dueDate < today;
+    const suffix = overdue ? " • 🔴 متأخرة" : task.dueDate ? ` • الموعد: ${clean(task.dueDate, 10)}` : "";
+    return `${index + 1}. ${priority?.icon || "⚪"} ${clean(task.title, 120)} — ${LABELS[task.status] || clean(task.status)}${suffix}`;
+  }).join("\n");
+}
+function sendTeamTaskReminders(db: DatabaseSync, state: Snapshot, now: number): { recipients: number } {
+  const today = new Date(now + 3 * 3600_000).toISOString().slice(0, 10);
+  const groups = ownerTaskGroups(state);
+  const sections: string[] = [];
+  for (const [userId, tasks] of groups) {
+    if (!tasks.length) continue;
+    const user = state.users.find(u => u.id === userId)!;
+    const lines = formatOwnerTaskLines(tasks, today);
+    enqueueAgentMessage(db, { toUser: userId, text: `📋 تذكير بمهامك الحالية يا ${clean(user.name, 60)} (${tasks.length}):\n\n${lines}` }, now);
+    sections.push(`🔴 *${clean(user.name, 60).replace(/\*/g, "")}*\n${lines}`);
+  }
+  if (sections.length) enqueueAgentMessage(db, { toUser: "group", text: `📋 تذكير بالمهام المفتوحة حسب المسؤول — ${today}\n\n${sections.join("\n\n")}` }, now);
+  return { recipients: groups.size };
 }
 function perform(db: DatabaseSync, event: Event, actor: ChatUser, state: Snapshot, command: Record<string, unknown>, now: number, context: Record<string, unknown>): Result {
   try {

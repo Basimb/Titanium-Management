@@ -285,16 +285,20 @@ test('public search renders only source URLs actually returned by the search too
  assert.match(reply,/https:\/\/example.com\/product/);assert.doesNotMatch(reply,/127\.0\.0\.1/);
 });
 
-test('late bare approval and old token/quote cannot execute a replacement request',async t=>{
+test('old token/quote cannot execute a replacement request; only the current pending is ever approved',async t=>{
  const f=fixture(t);const manager={senderNumber:'12025550103'};
  await f.run(command('edit_task',{title:'تعديل الطلب الأول'}),{...manager,text:'عدل عنوان اللوحة',responseMessageId:'PROPOSAL-A'});
  const firstToken=pending(f.db).token;
  await f.run(command('delete_task',{},'private'),{...manager,text:'احذف مهمة شادي',responseMessageId:'PROPOSAL-B'});
  const secondToken=pending(f.db).token;
  const noInference=async()=>{throw Error('confirmation attempts must never reach the model');};
- for(const extra of [{text:'نعم'},{text:`موافق ${firstToken}`},{text:'نعم',replyToMessageId:'PROPOSAL-A'},{text:`موافق ${secondToken}`,replyToMessageId:'PROPOSAL-A'}]) {
+ // A wrong explicit token, or any reply quoting the OLD proposal (even with
+ // the right token typed alongside), must never execute the current
+ // pending. A bare, unqualified affirmation now executes it directly (see
+ // secretary-tokenless-confirmation.test.mjs) so it's exercised separately below.
+ for(const extra of [{text:`موافق ${firstToken}`},{text:'نعم',replyToMessageId:'PROPOSAL-A'},{text:`موافق ${secondToken}`,replyToMessageId:'PROPOSAL-A'}]) {
    const result=await f.run(undefined,{...manager,...extra},noInference);
-   assert.equal(result.status,extra.text==='نعم'&&!extra.replyToMessageId?'confirmation':'clarify');assert.equal(pending(f.db).token,secondToken);
+   assert.equal(result.status,'clarify');assert.equal(pending(f.db).token,secondToken);
    assert.ok(f.db.prepare("SELECT id FROM tasks WHERE id='private'").get());
    assert.equal(f.db.prepare("SELECT title FROM tasks WHERE id='t'").get().title,'لوحة');
  }
@@ -386,17 +390,16 @@ test('inaccessible history cannot supply focus even when its result points to a 
  await f.run(undefined,{},async input=>{assert.equal(input.history.length,0);assert.equal(input.focusedTaskId,null);return emptySecretaryIntent('help');});
 });
 
-test('clarifying questions preserve the exact pending proposal and plain approval first restates it',async t=>{
+test('clarifying questions preserve the exact pending proposal and a plain approval executes it directly',async t=>{
  const f=fixture(t);await f.run(command('submit'),{text:'خلصت اللوحة بالكامل',responseMessageId:'PENDING-SUBMIT'});
  const before={...pending(f.db)};
  await f.run({...emptySecretaryIntent('chat','المهمة تذهب إلى باسم للمراجعة ولا تصبح معتمدة تلقائيًا.'),taskId:'t'},{text:'شو يعني بانتظار الاعتماد؟'});
  assert.deepEqual({...pending(f.db)},before);
  await f.run({...emptySecretaryIntent('clarify','بدك أوضح خطوة المراجعة؟'),taskId:'t'},{text:'وضح أكثر'});
  assert.deepEqual({...pending(f.db)},before);
- assert.equal((await f.run(undefined,{text:'نعم'})).status,'confirmation');
  assert.equal(f.db.prepare("SELECT status FROM tasks WHERE id='t'").get().status,'progress');
- assert.equal(pending(f.db).token,before.token);
- assert.equal((await f.run(undefined,{text:`موافق ${before.token}`})).status,'applied');
+ // A single plain affirmation now executes the still-intact proposal directly -- no restatement round.
+ assert.equal((await f.run(undefined,{text:'نعم'})).status,'applied');
  assert.equal(f.db.prepare("SELECT status FROM tasks WHERE id='t'").get().status,'approval');
 });
 
