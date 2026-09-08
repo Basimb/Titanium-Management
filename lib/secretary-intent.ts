@@ -380,7 +380,7 @@ export class SecretaryProviderError extends Error {
 }
 function plannerPrompt(input: SecretaryModelInput) {
   return PROMPT.split("\n").filter(line => input.review || !/^(REVIEW MODE:|Review is READ-ONLY|In review,)/.test(line)).join("\n")
-    + "\nREQUIRED OUTPUT: Include every schema key, especially fields with ALL nine keys; unused values are null. Never omit fields.";
+    + "\nREQUIRED OUTPUT: Call exactly one provided tool matching your chosen kind; never reply in plain text or call more than one. If a required detail is unknown, use clarify.";
 }
 function plannerContext(input: SecretaryModelInput) {
   let length = 0; const history = [];
@@ -403,22 +403,109 @@ async function jsonResponse(response: Response) {
   }
   return data;
 }
+// ---- Per-kind tool-calling schema -----------------------------------------
+// Earlier this planner asked for one shared flat JSON object covering every
+// kind at once, with all nine `fields` keys always present and nullable no
+// matter which kind was chosen. That let the model correctly pick a kind
+// (e.g. announce_team) yet still leave the ONE field that kind actually
+// needs (fields.body) null, because the schema had no way to say "body is
+// required this time, for this kind" -- validateSecretaryIntent then had no
+// choice but to fall back to the same static clarifying question every time.
+// Native OpenAI tool-calling -- one strongly-typed function per kind, each
+// with its own strict JSON schema -- fixes this at the source: the kind a
+// tool call names and the fields it is allowed/required to carry are the
+// SAME schema, so a kind's one essential identifying detail can be a real
+// non-nullable requirement the model cannot skip. When that detail is
+// genuinely unknown the model has an always-available escape hatch: call
+// clarify instead of guessing. Nothing downstream changes -- mergeToolCall
+// below reassembles the exact same flat SecretaryIntent shape validateSecretaryIntent
+// and every consumer in secretary-service.ts already expect.
+const STRING = { type: "string" };
+const NULLABLE_STRING = { type: ["string", "null"] };
+const PRIORITY = { type: "string", enum: ["red", "yellow", "green"] };
+const NULLABLE_PRIORITY = { type: ["string", "null"], enum: ["red", "yellow", "green", null] };
+type FieldName = typeof FIELD_NAMES[number];
+function fieldsSchema(spec: Partial<Record<FieldName, "required" | "optional">>) {
+  const names = FIELD_NAMES.filter(name => spec[name]);
+  return { type: "object", additionalProperties: false, required: names, properties: Object.fromEntries(names.map(name => {
+    const nonNull = spec[name] === "required";
+    return [name, name === "priority" ? (nonNull ? PRIORITY : NULLABLE_PRIORITY) : (nonNull ? STRING : NULLABLE_STRING)];
+  })) };
+}
+const TOOLS: Record<string, { description: string; properties: Record<string, unknown>; required: string[] }> = {
+  summary: { description: "Show the actor's task list.", properties: {}, required: [] },
+  report: { description: "Show the management overview.", properties: {}, required: [] },
+  projects: { description: "Show the accessible project list.", properties: {}, required: [] },
+  help: { description: "Explain how to use the secretary and share the site link.", properties: {}, required: [] },
+  approvals: { description: "Show what is currently waiting for a decision.", properties: {}, required: [] },
+  message_status: { description: "Report what happened to the latest confirmed team send.", properties: {}, required: [] },
+  details: { description: "Show one specific already-identified task or project's details.",
+    properties: { taskId: NULLABLE_STRING, projectId: NULLABLE_STRING }, required: ["taskId", "projectId"] },
+  chat: { description: "A conversational reply that changes no records.",
+    properties: { message: STRING, taskId: NULLABLE_STRING }, required: ["message", "taskId"] },
+  clarify: { description: "Ask exactly one specific clarifying question when something required is missing or ambiguous.",
+    properties: { message: STRING, taskId: NULLABLE_STRING }, required: ["message", "taskId"] },
+  search: { description: "A standalone public web-search query, no internal data.",
+    properties: { message: STRING }, required: ["message"] },
+  remind: { description: "Schedule one reminder for a specific task at a precise future time.",
+    properties: { taskId: STRING, fields: fieldsSchema({ remindAt: "required" }) }, required: ["taskId", "fields"] },
+  message_team: { description: "Send an individual private WhatsApp message to team members right now.",
+    properties: { recipientIds: { type: "array", items: STRING }, fields: fieldsSchema({ body: "required" }) }, required: ["recipientIds", "fields"] },
+  announce_team: { description: "Post an announcement right now to the shared team group.",
+    properties: { fields: fieldsSchema({ body: "required" }) }, required: ["fields"] },
+  task_draft: { description: "Start or continue collecting a new task's creation draft.",
+    properties: { intakeMode: { type: "string", enum: ["start", "continue"] }, projectId: NULLABLE_STRING,
+      fields: fieldsSchema({ name: "optional", title: "optional", details: "optional", priority: "optional", dueDate: "optional", ownerId: "optional" }) },
+    required: ["intakeMode", "projectId", "fields"] },
+  command: { description: "One explicit management action on an existing task or project.",
+    properties: { action: { type: "string", enum: SECRETARY_ACTIONS }, taskId: NULLABLE_STRING, projectId: NULLABLE_STRING,
+      fields: fieldsSchema({ title: "optional", name: "optional", details: "optional", priority: "optional", dueDate: "optional", ownerId: "optional", reason: "optional", body: "optional" }) },
+    required: ["action", "taskId", "projectId", "fields"] },
+  decide: { description: "Basim approves or rejects one pending request from pendingApprovals.",
+    properties: { action: { type: "string", enum: ["approve", "reject"] }, message: STRING,
+      fields: fieldsSchema({ reason: "optional", priority: "optional", dueDate: "optional" }) }, required: ["action", "message", "fields"] },
+  extension: { description: "The task owner asks for more time on a specific task.",
+    properties: { taskId: STRING, fields: fieldsSchema({ dueDate: "required", reason: "optional" }) }, required: ["taskId", "fields"] },
+  close_request: { description: "The task owner reports a specific task's work as fully finished.",
+    properties: { taskId: STRING, fields: fieldsSchema({ details: "required" }) }, required: ["taskId", "fields"] },
+  ownership_request: { description: "An employee asks to take responsibility for one specific unassigned task from ownershipCandidates.",
+    properties: { taskId: STRING, fields: fieldsSchema({ reason: "optional" }) }, required: ["taskId", "fields"] },
+  rule: { description: "Basim states a standing rule for future work.",
+    properties: { message: STRING, fields: fieldsSchema({ body: "required", ownerId: "optional", reason: "optional" }) }, required: ["message", "fields"] },
+  correction: { description: "Basim corrects an assignment the secretary or team made.",
+    properties: { message: STRING, fields: fieldsSchema({ ownerId: "required", name: "optional" }) }, required: ["message", "fields"] },
+  knowledge: { description: "A company-procedure question, or Basim/a manager saving a new knowledge-base entry.",
+    properties: { message: NULLABLE_STRING, fields: fieldsSchema({ title: "optional", body: "optional" }) }, required: ["message", "fields"] },
+  project_draft: { description: "Open a new project together with its tasks in one go.",
+    properties: { message: STRING, fields: fieldsSchema({ name: "required", details: "optional" }) }, required: ["message", "fields"] },
+};
+function secretaryTools(strict: boolean) {
+  return KINDS.map(kind => ({ type: "function", function: { name: kind, strict, description: TOOLS[kind].description,
+    parameters: { type: "object", additionalProperties: false, required: TOOLS[kind].required, properties: TOOLS[kind].properties } } }));
+}
+function exactKeys(value: Record<string, unknown>, expected: string[]) { return Object.keys(value).sort().join(",") === [...expected].sort().join(","); }
+function mergeToolCall(kind: string, rawArguments: string): SecretaryIntent {
+  if (!KINDS.includes(kind)) throw new Error("Unknown secretary tool.");
+  const spec = TOOLS[kind];
+  const args: unknown = JSON.parse(rawArguments);
+  // Merging always produces a fully-shaped SecretaryIntent, so an incomplete
+  // or tampered tool call must be rejected HERE -- never silently padded
+  // with emptySecretaryIntent defaults, which would let a partial/invented
+  // plan slip past what used to be a single flat-shape check.
+  if (!object(args) || !exactKeys(args, spec.required)) throw new Error("Invalid secretary tool arguments.");
+  const { fields, ...topLevel } = args;
+  const fieldNames = "fields" in spec.properties ? (spec.properties.fields as { required: string[] }).required : null;
+  if (fieldNames ? !object(fields) || !exactKeys(fields, fieldNames) : fields !== undefined) throw new Error("Invalid secretary tool fields.");
+  const base = emptySecretaryIntent(kind as SecretaryIntent["kind"]);
+  return { ...base, ...topLevel, fields: { ...base.fields, ...(object(fields) ? fields : {}) } } as SecretaryIntent;
+}
 export async function inferSecretaryIntent(input: SecretaryModelInput, options: { apiKey?: string; model?: string; fetcher?: typeof fetch } = {}): Promise<SecretaryIntent> {
   if (!options.apiKey || input.text.length > 2000 || input.tasks.length > 80 || input.projects.length > 80) throw new Error("Secretary service unavailable.");
   reviewing(input);
   const model = options.model || "gpt-4o";
-  const properties = Object.fromEntries(FIELD_NAMES.map(name => [name, { type: ["string", "null"], ...(name === "priority" ? { enum: ["red", "yellow", "green", null] } : {}) }]));
-  const requestBody = { model, max_completion_tokens: 1300,
+  const requestBody = { model, max_completion_tokens: 1300, tool_choice: "required", parallel_tool_calls: false,
       messages: [{ role: "system", content: plannerPrompt(input) }, { role: "user", content: JSON.stringify(plannerContext(input)) }],
-      response_format: { type: "json_schema", json_schema: { name: "titanium_secretary_plan", strict: true, schema: {
-        type: "object", additionalProperties: false, required: ["kind", "intakeMode", "action", "taskId", "projectId", "recipientIds", "fields", "message"], properties: {
-          kind: { type: "string", enum: KINDS }, action: { type: ["string", "null"], enum: [...SECRETARY_ACTIONS, null] },
-          intakeMode: { type: ["string", "null"], enum: ["start", "continue", null] },
-          taskId: { type: ["string", "null"] }, projectId: { type: ["string", "null"] }, message: { type: ["string", "null"] },
-          recipientIds: { type: "array", items: { type: "string" } },
-          fields: { type: "object", additionalProperties: false, required: FIELD_NAMES, properties },
-        },
-      } } },};
+      tools: secretaryTools(true) };
   const send = async (body: unknown) => {
     try { return await jsonResponse(await (options.fetcher || fetch)("https://api.openai.com/v1/chat/completions", {
       method: "POST", headers: { authorization: `Bearer ${options.apiKey}`, "content-type": "application/json" },
@@ -430,12 +517,13 @@ export async function inferSecretaryIntent(input: SecretaryModelInput, options: 
   catch (error) {
     if (!(error instanceof SecretaryProviderError) || error.code !== "schema_rejected") throw error;
     // Never execute failed_generation. Fresh output still passes all server validators.
-    result = await send({ ...requestBody, response_format: { type: "json_object" },
-      messages: [{ role: "system", content: plannerPrompt(input) + "\nReturn JSON matching this exact schema: " + JSON.stringify(requestBody.response_format.json_schema.schema) }, requestBody.messages[1]] });
+    result = await send({ ...requestBody, tools: secretaryTools(false) });
   }
   const choice = result?.choices?.[0];
-  if (choice?.finish_reason !== "stop" || choice.message?.tool_calls || typeof choice.message?.content !== "string" || choice.message.content.length > 10000) throw new SecretaryProviderError("invalid_response");
-  try { return validateSecretaryIntent(JSON.parse(choice.message.content), input); } catch { throw new SecretaryProviderError("invalid_plan"); }
+  const calls = choice?.message?.tool_calls;
+  if (choice?.finish_reason !== "tool_calls" || !Array.isArray(calls) || calls.length !== 1 || typeof calls[0]?.function?.name !== "string"
+    || typeof calls[0].function?.arguments !== "string" || calls[0].function.arguments.length > 10000) throw new SecretaryProviderError("invalid_response");
+  try { return validateSecretaryIntent(mergeToolCall(calls[0].function.name, calls[0].function.arguments), input); } catch { throw new SecretaryProviderError("invalid_plan"); }
 }
 
 /** Separate public-search call via OpenAI's hosted web_search tool. No task catalog, internal history or employee table is sent. */

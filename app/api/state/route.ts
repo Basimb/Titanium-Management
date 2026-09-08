@@ -11,7 +11,6 @@ import {
   verifyPin,
   type TitaniumUser,
 } from "@/lib/titanium-server";
-import { notifyManagementGroup, taskNotification } from "@/lib/whatsapp";
 import { readTeamChatSettings } from "@/lib/team-chat-settings";
 import { executeManagementAction, getManagementSnapshot, isManagementAction, ManagementActionError, parseManagementCommand } from "@/lib/management-actions";
 import { listApprovals, decideApproval } from "@/lib/approvals";
@@ -121,7 +120,6 @@ export async function POST(request: Request) {
     const body = input as Record<string, unknown>;
     const action = text(body.action);
     const now = Date.now();
-    let waNotification:string|null = null;
 
     if (action === "decide_approval") {
       const denied = requireAdmin(user); if (denied) return denied;
@@ -135,10 +133,8 @@ export async function POST(request: Request) {
       const result = executeManagementAction(chatDatabase(), user, parseManagementCommand(body), { source: "site", now });
       // The database transaction has committed; object storage operations must stay outside it.
       await Promise.allSettled(result.deletedObjectKeys.map(objectKey => bucket().delete(objectKey)));
-      if (result.notification) {
-        const notice = result.notification;
-        waNotification = taskNotification(notice.action, notice.title, notice.actor, notice.extra);
-      }
+      // Dashboard actions stay dashboard-only: information lives in the WhatsApp
+      // secretary's own conversation and group notices, not relayed here too.
     } else if (action === "add_user") {
       const denied = requireAdmin(user); if (denied) return denied;
       const name = text(body.name).trim(); if (!name) return bad("اسم المستخدم مطلوب");
@@ -175,7 +171,6 @@ export async function POST(request: Request) {
       return bad("الطلب غير معروف");
     }
 
-    if (waNotification) await notifyManagementGroup(waNotification).catch(() => console.error("WhatsApp notification failed"));
     return loadState(user);
   } catch (error) {
     if (error instanceof ManagementActionError) return privateJson({ error: error.message }, { status: error.status });

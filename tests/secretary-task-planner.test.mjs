@@ -52,15 +52,19 @@ test('provider schema puts required intakeMode at the root and explains task int
     assert.equal(url, 'https://api.openai.com/v1/chat/completions');
     assert.equal(options.redirect, 'error');
     request = JSON.parse(options.body);
-    return Response.json({ choices: [{ finish_reason: 'stop', message: { content: JSON.stringify(planned) } }] });
+    const { fields } = planned;
+    return Response.json({ choices: [{ finish_reason: 'tool_calls', message: { tool_calls: [{ function: { name: 'task_draft', arguments: JSON.stringify({
+      intakeMode: planned.intakeMode, projectId: planned.projectId,
+      fields: { name: fields.name, title: fields.title, details: fields.details, priority: fields.priority, dueDate: fields.dueDate, ownerId: fields.ownerId },
+    }) } }] } }] });
   } });
-  const schema = request.response_format.json_schema.schema;
-  assert.equal(request.response_format.json_schema.strict, true);
-  assert.equal(schema.additionalProperties, false);
-  assert.ok(schema.required.includes('intakeMode'));
-  assert.deepEqual(schema.properties.intakeMode.enum, ['start', 'continue', null]);
-  assert.ok(schema.properties.kind.enum.includes('task_draft'));
-  assert.equal(Object.hasOwn(schema.properties.fields.properties, 'intakeMode'), false);
+  const tool = request.tools.find(t => t.function.name === 'task_draft').function;
+  assert.equal(tool.strict, true);
+  assert.equal(tool.parameters.additionalProperties, false);
+  assert.ok(tool.parameters.required.includes('intakeMode'));
+  assert.deepEqual(tool.parameters.properties.intakeMode.enum, ['start', 'continue']);
+  assert.ok(request.tools.some(t => t.function.name === 'task_draft'));
+  assert.equal(Object.hasOwn(tool.parameters.properties.fields.properties, 'intakeMode'), false);
   const prompt = request.messages[0].content;
   for (const pattern of [/TASK INTAKE/, /ONE missing question at a time/, /start ignores old draft fields/,
     /taskDraft becomes null/, /unassigned/, /unscheduled/, /Never infer a sentinel from silence/,

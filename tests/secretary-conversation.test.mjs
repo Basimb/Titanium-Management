@@ -14,10 +14,14 @@ test('conversational provider keeps task planner schema and untrusted context bo
     assert.equal(url, 'https://api.openai.com/v1/chat/completions');
     assert.equal(options.redirect, 'error');
     body = JSON.parse(options.body);
-    return Response.json({choices:[{finish_reason:'stop',message:{content:JSON.stringify(emptySecretaryIntent('chat','اختَر مهمة واحدة ضرورية اليوم وابدأ بأول خطوة فيها.'))}}]});
+    return Response.json({choices:[{finish_reason:'tool_calls',message:{tool_calls:[{function:{name:'chat',arguments:JSON.stringify({message:'اختَر مهمة واحدة ضرورية اليوم وابدأ بأول خطوة فيها.',taskId:null})}}]}}]});
   }});
   assert.equal(body.model,'gpt-4o');
-  assert.equal(body.response_format.json_schema.strict,true);
+  assert.equal(body.tool_choice,'required');
+  assert.equal(body.parallel_tool_calls,false);
+  assert.equal(body.tools.length,23);
+  assert.ok(body.tools.every(tool=>tool.type==='function' && tool.function.strict===true));
+  assert.equal(body.tools.find(tool=>tool.function.name==='chat').function.parameters.required.includes('message'),true);
   assert.equal(body.messages.length,2);
   assert.equal(body.messages[0].role,'system');
   assert.match(body.messages[0].content,/not a form or command menu/);

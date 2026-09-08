@@ -12,7 +12,11 @@ const context = (extra = {}) => ({
   canMessageTeam: true, messageRecipients: [{ id: 'member-test', name: 'موظف اصطناعي' }],
   review: { previousQuestion: 'شو يعني اللون الأخضر؟', previousAnswer: 'يعني أن المهمة انتهت.' }, ...extra,
 });
-const response = plan => Response.json({ choices: [{ finish_reason: 'stop', message: { content: JSON.stringify(plan) } }] });
+function toolArgsFor(plan) {
+  if (plan.kind === 'chat' || plan.kind === 'clarify') return { message: plan.message, taskId: plan.taskId };
+  throw new Error('toolArgsFor: unsupported kind in test helper: ' + plan.kind);
+}
+const response = plan => Response.json({ choices: [{ finish_reason: 'tool_calls', message: { tool_calls: [{ function: { name: plan.kind, arguments: JSON.stringify(toolArgsFor(plan)) } }] } }] });
 
 test('review retains the same bounded OpenAI call and receives quoted context plus explicit truthful identity policy', async () => {
   const input = context(), seen = [];
@@ -25,7 +29,8 @@ test('review retains the same bounded OpenAI call and receives quoted context pl
   const body = seen[0].body, prompt = body.messages[0].content;
   assert.equal(body.model, 'gpt-4o');
   assert.equal(body.reasoning_effort, undefined); assert.equal(body.max_completion_tokens, 1300);
-  assert.equal(body.response_format.json_schema.strict, true);
+  assert.equal(body.tool_choice, 'required'); assert.equal(body.parallel_tool_calls, false);
+  assert.equal(body.tools.every(tool => tool.function.strict === true), true);
   assert.equal(body.messages.length, 2);
   assert.deepEqual(JSON.parse(body.messages[1].content), input);
   assert.match(prompt, /أنا سكرتير باسم، مساعده الافتراضي/);
