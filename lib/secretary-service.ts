@@ -41,6 +41,29 @@ const SENSITIVE = new Set(["edit_project", "approve_project", "reject_project", 
 const LABELS: Record<string, string> = { open: "بانتظار الاستلام", progress: "قيد التنفيذ", approval: "بانتظار اعتماد باسم", completed: "معتمدة", active: "نشط", pending: "بانتظار الموافقة", rejected: "مرفوض" };
 const ACTION_LABELS: Record<string, string> = { add_project: "إنشاء مشروع", edit_project: "تعديل المشروع", approve_project: "اعتماد المشروع", reject_project: "رفض المشروع", restore_project: "إعادة فتح المشروع", archive_project: "أرشفة المشروع", delete_project: "حذف المشروع نهائيًا", add_task: "إنشاء مهمة", edit_task: "تعديل المهمة", claim: "استلام المهمة", cancel_claim: "إرجاع المهمة", comment: "إضافة تعليق", submit: "إرسال المهمة لاعتماد باسم", approve: "اعتماد إنجاز المهمة", reject: "رفض الإنجاز", reopen: "إعادة فتح المهمة", reassign: "تغيير المسؤول", move_task: "نقل المهمة", archive_task: "أرشفة المهمة", restore_task: "استعادة المهمة", delete_task: "حذف المهمة نهائيًا" };
 const clean = (value: unknown, max = 200) => String(value ?? "").replace(/[\x00-\x1f\u202a-\u202e\u2066-\u2069]/g, " ").slice(0, max);
+// Seed content for secretary_playbook (id='main') -- the standing team
+// instructions retrievable on demand by anyone sending the exact phrase
+// "\u062a\u0639\u0644\u064a\u0645\u0627\u062a \u0627\u0644\u0633\u0643\u0631\u062a\u064a\u0631". This mirrors the announcement Basim approved and had
+// posted to the team group; DEFAULT_PLAYBOOK only seeds a fresh row (INSERT
+// OR IGNORE), it never overwrites a value Basim already edited via the
+// admin-only update command.
+const DEFAULT_PLAYBOOK = `\ud83d\udccc \u062a\u0639\u0644\u064a\u0645\u0627\u062a \u0645\u0647\u0645\u0629 \u0644\u0643\u0644 \u0627\u0644\u0641\u0631\u064a\u0642:
+
+\u0623\u0648\u0644 \u0634\u064a: \u0627\u0628\u0639\u062a\u0648\u0644\u064a \u0631\u0633\u0627\u0644\u0629 (\u0648\u0644\u0648 \u0628\u0633 \u0643\u0644\u0645\u0629 "\u0645\u0631\u062d\u0628\u0627") \u0639\u0644\u0649 \u0627\u0644\u062e\u0627\u0635 \u0647\u0648\u0646\u060c \u0645\u0634\u0627\u0646 \u062a\u0646\u0641\u062a\u062d \u0642\u0646\u0627\u0629 \u0627\u0644\u062a\u0648\u0627\u0635\u0644 \u0628\u064a\u0646\u064a \u0648\u0628\u064a\u0646\u0643\u0645 \u0648\u062a\u0648\u0635\u0644\u0643\u0645 \u0631\u0633\u0627\u064a\u0644\u064a \u0627\u0644\u062e\u0627\u0635\u0629 \u0628\u0639\u062f\u064a\u0646. \u0623\u0646\u0627 \u0628\u0633\u062a\u0646\u0627\u0647\u0627 \u0645\u0646\u0643\u0645.
+
+1) \u0644\u0645\u0627 \u0628\u0627\u0633\u0645 \u064a\u0641\u062a\u062d \u0645\u0634\u0631\u0648\u0639 \u0648\u064a\u062d\u0637 \u0645\u0647\u0645\u0629 \u0625\u0644\u0643\u060c \u0631\u062d \u062a\u0648\u0635\u0644\u0643 \u0631\u0633\u0627\u0644\u0629 \u062e\u0627\u0635\u0629 (\ud83c\udd95 \u0645\u0647\u0645\u0629 \u062c\u062f\u064a\u062f\u0629) \u2014 \u0647\u0627\u064a \u0645\u0642\u062a\u0631\u062d\u0629 \u0625\u0644\u0643 \u0648\u0628\u0633\u062a\u0646\u0649 \u0645\u0648\u0627\u0641\u0642\u062a\u0643. \u0644\u0644\u0645\u0648\u0627\u0641\u0642\u0629 \u0648\u0627\u0644\u0628\u062f\u0621\u060c \u0627\u0643\u062a\u0628\u0644\u064a \u0628\u0633 \u00ab\u0627\u0633\u062a\u0644\u0645\u062a \u0627\u0644\u0645\u0647\u0645\u0629\u00bb \u0623\u0648 \u0627\u0630\u0643\u0631 \u0631\u0642\u0645\u0647\u0627.
+
+2) \u0628\u0627\u0644\u0646\u0633\u0628\u0629 \u0644\u0645\u0647\u0627\u0645\u0643\u0645 \u0627\u0644\u062d\u0627\u0644\u064a\u0629: \u0644\u0648 \u0641\u064a \u0645\u0647\u0645\u0629 \u062d\u0627\u0633\u064a\u0646 \u0625\u0646\u0647\u0627 \u0645\u0648 \u0627\u0644\u0635\u062d \u0625\u0644\u0643\u0645 \u0623\u0648 \u0641\u064a\u0647\u0627 \u062e\u0637\u0623\u060c \u0631\u0627\u0633\u0644\u0648\u0646\u064a \u0639\u0644\u0649 \u0627\u0644\u062e\u0627\u0635 \u0648\u0627\u0630\u0643\u0631\u0648\u0627 \u0631\u0642\u0645 \u0627\u0644\u0645\u0647\u0645\u0629 \u0648\u0633\u0628\u0628 \u0637\u0644\u0628 \u0627\u0644\u062a\u062d\u0648\u064a\u0644\u060c \u0648\u0628\u062a\u0627\u0628\u0639\u0647\u0627 \u0645\u0639 \u0628\u0627\u0633\u0645. \u0644\u0648 \u0645\u0627 \u0631\u0627\u0633\u0644\u062a\u0648\u0646\u064a\u060c \u0628\u062a\u0636\u0644 \u0627\u0644\u0645\u0647\u0645\u0629 \u0639\u0644\u064a\u0643\u0645 \u0645\u062a\u0644 \u0645\u0627 \u0647\u064a.
+
+3) \u0644\u062a\u062d\u0648\u064a\u0644 \u0645\u0647\u0645\u0629 \u0644\u0634\u062e\u0635 \u062b\u0627\u0646\u064a\u060c \u0623\u0648 \u0644\u0648 \u0645\u0627 \u0628\u062a\u0642\u062f\u0631\u0648\u0627 \u062a\u0643\u0645\u0644\u0648\u0647\u0627 \u0648\u0628\u062f\u0643\u0645 \u062a\u0631\u062c\u0639\u0648\u0647\u0627\u060c \u0623\u0648 \u0644\u0625\u0646\u0647\u0627\u0621 \u0645\u0647\u0645\u0629 (\u062e\u0644\u0635\u062a\u0648\u0647\u0627): \u0631\u0627\u0633\u0644\u0648\u0646\u064a \u0639\u0644\u0649 \u0627\u0644\u062e\u0627\u0635 \u0648\u0627\u0630\u0643\u0631\u0648\u0627 \u0631\u0642\u0645 \u0627\u0644\u0645\u0647\u0645\u0629 (\u0645\u062a\u0644 \u0645\u0627 \u0647\u0648 \u0645\u0643\u062a\u0648\u0628 \u0628\u0642\u0627\u0626\u0645\u0629 \u0645\u0647\u0627\u0645\u0643\u0645) \u0648\u0634\u0648 \u0628\u062f\u0643\u0645 \u0628\u0627\u0644\u0636\u0628\u0637.
+
+\u0643\u0644 \u0647\u0627\u0644\u062d\u0627\u0644\u0627\u062a \u062a\u0643\u0648\u0646 \u0628\u0631\u0633\u0627\u0644\u0629 \u062e\u0627\u0635\u0629 \u0625\u0644\u064a \u0645\u0634 \u0647\u0648\u0646 \u0639\u0627\u0644\u062c\u0631\u0648\u0628\u060c \u0648\u0623\u0646\u0627 \u0628\u0639\u0644\u0646 \u0622\u062e\u0631 \u062a\u062d\u062f\u064a\u062b \u0647\u0648\u0646 \u0639\u0627\u0644\u062c\u0631\u0648\u0628 \u0623\u0648\u0644 \u0645\u0627 \u062a\u0646\u062d\u0633\u0645.
+
+4) \u0631\u062d \u062a\u0648\u0635\u0644\u0643\u0645 \u062a\u0630\u0643\u064a\u0631 \u062a\u0644\u0642\u0627\u0626\u064a \u0628\u0645\u0647\u0627\u0645\u0643\u0645 \u0645\u0631\u062a\u064a\u0646 \u0643\u0644 \u064a\u0648\u0645\u060c \u0627\u0644\u0633\u0627\u0639\u0629 8 \u0627\u0644\u0635\u0628\u062d \u06488 \u0627\u0644\u0645\u0633\u0627.
+
+\u0648\u0644\u0648 \u062d\u0628\u064a\u062a\u0648\u0627 \u062a\u0631\u0627\u062c\u0639\u0648\u0627 \u0647\u0627\u0644\u062a\u0639\u0644\u064a\u0645\u0627\u062a \u0628\u0623\u064a \u0648\u0642\u062a\u060c \u0627\u0643\u062a\u0628\u0648\u0644\u064a \u00ab\u062a\u0639\u0644\u064a\u0645\u0627\u062a \u0627\u0644\u0633\u0643\u0631\u062a\u064a\u0631\u00bb \u0648\u0628\u0639\u0631\u0636\u0647\u0627 \u0625\u0644\u0643\u0645 \u0645\u0646 \u062c\u062f\u064a\u062f.
+
+\u0646\u0633\u0623\u0644 \u0627\u0644\u0644\u0647 \u0627\u0644\u062a\u0648\u0641\u064a\u0642 \u0645\u0639 \u0628\u0639\u0636`;
 // Arabic count agreement for "\u0645\u0647\u0645\u0629" -- 1 and 2 have their own words, 3-10
 // take the plural, 11+ reverts to the singular after the number.
 const taskCountPhrase = (n: number) => n === 1 ? "\u0645\u0647\u0645\u0629 \u0648\u0627\u062d\u062f\u0629" : n === 2 ? "\u0645\u0647\u0645\u062a\u064a\u0646" : n <= 10 ? `${n} \u0645\u0647\u0627\u0645` : `${n} \u0645\u0647\u0645\u0629`;
@@ -62,7 +85,11 @@ export function migrateSecretary(db: DatabaseSync) {
     CREATE TABLE IF NOT EXISTS secretary_reminders (id TEXT PRIMARY KEY,actor_id TEXT NOT NULL,sender_number TEXT NOT NULL,group_id TEXT,task_id TEXT NOT NULL,due_at INTEGER NOT NULL,state TEXT NOT NULL DEFAULT 'pending',created_at INTEGER NOT NULL,sent_at INTEGER,sending_at INTEGER,responded_at INTEGER,reply_message_id TEXT NOT NULL);
     CREATE INDEX IF NOT EXISTS secretary_reminders_due ON secretary_reminders(state,due_at);
     CREATE TABLE IF NOT EXISTS secretary_last_project (conversation_key TEXT PRIMARY KEY,project_id TEXT NOT NULL,project_name TEXT NOT NULL,expires_at INTEGER NOT NULL);
-    CREATE TABLE IF NOT EXISTS secretary_project_name_pending (conversation_key TEXT PRIMARY KEY,expires_at INTEGER NOT NULL);`);
+    CREATE TABLE IF NOT EXISTS secretary_project_name_pending (conversation_key TEXT PRIMARY KEY,expires_at INTEGER NOT NULL);
+    CREATE TABLE IF NOT EXISTS secretary_playbook (id TEXT PRIMARY KEY,body TEXT NOT NULL,updated_by TEXT NOT NULL,updated_at INTEGER NOT NULL);`);
+  // Seed once; never overwrites a value Basim already saved via the
+  // admin-only update command (INSERT OR IGNORE keyed on the fixed 'main' id).
+  db.prepare("INSERT OR IGNORE INTO secretary_playbook (id,body,updated_by,updated_at) VALUES ('main',?,?,?)").run(DEFAULT_PLAYBOOK, "system", 0);
 }
 // Short-lived "which project are we talking about" memory per conversation --
 // set whenever a task is actually attached to a project (existing or just
@@ -639,6 +666,14 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
     return earlyRead({ status: "summary", reply: `أهلًا ${clean(actor.name, 60)}، بعرفك من رقمك المسجّل عندنا.` + (callerQuestion.includes("المشاريع")
       ? `\n\n*المشاريع المتاحة إلك*\n\n${projects.length ? projects.map(p => `🔵 *${clean(p.name, 100)}*\nالحالة: ${LABELS[p.status] || clean(p.status)}`).join("\n\n") : "ما في مشاريع متاحة حاليًا."}` : "") }, projects.map(p => "p:" + p.id));
   }
+  // Read-only, any actor, private or group (subject to the same
+  // addressed-to-secretary gate applied above for group chats) -- exact
+  // phrase only, so it never fires on a message that merely mentions the
+  // topic. Bypasses the model entirely: a fixed lookup, never slow/flaky.
+  if (/^تعليمات\s+السكرتير[.!؟\s]*$/u.test(callerQuestion) && !event.replyToMessageId) {
+    const row = db.prepare("SELECT body FROM secretary_playbook WHERE id='main'").get() as { body: string } | undefined;
+    return earlyRead({ status: "summary", reply: row?.body || "ما في تعليمات محفوظة بعد." });
+  }
   // Admin-only, private-chat-only direct trigger for an on-demand team
   // reminder broadcast -- bypasses the model since the intent is exact and
   // the action is sensitive (messages every employee + the group), so it
@@ -656,6 +691,27 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
     db.prepare("INSERT INTO secretary_pending VALUES(?,?,?,?,?,?,?)").run(key, token, JSON.stringify({ action: "team_reminders" }), initialHash, event.text, event.messageId, now + CONFIRM_MS);
     log(db, freshActor, event, "secretary_team_reminders_preview", { summary: "عرض تذكير جماعي بالمهام قبل الإرسال", recipients: groups.size }, now);
     return save(db, event, freshActor, { status: "confirmation", reply: `رح أبعت لكل موظف عنده مهام مفتوحة تذكيرًا خاصًا بمهامه (${groups.size} موظف: ${names})، وأنشر على جروب الفريق رسالة منفصلة لكل موظف باسمه فوق مهامه.\n\nلم أرسل شيئًا بعد. اكتب «موافق ${token}» أو رد بالموافقة مباشرة على هذه المعاينة؛ وللتراجع اكتب «إلغاء». التأكيد صالح 10 دقائق.` }, [], now);
+  });
+  // Admin-only, private-chat-only update to the standing "تعليمات السكرتير"
+  // text, kept as a plain regex direct-intercept (never routed through the
+  // model) so it can never hit the length-related provider timeout seen with
+  // long announce_team bodies -- the new text is taken verbatim from
+  // whatever follows the first ":" in the raw message, never re-typed by
+  // the model. Still goes through one confirmation, same as every other
+  // mutating direct-intercept above.
+  const playbookColon = event.text.indexOf(":");
+  const playbookSetMatch = playbookColon > -1 && /^(?:حدث|حدّث|غير|غيّر|عدل|عدّل)\s+تعليمات\s+السكرتير\s*(?:الى|إلى)?\s*$/u.test(
+    event.text.slice(0, playbookColon).normalize("NFKC").replace(/[أإآ]/g, "ا").replace(/[ً-ٰٟـ]/g, "").trim());
+  if (playbookSetMatch && actor.id === "basem" && actor.role === "admin" && event.groupId === null) return transaction(db, () => {
+    const freshActor = actorFor(db, event, config); if (!freshActor || freshActor.id !== "basem" || freshActor.role !== "admin" || freshActor.active !== 1) return { status: "denied", reply: "" };
+    const duplicate = lookup(db, event, freshActor, initial); if (duplicate) return duplicate;
+    const body = clean(event.text.slice(playbookColon + 1).trim(), 3500);
+    if (!body) return save(db, event, freshActor, { status: "clarify", reply: "شو النص الجديد لتعليمات السكرتير بالضبط؟ اكتبه بعد نقطتين، متل: «حدّث تعليمات السكرتير: النص هون»." }, [], now);
+    const token = "T" + randomBytes(3).toString("hex").toUpperCase();
+    const command = { action: "update_playbook", body };
+    db.prepare("INSERT INTO secretary_pending VALUES(?,?,?,?,?,?,?)").run(key, token, JSON.stringify(command), initialHash, event.text, event.messageId, now + CONFIRM_MS);
+    log(db, freshActor, event, "secretary_playbook_preview", { summary: "عرض تحديث تعليمات السكرتير الدائمة قبل الحفظ", confirmationRequired: true }, now);
+    return save(db, event, freshActor, { status: "confirmation", reply: `رح أحدّث تعليمات السكرتير الدائمة (يلي بترجع لما حدا يكتب «تعليمات السكرتير») لهذا النص:\n\n${body}\n\nما حدّثتها بعد. اكتب «موافق ${token}» أو رد بالموافقة مباشرة على هذه المعاينة؛ وللتراجع اكتب «إلغاء». التأكيد صالح 10 دقائق.` }, [], now);
   });
   if (isSecretaryIdentityQuery(event.text)) return earlyRead({ status: "summary", reply: SECRETARY_IDENTITY });
   if (reviewRequest?.kind === "clarify") return earlyRead({ status: "clarify", reply: reviewRequest.reply });
@@ -735,6 +791,14 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
         const { recipients } = sendTeamTaskReminders(db, state, now);
         log(db, freshActor, event, "secretary_team_reminders_sent", { summary: "أرسل تذكيرًا يدويًا لكل موظف بمهامه ونشره على الجروب", recipients }, now);
         return save(db, event, freshActor, { status: "applied", reply: recipients ? `✅ بعت تذكيرًا خاصًا لـ${recipients} موظف بمهامهم، ونشرت على الجروب رسالة منفصلة لكل واحد منهم.` : "ما في مهام مفتوحة معلّقة لأي موظف حاليًا؛ ما بعت شي." }, [], now);
+      }
+      if (command.action === "update_playbook") {
+        if (freshActor.id !== "basem" || freshActor.role !== "admin" || event.groupId !== null) return save(db, event, freshActor, { status: "denied", reply: "تحديث تعليمات السكرتير متاح لباسم من محادثته الخاصة فقط." }, [], now);
+        const body = String(command.body || "");
+        db.prepare("INSERT INTO secretary_playbook (id,body,updated_by,updated_at) VALUES ('main',?,?,?) ON CONFLICT(id) DO UPDATE SET body=excluded.body,updated_by=excluded.updated_by,updated_at=excluded.updated_at")
+          .run(body, freshActor.id, now);
+        log(db, freshActor, event, "secretary_playbook_updated", { summary: "حدّث تعليمات السكرتير الدائمة" }, now);
+        return save(db, event, freshActor, { status: "applied", reply: "✅ حدّثت تعليمات السكرتير الدائمة. أي حدا يكتب «تعليمات السكرتير» رح ياخد هالنص الجديد." }, [], now);
       }
       if (command.action === "schedule_reminder") return reminder(db, event, freshActor, state, command.taskId, command.dueAt, now);
       if (command.action === "close_direct") return closeDirect(db, event, freshActor, state, String(command.taskId), now, { originalText: live.original_text, sourceMessageId: live.source_message_id, confirmationRequired: true, confirmedBy: freshActor.id, confirmationMessageId: event.messageId });
