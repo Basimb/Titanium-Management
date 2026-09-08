@@ -1,6 +1,6 @@
 import { createHash, randomBytes } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
-import { executeManagementAction, getManagementSnapshot, migrateManagementActions, ManagementActionError, type ManagementCommand, type ManagementResult } from "./management-actions.ts";
+import { executeManagementAction, getManagementSnapshot, migrateManagementActions, ManagementActionError, ACTION_KEYS, type ManagementCommand, type ManagementResult } from "./management-actions.ts";
 import { resolveChatUser, normalizeContactNumber, type ChatUser } from "./team-chat-policy.ts";
 import type { TeamChatConfig, TeamChatEnvelope } from "./team-chat-gateway.ts";
 import { directTaskCreationIntent, emptySecretaryIntent, validateSecretaryIntent, PROJECT_NAME_QUESTION, type SecretaryIntent, type SecretaryModelInput } from "./secretary-intent.ts";
@@ -304,7 +304,19 @@ function commandFrom(plan: SecretaryIntent, state: Snapshot): Record<string, unk
   if (plan.taskId) command.taskId = plan.taskId;
   if (plan.projectId && (plan.action?.endsWith("_project") || plan.action === "add_task" || plan.action === "move_task")) command.projectId = plan.projectId;
   if (plan.action === "add_project") delete command.projectId;
-  for (const [key, value] of Object.entries(plan.fields)) if (value !== null && key !== "remindAt") command[key === "body" ? "comment" : key] = value;
+  // The planner's "command" tool exposes every field so it can describe any
+  // action, but each action only ACCEPTS a fixed subset (see ACTION_KEYS in
+  // management-actions.ts) -- e.g. "submit" takes no "details". A model that
+  // narrates extra context (the completion details on a plain submit) into
+  // an unused field must not make the whole action fail downstream; drop
+  // whatever that action doesn't recognize instead of forwarding it.
+  const allowedFields = plan.action && Object.hasOwn(ACTION_KEYS, plan.action) ? new Set(ACTION_KEYS[plan.action as ManagementCommand["action"]]) : null;
+  for (const [key, value] of Object.entries(plan.fields)) {
+    if (value === null || key === "remindAt") continue;
+    const mapped = key === "body" ? "comment" : key;
+    if (allowedFields && !allowedFields.has(mapped)) continue;
+    command[mapped] = value;
+  }
   const task = state.tasks.find(t => t.id === plan.taskId);
   const project = state.projects.find(p => p.id === (task?.projectId || plan.projectId));
   if (task) Object.assign(command, { expectedUpdatedAt: task.updatedAt, expectedStatus: task.status, expectedProjectId: task.projectId });

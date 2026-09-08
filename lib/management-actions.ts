@@ -47,7 +47,7 @@ const fail = (status: number, code: string, message: string): never => { throw n
 const PROJECT_SELECT = "SELECT id,name,status,created_by AS createdBy,created_at AS createdAt,COALESCE(updated_at,created_at) AS updatedAt,rejection_reason AS rejectionReason,rejected_by AS rejectedBy,rejected_at AS rejectedAt,archived_at AS archivedAt,archived_by AS archivedBy FROM projects";
 const TASK_SELECT = "SELECT id,project_id AS projectId,title,details,priority,status,owner,suggested_owner AS suggestedOwner,started_at AS startedAt,due_date AS dueDate,completed_at AS completedAt,rejection_reason AS rejectionReason,created_at AS createdAt,updated_at AS updatedAt,archived_at AS archivedAt,archived_by AS archivedBy,watcher,expected_at AS expectedAt,blocker,last_update_at AS lastUpdateAt FROM tasks";
 const EXPECTED_KEYS = ["expectedUpdatedAt", "expectedStatus", "expectedProjectId", "expectedProjectUpdatedAt", "expectedProjectStatus", "expectedTargetProjectUpdatedAt"];
-const ACTION_KEYS: Record<ManagementCommand["action"], readonly string[]> = {
+export const ACTION_KEYS: Record<ManagementCommand["action"], readonly string[]> = {
   add_project: ["name"], edit_project: ["projectId", "name"], approve_project: ["projectId"], reject_project: ["projectId", "reason"],
   restore_project: ["projectId"], archive_project: ["projectId"], delete_project: ["projectId"],
   add_task: ["projectId", "title", "details", "priority", "dueDate", "suggestedOwner", "ownerId"],
