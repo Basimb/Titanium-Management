@@ -7,14 +7,14 @@ const original = pair("عندك أرقام فريق العمل؟", "الجواب
 
 test("explicit Arabic objections select the previous actual question, not the criticism", () => {
   assert.deepEqual(secretaryReviewRequest("هيك غلط", original), {kind:"review",question:original[0].content,previousAnswer:original[1].content});
-  for (const text of ["جوابك غلط", "ردك مش صحيح", "إجابتك خاطئة", "معلوماتك غير دقيقة", "لا، كلامك غلط", "يا أخي جوابك خطأ", "انت فاهمني غلط", "ما فهمت علي", "غلط", "راجع جوابك", "جوابك غير صحيح، تأكد من المعلومة"]) {
+  for (const text of ["جوابك غلط", "ردك مش صحيح", "إجابتك خاطئة", "معلوماتك غير دقيقة", "لا، كلامك غلط", "يا أخي جوابك خطأ", "انت فاهمني غلط", "ما فهمت علي", "غلط", "راجع جوابك", "جوابك غير صحيح، تأكد من المعلومة", "هذا الجواب غلط", "هاد الرد غلط", "هاي الاجابه غلط"]) {
     assert.deepEqual(secretaryReviewRequest(text, original), { kind: "review", question: original[0].content, previousAnswer: original[1].content }, text);
   }
   assert.equal(getSecretaryReview, secretaryReviewRequest);
 });
 
 test("own answer, negation, quotations, discussion and unrelated task commands are not objections", () => {
-  for (const text of ["جوابي غلط؟", "إجابتي خاطئة", "جوابك مش غلط", "جوابك صحيح", "مين قال جوابك غلط؟", "لو جوابك غلط شو بتعمل؟", "اكتب رسالة تقول جوابك غلط", "«جوابك غلط»", '"ردك غلط"', "احذف المهمة الغلط", "عدل جوابي الغلط", "كيف أصحح جوابي؟"]) {
+  for (const text of ["جوابي غلط؟", "إجابتي خاطئة", "جوابك مش غلط", "جوابك صحيح", "مين قال جوابك غلط؟", "لو جوابك غلط شو بتعمل؟", "اكتب رسالة تقول جوابك غلط", "«جوابك غلط»", '"ردك غلط"', "احذف المهمة الغلط", "عدل جوابي الغلط", "كيف أصحح جوابي؟", "هذا جوابك مش غلط", "«هذا الجواب غلط»", "هذا جوابك صحيح"]) {
     assert.equal(secretaryReviewRequest(text, original), null, text);
   }
 });

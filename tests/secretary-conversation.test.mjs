@@ -66,6 +66,16 @@ test('team messaging schema accepts only authorized staff IDs or the exclusive a
  assert.equal(validateSecretaryIntent(plan,{...context,text:'اكتب مسودة رسالة للتيم'}).kind,'clarify');
  assert.equal(validateSecretaryIntent({...plan,fields:{...plan.fields,body:null}},context).kind,'clarify');
  assert.throws(()=>validateSecretaryIntent({...plan,recipientIds:['employee-one','employee-one']},context));
+ // A shape violation the authorized model itself produced (e.g. it also set
+ // taskId on a long/confused request) is a benign formatting slip once
+ // authorization already passed: keep the usable body/recipients and drop
+ // only the stray fields, instead of discarding a correct answer and
+ // repeating the exact same clarifying question the person already answered.
+ const confused=validateSecretaryIntent({...plan,taskId:'synthetic-task'},context);
+ assert.equal(confused.kind,'message_team');assert.equal(confused.fields.body,'مرحبا');assert.deepEqual(confused.recipientIds,['all-team']);
+ // message_status never carries a usable body to recover -- any shape
+ // violation there stays a plain clarify.
+ assert.equal(validateSecretaryIntent({...emptySecretaryIntent('message_status'),taskId:'synthetic-task'},context).kind,'clarify');
 });
 
 test('announce_team schema requires body text, admin-private access, and never carries recipients',()=>{
@@ -85,6 +95,11 @@ test('announce_team schema requires body text, admin-private access, and never c
  assert.throws(()=>validateSecretaryIntent({...plan,recipientIds:['employee-one']},context));
  // A shape violation the authorized model itself produced (e.g. it also set
  // taskId on a long/confused request) is a benign formatting slip once
- // authorization already passed -- clarify, not a hard throw.
- assert.equal(validateSecretaryIntent({...plan,taskId:'t'},context).kind,'clarify');
+ // authorization already passed: keep the usable announcement body and drop
+ // only the stray field, instead of discarding a correct answer and
+ // repeating the exact same clarifying question the person already answered.
+ const confused=validateSecretaryIntent({...plan,taskId:'t'},context);
+ assert.equal(confused.kind,'announce_team');assert.equal(confused.fields.body,plan.fields.body);
+ // A shape violation with no usable body still has nothing to recover.
+ assert.equal(validateSecretaryIntent({...emptySecretaryIntent('announce_team'),taskId:'t'},context).kind,'clarify');
 });

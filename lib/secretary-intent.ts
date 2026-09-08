@@ -218,11 +218,16 @@ export function validateSecretaryIntent(value: unknown, input: SecretaryModelInp
     // A well-formed plan never sets these; a model confused by a long/mixed
     // request (e.g. asked to both compose wording and send it) sometimes does.
     // That is a benign formatting slip, not a security-relevant one -- the
-    // authorization check above already ran -- so fail back to a plain
-    // clarify instead of a hard provider error the person can't act on.
+    // authorization check above already ran. When the model still produced a
+    // usable message body, keep it and drop only the stray fields instead of
+    // discarding a correct answer and repeating the exact same question the
+    // person already answered.
     if (plan.action !== null || plan.taskId !== null || plan.projectId !== null || plan.message !== null
-      || Object.entries(plan.fields).some(([key, value]) => value !== null && (plan.kind === "message_status" || key !== "body")))
-      return emptySecretaryIntent("clarify", "وضحلي بجملة وحدة شو بدك ترسل ولمين من الفريق. اقدر أصيغ النص إلك لو حكيتلي الفكرة أو النبرة، وبتشوفه كامل بالمعاينة قبل ما يرسل.");
+      || Object.entries(plan.fields).some(([key, value]) => value !== null && (plan.kind === "message_status" || key !== "body"))) {
+      if (plan.kind === "message_status" || !plan.fields.body?.trim())
+        return emptySecretaryIntent("clarify", "وضحلي بجملة وحدة شو بدك ترسل ولمين من الفريق. اقدر أصيغ النص إلك لو حكيتلي الفكرة أو النبرة، وبتشوفه كامل بالمعاينة قبل ما يرسل.");
+      plan = { ...emptySecretaryIntent("message_team"), recipientIds: plan.recipientIds, fields: { ...emptySecretaryIntent().fields, body: plan.fields.body } };
+    }
     if (plan.kind === "message_team") {
       if (!plan.fields.body?.trim() || !plan.recipientIds.length) return emptySecretaryIntent("clarify", "شو نص الرسالة بالضبط، ولمين من الفريق بدك أبعثها على الخاص؟");
       if (isDiscussionOnlyRequest(input.text)) return emptySecretaryIntent("clarify", "بدك مسودة وشرح، ولا إرسال رسالة فعلية للتيم على الخاص؟");
@@ -233,11 +238,16 @@ export function validateSecretaryIntent(value: unknown, input: SecretaryModelInp
   if (plan.kind === "announce_team") {
     if (!input.canMessageTeam || input.actor.id !== "basem" || input.actor.role !== "admin") return emptySecretaryIntent("clarify", "نشر إعلان على جروب الفريق متاح لباسم من محادثته الخاصة فقط.");
     // Same reasoning as message_team above: a shape violation here is a
-    // confused-but-authorized model output, not an attack -- clarify, don't
-    // throw, so the person gets something they can act on.
+    // confused-but-authorized model output, not an attack. When the model
+    // still produced a usable announcement body, keep it and drop only the
+    // stray fields instead of discarding a correct answer and repeating the
+    // exact same clarifying question the person already answered.
     if (plan.action !== null || plan.taskId !== null || plan.projectId !== null || plan.message !== null
-      || Object.entries(plan.fields).some(([key, value]) => value !== null && key !== "body"))
-      return emptySecretaryIntent("clarify", "وضحلي بجملة وحدة شو بدك تنشر على جروب الفريق. اقدر أصيغ الإعلان إلك لو حكيتلي الفكرة أو النبرة، وبتشوفه كامل بالمعاينة قبل ما ينشر.");
+      || Object.entries(plan.fields).some(([key, value]) => value !== null && key !== "body")) {
+      if (!plan.fields.body?.trim())
+        return emptySecretaryIntent("clarify", "وضحلي بجملة وحدة شو بدك تنشر على جروب الفريق. اقدر أصيغ الإعلان إلك لو حكيتلي الفكرة أو النبرة، وبتشوفه كامل بالمعاينة قبل ما ينشر.");
+      plan = { ...emptySecretaryIntent("announce_team"), fields: { ...emptySecretaryIntent().fields, body: plan.fields.body } };
+    }
     if (!plan.fields.body?.trim()) return emptySecretaryIntent("clarify", "شو نص الإعلان بالضبط يلي بدك تنشره على جروب الفريق؟");
     if (isDiscussionOnlyRequest(input.text)) return emptySecretaryIntent("clarify", "بدك مسودة وشرح، ولا نشر فعلي على جروب الفريق الآن؟");
     return plan;
