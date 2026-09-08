@@ -36,12 +36,20 @@ test('admin can trigger an on-demand team reminder from a private chat; a single
   const applied=await f.run(f.event('موافق'));
   assert.equal(applied.status,'applied');
   const sent=f.outbox();
-  const toKhaled=sent.find(m=>m.toUser==='member'), toShadi=sent.find(m=>m.toUser==='other'), toGroup=sent.find(m=>m.toUser==='group');
+  const toKhaled=sent.find(m=>m.toUser==='member'), toShadi=sent.find(m=>m.toUser==='other');
+  const groupMessages=sent.filter(m=>m.toUser==='group');
   assert.ok(toKhaled);assert.match(toKhaled.text,/مهمة خالد الأولى/);assert.doesNotMatch(toKhaled.text,/مهمة مكتملة/);
   assert.ok(toShadi);assert.match(toShadi.text,/مهمة شادي/);
-  assert.ok(toGroup);assert.match(toGroup.text,/🔴 \*خالد\*/);assert.match(toGroup.text,/🔴 \*شادي\*/);
-  assert.doesNotMatch(toGroup.text,/مهمة مكتملة/);
-  assert.equal(sent.length,3);
+  // The group notice is one separate message per owner (Basim asked not to
+  // combine everyone into a single group post), each headed by their own
+  // bold red-circle name.
+  assert.equal(groupMessages.length,2);
+  const groupForKhaled=groupMessages.find(m=>/🔴 \*خالد\*/.test(m.text));
+  const groupForShadi=groupMessages.find(m=>/🔴 \*شادي\*/.test(m.text));
+  assert.ok(groupForKhaled);assert.match(groupForKhaled.text,/مهمة خالد الأولى/);assert.doesNotMatch(groupForKhaled.text,/شادي/);
+  assert.ok(groupForShadi);assert.match(groupForShadi.text,/مهمة شادي/);assert.doesNotMatch(groupForShadi.text,/خالد/);
+  assert.doesNotMatch(groupForKhaled.text+groupForShadi.text,/مهمة مكتملة/);
+  assert.equal(sent.length,4);
 });
 
 test('the trigger phrase is admin-only and private-chat-only',async t=>{

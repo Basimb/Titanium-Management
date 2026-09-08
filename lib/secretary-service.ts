@@ -655,7 +655,7 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
     const token = "T" + randomBytes(3).toString("hex").toUpperCase();
     db.prepare("INSERT INTO secretary_pending VALUES(?,?,?,?,?,?,?)").run(key, token, JSON.stringify({ action: "team_reminders" }), initialHash, event.text, event.messageId, now + CONFIRM_MS);
     log(db, freshActor, event, "secretary_team_reminders_preview", { summary: "عرض تذكير جماعي بالمهام قبل الإرسال", recipients: groups.size }, now);
-    return save(db, event, freshActor, { status: "confirmation", reply: `رح أبعت لكل موظف عنده مهام مفتوحة تذكيرًا خاصًا بمهامه (${groups.size} موظف: ${names})، وأنشر نسخة مجمّعة على جروب الفريق باسم كل موظف فوق مهامه.\n\nلم أرسل شيئًا بعد. اكتب «موافق ${token}» أو رد بالموافقة مباشرة على هذه المعاينة؛ وللتراجع اكتب «إلغاء». التأكيد صالح 10 دقائق.` }, [], now);
+    return save(db, event, freshActor, { status: "confirmation", reply: `رح أبعت لكل موظف عنده مهام مفتوحة تذكيرًا خاصًا بمهامه (${groups.size} موظف: ${names})، وأنشر على جروب الفريق رسالة منفصلة لكل موظف باسمه فوق مهامه.\n\nلم أرسل شيئًا بعد. اكتب «موافق ${token}» أو رد بالموافقة مباشرة على هذه المعاينة؛ وللتراجع اكتب «إلغاء». التأكيد صالح 10 دقائق.` }, [], now);
   });
   if (isSecretaryIdentityQuery(event.text)) return earlyRead({ status: "summary", reply: SECRETARY_IDENTITY });
   if (reviewRequest?.kind === "clarify") return earlyRead({ status: "clarify", reply: reviewRequest.reply });
@@ -734,7 +734,7 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
         if (freshActor.id !== "basem" || freshActor.role !== "admin" || event.groupId !== null) return save(db, event, freshActor, { status: "denied", reply: "إرسال تذكير الفريق متاح لباسم من محادثته الخاصة فقط." }, [], now);
         const { recipients } = sendTeamTaskReminders(db, state, now);
         log(db, freshActor, event, "secretary_team_reminders_sent", { summary: "أرسل تذكيرًا يدويًا لكل موظف بمهامه ونشره على الجروب", recipients }, now);
-        return save(db, event, freshActor, { status: "applied", reply: recipients ? `✅ بعت تذكيرًا خاصًا لـ${recipients} موظف بمهامهم، ونشرت نسخة مجمّعة على جروب الفريق.` : "ما في مهام مفتوحة معلّقة لأي موظف حاليًا؛ ما بعت شي." }, [], now);
+        return save(db, event, freshActor, { status: "applied", reply: recipients ? `✅ بعت تذكيرًا خاصًا لـ${recipients} موظف بمهامهم، ونشرت على الجروب رسالة منفصلة لكل واحد منهم.` : "ما في مهام مفتوحة معلّقة لأي موظف حاليًا؛ ما بعت شي." }, [], now);
       }
       if (command.action === "schedule_reminder") return reminder(db, event, freshActor, state, command.taskId, command.dueAt, now);
       if (command.action === "close_direct") return closeDirect(db, event, freshActor, state, String(command.taskId), now, { originalText: live.original_text, sourceMessageId: live.source_message_id, confirmationRequired: true, confirmedBy: freshActor.id, confirmationMessageId: event.messageId });
@@ -1011,16 +1011,20 @@ function formatOwnerTaskLines(tasks: Task[], today: string): string {
 function sendTeamTaskReminders(db: DatabaseSync, state: Snapshot, now: number): { recipients: number } {
   const today = new Date(now + 3 * 3600_000).toISOString().slice(0, 10);
   const groups = ownerTaskGroups(state);
-  const sections: string[] = [];
+  let posted = 0;
   for (const [userId, tasks] of groups) {
     if (!tasks.length) continue;
     const user = state.users.find(u => u.id === userId)!;
     const lines = formatOwnerTaskLines(tasks, today);
     enqueueAgentMessage(db, { toUser: userId, text: `📋 تذكير بمهامك الحالية يا ${clean(user.name, 60)} (${tasks.length}):\n\n${lines}` }, now);
-    sections.push(`🔴 *${clean(user.name, 60).replace(/\*/g, "")}*\n${lines}`);
+    // Basim asked for the group notice split into one message per person
+    // (rather than one long combined message listing everyone), so each
+    // owner's section is its own group post -- still headed by the same
+    // 🔴 bold-name convention, just not concatenated together.
+    enqueueAgentMessage(db, { toUser: "group", text: `📋 تذكير بالمهام المفتوحة — ${today}\n\n🔴 *${clean(user.name, 60).replace(/\*/g, "")}*\n${lines}` }, now);
+    posted++;
   }
-  if (sections.length) enqueueAgentMessage(db, { toUser: "group", text: `📋 تذكير بالمهام المفتوحة حسب المسؤول — ${today}\n\n${sections.join("\n\n")}` }, now);
-  return { recipients: groups.size };
+  return { recipients: posted };
 }
 function perform(db: DatabaseSync, event: Event, actor: ChatUser, state: Snapshot, command: Record<string, unknown>, now: number, context: Record<string, unknown>): Result {
   try {
