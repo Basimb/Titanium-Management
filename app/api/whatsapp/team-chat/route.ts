@@ -1,7 +1,6 @@
 import { handleTeamChatRequest, teamChatConfigFromEnv } from "@/lib/team-chat-gateway";
 import { chatDatabase } from "@/lib/titanium-server";
 import { readTeamChatSettings } from "@/lib/team-chat-settings";
-import { inferWhatsAppIntent } from "@/lib/whatsapp-intent";
 import { handleSecretaryEvent } from "@/lib/secretary-service";
 import { inferSecretaryIntent, searchSecretaryWeb } from "@/lib/secretary-intent";
 
@@ -13,7 +12,6 @@ export async function POST(request: Request) {
     const settings = readTeamChatSettings();
     return handleTeamChatRequest(request, {
       config: teamChatConfigFromEnv(settings), getDatabase: chatDatabase,
-      infer: input => inferWhatsAppIntent(input, { apiKey: settings.GROQ_API_KEY, model: settings.GROQ_MODEL }),
       ...(settings.SECRETARY_ENABLED === "1" ? { secretary: (database: ReturnType<typeof chatDatabase>, event: import("@/lib/team-chat-gateway").TeamChatEnvelope, config: import("@/lib/team-chat-gateway").TeamChatConfig) => handleSecretaryEvent(database, event, config, {
         infer: input => inferSecretaryIntent(input, { apiKey: settings.OPENAI_API_KEY, model: settings.OPENAI_MODEL }),
         ...(settings.SECRETARY_WEB_ENABLED === "1" ? { search: (query: string) => searchSecretaryWeb(query, { apiKey: settings.OPENAI_API_KEY, model: settings.OPENAI_SEARCH_MODEL }) } : {}),

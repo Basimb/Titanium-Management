@@ -1,10 +1,7 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { SecretaryProviderError } from "./secretary-intent.ts";
 import type { DatabaseSync } from "node:sqlite";
-import { inferWhatsAppIntent, type IntentInput, type ParsedIntent } from "./whatsapp-intent.ts";
-import { normalizeContactNumber, type ChatContact } from "./team-chat-policy.ts";
-import { applyTeamChatIntent, getTeamChatCatalog, lookupTeamChatEvent, migrateTeamChatStore } from "./team-chat-store.ts";
-import { resolveChatUser, type ChatUser } from "./team-chat-policy.ts";
+import { normalizeContactNumber, resolveChatUser, type ChatContact, type ChatUser } from "./team-chat-policy.ts";
 
 export type TeamChatConfig = {
   enabled: boolean;
@@ -121,7 +118,6 @@ function allowedQuota(actorId: string, now: number): boolean {
 export async function handleTeamChatRequest(request: Request, dependencies: {
   config: TeamChatConfig;
   getDatabase: () => DatabaseSync;
-  infer?: (input: IntentInput) => Promise<ParsedIntent>;
   now?: () => number;
   secretary?: (database: DatabaseSync, event: TeamChatEnvelope, config: TeamChatConfig) => Promise<{ status: string; reply: string; taskId?: string }>;
 }): Promise<Response> {
@@ -136,35 +132,18 @@ export async function handleTeamChatRequest(request: Request, dependencies: {
   let event: TeamChatEnvelope | null;
   try { event = envelope(JSON.parse(rawBody)); } catch { event = null; }
   if (!event) return response({ error: "Invalid message." }, 400);
-  if (event.choice && !dependencies.secretary) return response({ error: "Interactive choices are unavailable." }, 400);
+  // The secretary is the only handler left: there is no older, rigid parser to
+  // silently fall back to when it is unavailable -- fail closed instead.
+  if (!dependencies.secretary) return response({ error: "The secretary is not enabled." }, 503);
   const origin = { senderNumber: event.senderNumber, groupId: event.groupId };
   try {
     const sqlite = dependencies.getDatabase();
-    if (dependencies.secretary) {
-      const actor = resolveChatUser(origin, config.contacts, sqlite.prepare("SELECT id,name,role,active FROM users").all() as ChatUser[], config.allowedGroupIds);
-      if (!actor) return response({ status: "denied", reply: "" }, 403);
-      if (event.receivedAt > now + 60_000 || now - event.receivedAt > MAX_MESSAGE_AGE) return response({ error: "Message is too old or has invalid time." }, 400);
-      if (!allowedQuota(actor.id, now)) return response({ error: "Please retry shortly." }, 429);
-      const result = await dependencies.secretary(sqlite, event, config);
-      return response(result, result.status === "denied" && !result.reply ? 403 : 200);
-    }
-    migrateTeamChatStore(sqlite);
-    const eventKey = { messageId: event.messageId, origin, text: event.text };
-    const previous = lookupTeamChatEvent(sqlite, eventKey, config);
-    if (previous) return response(previous, previous.status === "denied" ? 403 : 200);
+    const actor = resolveChatUser(origin, config.contacts, sqlite.prepare("SELECT id,name,role,active FROM users").all() as ChatUser[], config.allowedGroupIds);
+    if (!actor) return response({ status: "denied", reply: "" }, 403);
     if (event.receivedAt > now + 60_000 || now - event.receivedAt > MAX_MESSAGE_AGE) return response({ error: "Message is too old or has invalid time." }, 400);
-    const catalog = getTeamChatCatalog(sqlite, origin, config);
-    if (!catalog.ok) return response({ status: "denied", reply: "" }, 403);
-    if (!allowedQuota(catalog.actor.id, now)) return response({ error: "Please retry shortly." }, 429);
-    // Only server-scoped task identifiers and titles reach the model. No phone numbers,
-    // employee contacts, login secrets, arbitrary query or browser state are included.
-    const intent = await (dependencies.infer ?? inferWhatsAppIntent)({
-      text: event.text,
-      tasks: catalog.tasks.map(t => ({ id: t.id, title: t.title, projectName: t.projectName, status: t.status, dueDate: t.dueDate })),
-      history: [],
-    });
-    const result = applyTeamChatIntent(sqlite, { ...eventKey, intent, catalog }, config);
-    return response(result, result.status === "denied" ? 403 : 200);
+    if (!allowedQuota(actor.id, now)) return response({ error: "Please retry shortly." }, 429);
+    const result = await dependencies.secretary(sqlite, event, config);
+    return response(result, result.status === "denied" && !result.reply ? 403 : 200);
   } catch (error) {
     if (error instanceof SecretaryProviderError) {
       console.warn("secretary_provider_failure", error.code);
