@@ -241,3 +241,44 @@ test("follow-ups: overdue owner nudge once per day, stale approval to owner, dig
   assert.ok(isGroupWorthy("create", "project") && !isGroupWorthy("comment", "task"));
 });
 
+test("twice-daily auto reminder fires at local 8am/8pm regardless of work hours, once per owner per slot, private + one group post each", async t => {
+  const db = fixture(t);
+  // t3 is only suggested (never claimed) -- still belongs on شادي's reminder,
+  // same "who is responsible" convention as the on-demand broadcast.
+  // t4 is completed and t5 archived: neither should ever appear.
+  db.exec(`INSERT INTO tasks (id,project_id,title,status,owner,suggested_owner,due_date,created_at,updated_at,started_at,completed_at,archived_at)
+    VALUES ('t3','p','دراسة الموقع','open',NULL,'شادي',NULL,100,100,NULL,NULL,NULL),
+           ('t4','p','مهمة مكتملة','completed','خالد',NULL,NULL,100,100,100,100,NULL),
+           ('t5','p','مهمة مؤرشفة','progress','خالد',NULL,NULL,100,100,100,NULL,100)`);
+  const config = { enabled: true, contacts: [{ userId: "basem", number: "966500000000" }, { userId: "khaled", number: "962770000000" }, { userId: "shadi", number: "962780000000" }], groupId: "123@g.us" };
+  const morning = Date.UTC(2026, 8, 10, 5, 0); // 08:00 Amman
+  const evening = Date.UTC(2026, 8, 10, 17, 0); // 20:00 Amman
+  const other = Date.UTC(2026, 8, 10, 7, 0); // 10:00 Amman -- no slot
+
+  let plans = planFollowups(db, config, morning);
+  const auto = plans.filter(plan => plan.kind === "auto_reminder_morning");
+  assert.equal(auto.length, 4, "private + group post for خالد, private + group post for شادي");
+  const privateKhaled = auto.find(plan => plan.targetUser === "khaled");
+  assert.match(privateKhaled.text, /متابعة عقد الإيجار/);
+  assert.doesNotMatch(privateKhaled.text, /مهمة مكتملة|مهمة مؤرشفة/);
+  const groupKhaled = auto.find(plan => plan.targetUser === "group" && plan.entityId === "khaled");
+  assert.match(groupKhaled.text, /🔴 \*خالد\*/); assert.match(groupKhaled.text, /متابعة عقد الإيجار/); assert.doesNotMatch(groupKhaled.text, /دراسة الموقع/);
+  const groupShadi = auto.find(plan => plan.targetUser === "group" && plan.entityId === "shadi");
+  assert.match(groupShadi.text, /🔴 \*شادي\*/); assert.match(groupShadi.text, /دراسة الموقع/); assert.doesNotMatch(groupShadi.text, /متابعة عقد الإيجار/);
+  assert.equal(plans.filter(plan => plan.kind !== "auto_reminder_morning").length, 0, "outside 9-18 window, no reactive follow-ups mixed in");
+  assert.equal(planFollowups(db, config, other).filter(plan => plan.kind.startsWith("auto_reminder")).length, 0, "no auto reminder outside the 8am/8pm slots");
+
+  // planFollowups is pure (it only reads); the dedup only takes effect once
+  // a plan is actually recorded via deliverNext, exactly like overdue_task.
+  const sent = [];
+  const jobs = createFollowupJobs({ db, config, now: () => morning });
+  for (let i = 0; i < 4; i++) assert.equal((await jobs.deliverNext(async message => { sent.push(message); })).status, "sent");
+  assert.equal((await jobs.deliverNext(async () => assert.fail("no fifth message this slot"))).status, "idle");
+  assert.equal(sent.length, 4);
+
+  assert.equal(planFollowups(db, config, morning + 5 * 60_000).filter(plan => plan.kind === "auto_reminder_morning").length, 0, "no duplicate within the same morning slot once delivered");
+
+  const eveningPlans = planFollowups(db, config, evening).filter(plan => plan.kind === "auto_reminder_evening");
+  assert.equal(eveningPlans.length, 4, "evening slot is independent of the morning dedup");
+});
+

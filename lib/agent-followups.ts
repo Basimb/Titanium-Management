@@ -12,10 +12,36 @@ import { getManagementSnapshot, migrateManagementActions, type ManagementActor, 
 import { GROUP_EVENT_ALLOWLIST, groupBudgetRemaining } from "./team-chat-policy.ts";
 
 export type FollowupConfig = { enabled: boolean; contacts: Array<{ userId: string; number: string }>; groupId?: string | null; workStartHour?: number; workEndHour?: number; timezoneOffsetMinutes?: number; publicUrl?: string };
-type Planned = { id: string; kind: "overdue_task" | "silent_task" | "stale_approval" | "daily_digest"; targetUser: string; entityId: string | null; to: string; text: string };
+type Planned = { id: string; kind: "overdue_task" | "silent_task" | "stale_approval" | "daily_digest" | "auto_reminder_morning" | "auto_reminder_evening"; targetUser: string; entityId: string | null; to: string; text: string };
 const DAY = 24 * 60 * 60_000, SILENT_AFTER = 3 * DAY, STALE_APPROVAL_AFTER = 2 * DAY;
 const newMessageId = () => "3EB0" + randomBytes(18).toString("hex").toUpperCase();
 const clean = (value: string) => value.replace(/[\x00-\x1f\u202a-\u202e\u2066-\u2069]/g, " ").slice(0, 200);
+// Small per-file duplicates of secretary-service.ts's PRIORITIES/LABELS and
+// ownerTaskGroups/formatOwnerTaskLines conventions (kept local rather than
+// imported, since secretary-service.ts already imports enqueueAgentMessage
+// from this file -- importing back from it would be circular).
+const PRIORITY_ICON: Record<string, string> = { red: "\ud83d\udd34", yellow: "\ud83d\udfe1", green: "\ud83d\udfe2" };
+const STATUS_LABEL: Record<string, string> = { open: "\u0628\u0627\u0646\u062a\u0638\u0627\u0631 \u0627\u0644\u0627\u0633\u062a\u0644\u0627\u0645", progress: "\u0642\u064a\u062f \u0627\u0644\u062a\u0646\u0641\u064a\u0630", approval: "\u0628\u0627\u0646\u062a\u0638\u0627\u0631 \u0627\u0639\u062a\u0645\u0627\u062f \u0628\u0627\u0633\u0645" };
+function autoReminderGroups(snapshot: { tasks: ManagementTask[]; projects: Array<{ id: string; status: string }> }, userIdByName: Map<string, string>): Map<string, ManagementTask[]> {
+  const groups = new Map<string, ManagementTask[]>();
+  for (const task of snapshot.tasks) {
+    const responsible = task.owner || task.suggestedOwner;
+    if (task.archivedAt || task.status === "completed" || !responsible) continue;
+    const project = snapshot.projects.find(candidate => candidate.id === task.projectId);
+    if (!project || project.status !== "active") continue;
+    const userId = userIdByName.get(responsible);
+    if (!userId) continue;
+    const list = groups.get(userId) || []; list.push(task); groups.set(userId, list);
+  }
+  return groups;
+}
+function formatAutoReminderLines(tasks: ManagementTask[], today: string): string {
+  return tasks.map((task, index) => {
+    const overdue = !!task.dueDate && task.dueDate < today;
+    const suffix = overdue ? " \u2022 \ud83d\udd34 \u0645\u062a\u0623\u062e\u0631\u0629" : task.dueDate ? ` \u2022 \u0627\u0644\u0645\u0648\u0639\u062f: ${clean(task.dueDate)}` : "";
+    return `${index + 1}. ${PRIORITY_ICON[task.priority] || "\u26aa"} ${clean(task.title)} \u2014 ${STATUS_LABEL[task.status] || clean(task.status)}${suffix}`;
+  }).join("\n");
+}
 
 function ownerActor(db: DatabaseSync): ManagementActor | null {
   const row = db.prepare("SELECT id,name,role,active,department FROM users WHERE id='basem' AND role='admin' AND active=1").get() as ManagementActor | undefined;
@@ -32,7 +58,6 @@ export function planFollowups(db: DatabaseSync, config: FollowupConfig, at: numb
   if (!config.enabled) return [];
   const offset = config.timezoneOffsetMinutes ?? 180; // Amman/Riyadh +03:00
   const hour = localHour(at, offset);
-  if (hour < (config.workStartHour ?? 9) || hour >= (config.workEndHour ?? 18)) return [];
   const owner = ownerActor(db); if (!owner) return [];
   const numberOf = (userId: string) => config.contacts.find(contact => contact.userId === userId)?.number.replace(/\D/g, "").replace(/^00/, "") ?? null;
   const snapshot = getManagementSnapshot(db, owner);
@@ -41,6 +66,36 @@ export function planFollowups(db: DatabaseSync, config: FollowupConfig, at: numb
   const today = localDay(at, offset);
   const plans: Planned[] = [];
   const link = config.publicUrl ? `\n${config.publicUrl}` : "";
+
+  // Twice-daily team task reminder (Basim asked for one at 8am and one at
+  // 8pm local, every day) -- deliberately computed and returned BEFORE the
+  // work-hours gate below, since both slots sit outside the default 9-18
+  // window that gate enforces for the reactive nudges further down.
+  const slot = hour === 8 ? "morning" : hour === 20 ? "evening" : null;
+  if (slot) {
+    const kind = slot === "morning" ? "auto_reminder_morning" : "auto_reminder_evening";
+    for (const [userId, tasks] of autoReminderGroups(snapshot, userIdByName)) {
+      if (!tasks.length) continue;
+      const user = users.find(candidate => candidate.id === userId);
+      if (!user) continue;
+      const lines = formatAutoReminderLines(tasks, today);
+      const number = numberOf(userId);
+      if (number && !alreadySent(db, kind, userId, null, at - DAY)) {
+        plans.push({ id: randomBytes(8).toString("hex"), kind, targetUser: userId, entityId: null, to: `${number}@s.whatsapp.net`,
+          text: `📋 تذكير بمهامك الحالية يا ${clean(user.name)} (${tasks.length}):\n\n${lines}${link}` });
+      }
+      // One group post per owner (never one combined message), same
+      // convention as the on-demand "ابعت تذكير المهام الآن" broadcast --
+      // entityId here is the owner's id, never null, so different owners'
+      // group posts on the same day/slot don't collide under one dedup key.
+      if (config.groupId && !alreadySent(db, kind, "group", userId, at - DAY) && groupBudgetRemaining(db, at) > 0) {
+        plans.push({ id: randomBytes(8).toString("hex"), kind, targetUser: "group", entityId: userId, to: config.groupId,
+          text: `📋 تذكير بالمهام المفتوحة — ${today}\n\n🔴 *${clean(user.name).replace(/\*/g, "")}*\n${lines}` });
+      }
+    }
+  }
+
+  if (hour < (config.workStartHour ?? 9) || hour >= (config.workEndHour ?? 18)) return plans;
   const overdueTasks: ManagementTask[] = [];
   for (const task of snapshot.tasks) {
     if (task.archivedAt || ["completed", "approval"].includes(task.status) || !task.owner) continue;
