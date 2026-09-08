@@ -660,6 +660,22 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
     return save(db, event, freshActor, result, scope, now);
   });
   const callerQuestion = event.text.normalize("NFKC").replace(/[أإآ]/g, "ا").replace(/[\u064b-\u065f\u0670\u0640]/g, "").trim();
+  // A verb carrying the Arabic plural object pronoun "هم" ("قفلهم" = close
+  // THEM, "احذفهم" = delete THEM...) asks for one action on MULTIPLE targets
+  // at once. No action in this codebase is bulk -- every command/confirmation
+  // resolves to exactly one taskId/projectId -- so there is no way to fulfil
+  // this literally. Left unguarded, the model either has to guess which
+  // items "them" refers to, or (as actually happened once) falls back to
+  // focusedTaskId -- the single task/project a *previous*, unrelated turn
+  // last touched -- and silently acts on that instead, producing a
+  // confirmation and outcome that look like stale garbage to the user even
+  // though nothing was hardcoded; it was just the wrong single target. Ask
+  // for the exact items instead of guessing, before the model or
+  // focusedTaskId ever see the message, for every actor and even on a
+  // reply-quote (quoting doesn't resolve which multiple items "هم" means).
+  if (/(?:قفل|سكر|سكّر|اغلق|أغلق|ارشف|أرشف|احذف|امسح|الغ[يو]|افتح|فعّل|عطل|وقف|أوقف)هم(?![ء-ي])/u.test(callerQuestion)) {
+    return earlyRead({ status: "clarify", reply: "ما بقدر أنفّذ إجراء على أكثر من مشروع أو مهمة بنفس الرسالة. حدد كل واحد بالاسم أو الرقم لحاله وبجهزلك تأكيد لكل واحد على حدة." });
+  }
   const callerMatch = /^(?:(?:مرحبا|هلا|اهلا)[،,!\s]+)?(?:مين انا|بتعرفني|من انا)[؟?،,\s]*(?:(?:و\s*)?(?:شو|ايش|ما هي)\s+المشاريع(?:\s+(?:الموجودة|الموجوده|النشطة|النشطه))?(?:\s+(?:عندنا|عنا))?[؟?!.\s]*)?$/u.exec(callerQuestion);
   if (callerMatch && !event.replyToMessageId) {
     const projects = callerQuestion.includes("المشاريع") ? initial.projects : [];

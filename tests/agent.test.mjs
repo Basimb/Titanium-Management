@@ -8,7 +8,7 @@ import { activeRules, policyViolations, proposeRuleFromStatement, recordCorrecti
 import { addKnowledge, searchKnowledge } from "../lib/knowledge.ts";
 import { createFollowupJobs, enqueueAgentMessage, planFollowups } from "../lib/agent-followups.ts";
 import { handleAgentIntent, parseProjectTaskLines, createProjectBundle } from "../lib/secretary-agent.ts";
-import { groupBudgetRemaining, isGroupWorthy } from "../lib/team-chat-policy.ts";
+import { groupBudgetRemaining, isGroupWorthy, GROUP_DAILY_BUDGET } from "../lib/team-chat-policy.ts";
 
 const owner = { id: "basem", name: "باسم", role: "admin", active: 1 };
 const khaled = { id: "khaled", name: "خالد", role: "member", active: 1 };
@@ -237,7 +237,7 @@ test("follow-ups: overdue owner nudge once per day, stale approval to owner, dig
   assert.equal(sent[2].text, "إشعار مباشر", "queued notification is delivered before planned nudges");
   await later.deliverNext(async message => { sent.push(message); });
   assert.match(sent[3].text, /معلّقة من أكثر من يومين/);
-  assert.ok(groupBudgetRemaining(db, at + 60_000) < 12);
+  assert.ok(groupBudgetRemaining(db, at + 60_000) < GROUP_DAILY_BUDGET);
   assert.ok(isGroupWorthy("create", "project") && !isGroupWorthy("comment", "task"));
 });
 
