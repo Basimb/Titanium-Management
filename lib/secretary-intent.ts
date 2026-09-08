@@ -204,7 +204,11 @@ export function validateSecretaryIntent(value: unknown, input: SecretaryModelInp
   }
   if (![null, "start", "continue"].includes(plan.intakeMode)) throw new Error("Invalid task intake mode.");
   const creation = plan.kind === "task_draft" || (plan.kind === "command" && plan.action === "add_task");
-  if (!creation && plan.intakeMode !== null) throw new Error("Unexpected task intake mode.");
+  // A stray intakeMode outside task creation is a model confused by an active
+  // taskDraft lingering in context while answering something else -- a benign
+  // formatting slip, not a security-relevant one -- clarify instead of a hard
+  // provider error the person can't act on.
+  if (!creation && plan.intakeMode !== null) return emptySecretaryIntent("clarify", "وضحلي: هل بدك تكمل مسودة مهمة قائمة، ولا موضوع ثاني؟");
   if (!creation && plan.fields.dueDate === "unscheduled") return emptySecretaryIntent("clarify", "ترك الموعد لاحقًا يخص مسودة المهمة؛ لتغيير موعد مهمة قائمة حدد التعديل المقصود.");
   if (!Array.isArray(plan.recipientIds) || plan.recipientIds.length > 50 || plan.recipientIds.some(id => typeof id !== "string" || !id || id.length > 100)
     || new Set(plan.recipientIds).size !== plan.recipientIds.length) throw new Error("Invalid message recipients.");
@@ -239,12 +243,17 @@ export function validateSecretaryIntent(value: unknown, input: SecretaryModelInp
     return plan;
   }
   if (AGENT_KINDS.has(plan.kind)) {
-    if (plan.intakeMode !== null || plan.recipientIds.length) throw new Error("Invalid agent plan.");
+    // As with task intake above: a stray intakeMode or action here is a
+    // confused-but-authorized formatting slip from a model juggling a mixed
+    // request, not an attack -- the kind-specific authorization checks below
+    // already gate the actual effect, so clarify instead of a hard provider
+    // error the person can't act on.
+    if (plan.intakeMode !== null || plan.recipientIds.length) return emptySecretaryIntent("clarify", "وضحلي بجملة وحدة شو بالضبط بدك.");
     if (plan.kind === "decide") {
       if (plan.action !== "approve" && plan.action !== "reject") return emptySecretaryIntent("clarify", "تعتمد الطلب ولا ترفضه؟");
       if (input.actor.id !== "basem" || input.actor.role !== "admin") return emptySecretaryIntent("clarify", "القرار على الطلبات لباسم فقط. أقدر أعرض لك حالة طلبك.");
       if (!input.pendingApprovals?.length) return emptySecretaryIntent("clarify", "ما في طلبات بانتظار قرارك حاليًا.");
-    } else if (plan.action !== null) throw new Error("Invalid agent plan.");
+    } else if (plan.action !== null) return emptySecretaryIntent("clarify", "وضحلي بجملة وحدة شو بالضبط بدك تنفذ.");
     if ((plan.kind === "extension" || plan.kind === "close_request") && (plan.taskId === null || !input.tasks.some(t => t.id === plan.taskId))) return emptySecretaryIntent("clarify", "أي مهمة تقصد؟ اذكر اسمها والمشروع.");
     if (plan.kind === "ownership_request" && (input.actor.id === "basem" || input.actor.role === "admin")) return emptySecretaryIntent("clarify", "أنت تقدر تعيّن المسؤول مباشرة. اذكر المهمة واسم الموظف.");
     // WhatsApp renders Arabic right-to-left text around bare numbers inconsistently.
@@ -317,9 +326,16 @@ export function validateSecretaryIntent(value: unknown, input: SecretaryModelInp
       const match = input.projects.find(p => normalize(p.name) === normalize(plan.fields.name!));
       if (match) plan = { ...plan, projectId: match.id, fields: { ...plan.fields, name: null } };
     }
-    if (plan.taskId !== null || plan.message !== null || plan.recipientIds.length || ["reason", "body", "remindAt"].some(key => plan.fields[key as keyof SecretaryIntent["fields"]] !== null)) throw new Error("Invalid task creation draft.");
-    if (plan.fields.name !== null && (plan.kind !== "task_draft" || plan.projectId !== null || !plan.fields.name.trim())) throw new Error("Invalid task creation draft.");
-    if (plan.kind === "task_draft" && plan.action !== null) throw new Error("Invalid task draft action.");
+    // As with message_team/announce_team and the agent kinds above: a stray
+    // extra field on a creation draft (a leftover note, a resolved-but-also-
+    // named project, a mixed create+act request) is a benign formatting slip
+    // from a model juggling a longer request, not a security-relevant one --
+    // clarify instead of a hard provider error the person can't act on.
+    if (plan.taskId !== null || plan.message !== null || plan.recipientIds.length || ["reason", "body", "remindAt"].some(key => plan.fields[key as keyof SecretaryIntent["fields"]] !== null))
+      return emptySecretaryIntent("clarify", "وضحلي بجملة وحدة شو المهمة الجديدة يلي بدك تفتحها، وبأي مشروع.");
+    if (plan.fields.name !== null && (plan.kind !== "task_draft" || plan.projectId !== null || !plan.fields.name.trim()))
+      return emptySecretaryIntent("clarify", "شو اسم المشروع بالضبط؟ إذا موجود عندنا اذكر اسمه، وإذا جديد اذكر اسمه الجديد بس.");
+    if (plan.kind === "task_draft" && plan.action !== null) return emptySecretaryIntent("clarify", "بدك تفتح مهمة جديدة، ولا تنفذ إجراء على مهمة موجودة أصلًا؟ وضحلي المقصود.");
     const mode = plan.intakeMode ?? (input.taskDraft ? "continue" : "start");
     if (mode === "continue" && !input.taskDraft) return emptySecretaryIntent("clarify", "ما في مسودة مهمة نشطة؛ احكيلي المهمة الجديدة والمشروع المقصود.");
     if (mode === "start" && !/(?:ضيف|اضف|اضيف|اضافه|اضافة|انشئ|انشي|انشاء|اعمل|نعمل|سجل|افتح|جهز|مهم[هة]\s+جديد[هة]|\b(?:add|create|new)\b)/u.test(normalizedArabic(input.text))) return emptySecretaryIntent("clarify", "بدك أضيف مهمة جديدة؟ اذكر الشغل والمشروع حتى ما أرجع لطلب قديم بالغلط.");

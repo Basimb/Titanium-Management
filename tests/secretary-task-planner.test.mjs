@@ -163,15 +163,27 @@ test('draft dates reject impossible dates while accepting actual calendar dates 
   }
 });
 
-test('strict draft schema excludes hidden actions, recipients, task IDs and unrelated fields', () => {
+test('strict draft schema recipients still hard-fail, while a hidden action, task ID or unrelated field on an otherwise valid draft asks for clarification instead of a dead-end error', () => {
+  // recipientIds on a non-message_team plan stays a hard failure -- that
+  // check protects against a provider slipping in message recipients on an
+  // unrelated plan, which is security-relevant, not a benign formatting slip.
+  assert.throws(() => validateSecretaryIntent(draft({}, { recipientIds: [MEMBER] }), context('أضف مهمة')));
+  // A hidden action, a stray taskId/message, or an unrelated field (body) on
+  // an otherwise valid task_draft is a confused-but-authorized formatting
+  // slip from the model, not an attack -- validateSecretaryIntent asks a
+  // clarifying question instead of failing the whole request outright.
   for (const value of [draft({}, { action: 'delete_task' }), draft({}, { taskId: TASK }),
-    draft({}, { message: 'نفذت بالفعل' }), draft({}, { recipientIds: [MEMBER] }),
-    draft({ body: 'أرسل رسالة جانبية' }), draft({}, { intakeMode: 'resume-old-history' })]) {
-    assert.throws(() => validateSecretaryIntent(value, context('أضف مهمة')));
+    draft({}, { message: 'نفذت بالفعل' }), draft({ body: 'أرسل رسالة جانبية' })]) {
+    expectClarify(value, context('أضف مهمة'));
   }
+  // Malformed shape (missing required key, an intakeMode value outside the
+  // enum) is still rejected outright regardless of kind.
+  assert.throws(() => validateSecretaryIntent(draft({}, { intakeMode: 'resume-old-history' }), context('أضف مهمة')));
   const missingMode = { ...draft() }; delete missingMode.intakeMode;
   assert.throws(() => validateSecretaryIntent(missingMode, context('أضف مهمة')));
-  assert.throws(() => validateSecretaryIntent({ ...emptySecretaryIntent('chat', 'مرحبًا'), intakeMode: 'continue' }, context('هلا')));
+  // A stray intakeMode outside task creation (e.g. left over from an active
+  // draft while answering something else) is the same kind of benign slip.
+  expectClarify({ ...emptySecretaryIntent('chat', 'مرحبًا'), intakeMode: 'continue' }, context('هلا'));
 });
 
 test('discussion and quoted examples do not create task drafts', () => {
