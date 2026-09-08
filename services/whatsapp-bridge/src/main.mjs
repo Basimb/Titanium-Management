@@ -27,6 +27,7 @@ async function main() {
   let secretaryJobs;
   let secretaryOutbox;
   let agentFollowups;
+  let odooReportJobs;
   if (process.env.TEAM_CHAT_AUTH_DATABASE) {
     const { DatabaseSync } = await import('node:sqlite');
     const { lstatSync, realpathSync } = await import('node:fs');
@@ -51,6 +52,19 @@ async function main() {
       agentFollowups = createFollowupJobs({ db: jobsDb, config: () => ({
         enabled: process.env.SECRETARY_FOLLOWUP_ENABLED === '1', contacts,
         groupId: [...config.allowedGroups][0] ?? null, publicUrl: process.env.TITANIUM_PUBLIC_URL || undefined }) });
+      const { createOdooReportJobs } = await import('../../../lib/odoo-reports.ts');
+      odooReportJobs = createOdooReportJobs({ db: jobsDb, config: () => ({
+        enabled: process.env.ODOO_REPORT_ENABLED === '1' && !!process.env.ODOO_URL && !!process.env.ODOO_DB
+          && !!process.env.ODOO_USERNAME && !!process.env.ODOO_API_KEY,
+        odoo: { url: process.env.ODOO_URL || '', db: process.env.ODOO_DB || '', username: process.env.ODOO_USERNAME || '', apiKey: process.env.ODOO_API_KEY || '' },
+        ownerNumber: contacts.find(contact => contact.userId === 'basem')?.number ?? '',
+        groupId: [...config.allowedGroups][0] ?? null,
+        lowStockThreshold: process.env.ODOO_LOW_STOCK_THRESHOLD ? Number(process.env.ODOO_LOW_STOCK_THRESHOLD) : undefined,
+        currencyLabel: process.env.ODOO_CURRENCY_LABEL || undefined,
+        dailyHour: process.env.ODOO_REPORT_DAILY_HOUR ? Number(process.env.ODOO_REPORT_DAILY_HOUR) : undefined,
+        weeklyDay: process.env.ODOO_REPORT_WEEKLY_DAY ? Number(process.env.ODOO_REPORT_WEEKLY_DAY) : undefined,
+        weeklyHour: process.env.ODOO_REPORT_WEEKLY_HOUR ? Number(process.env.ODOO_REPORT_WEEKLY_HOUR) : undefined,
+      }) });
     }
   }
   let otpQueue;
@@ -69,7 +83,7 @@ async function main() {
   }
   const runtime = createBridgeRuntime({
     config, store, auth, makeWASocket, jidNormalizedUser, makeCacheableSignalKeyStore, DisconnectReason, logger, otpQueue,
-    control, isActiveNumber, secretaryJobs, secretaryOutbox, agentFollowups, proto, generateWAMessageContent, generateWAMessage, decryptPollVote, normalizeMessageContent,
+    control, isActiveNumber, secretaryJobs, secretaryOutbox, agentFollowups, odooReportJobs, proto, generateWAMessageContent, generateWAMessage, decryptPollVote, normalizeMessageContent,
     ...(config.voiceEnabled ? { transcribeVoice: createVoiceTranscriber({ apiKey: process.env.OPENAI_API_KEY, downloadContent: downloadContentFromMessage }) } : {}),
     onStop: code => { process.exitCode = code === 'service_shutdown' ? 0 : 78; },
   });

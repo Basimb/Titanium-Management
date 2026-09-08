@@ -7,7 +7,9 @@ import { loadConfig } from './config.mjs';
 const SETTINGS_KEYS = new Set(['TEAM_CHAT_ENABLED', 'TEAM_CHAT_SHARED_KEY', 'TEAM_CHAT_CONTACTS_JSON',
   'TEAM_CHAT_GROUP_IDS_JSON', 'GROQ_API_KEY', 'GROQ_MODEL', 'OPENAI_API_KEY', 'OPENAI_MODEL', 'OPENAI_SEARCH_MODEL', 'WHATSAPP_LOGIN_ENABLED',
   'WHATSAPP_LOGIN_SECRET', 'WHATSAPP_LOGIN_DATABASE', 'WHATSAPP_LOGIN_ORIGIN',
-  'SECRETARY_ENABLED', 'SECRETARY_WEB_ENABLED', 'SECRETARY_VOICE_ENABLED', 'SECRETARY_FOLLOWUP_ENABLED', 'TITANIUM_PUBLIC_URL', 'DASHBOARD_READONLY']);
+  'SECRETARY_ENABLED', 'SECRETARY_WEB_ENABLED', 'SECRETARY_VOICE_ENABLED', 'SECRETARY_FOLLOWUP_ENABLED', 'TITANIUM_PUBLIC_URL', 'DASHBOARD_READONLY',
+  'ODOO_REPORT_ENABLED', 'ODOO_URL', 'ODOO_DB', 'ODOO_USERNAME', 'ODOO_API_KEY', 'ODOO_LOW_STOCK_THRESHOLD', 'ODOO_CURRENCY_LABEL',
+  'ODOO_REPORT_DAILY_HOUR', 'ODOO_REPORT_WEEKLY_DAY', 'ODOO_REPORT_WEEKLY_HOUR']);
 const MAX_BYTES = 32_768;
 const SERVICE_DIRECTORY = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -121,6 +123,27 @@ export function bridgeChildEnvironment(settings, env, pair, serviceDirectory = S
   if (childEnv.SECRETARY_VOICE_ENABLED === '1') {
     if (typeof settings.OPENAI_API_KEY !== 'string' || !settings.OPENAI_API_KEY.trim() || /[\r\n]/.test(settings.OPENAI_API_KEY)) throw new Error('Voice settings unavailable.');
     childEnv.OPENAI_API_KEY = settings.OPENAI_API_KEY;
+  }
+  // Read-only pharmacy sales/inventory reports. A misconfigured Odoo setting only
+  // disables this one feature -- it must never take down the whole WhatsApp bridge.
+  const odooEnabled = childEnv.SECRETARY_ENABLED === '1' && settings.ODOO_REPORT_ENABLED === '1'
+    && typeof settings.ODOO_URL === 'string' && /^https:\/\/[\w.-]+(?::\d+)?$/.test(settings.ODOO_URL)
+    && typeof settings.ODOO_DB === 'string' && settings.ODOO_DB.trim() && !/[\r\n]/.test(settings.ODOO_DB)
+    && typeof settings.ODOO_USERNAME === 'string' && settings.ODOO_USERNAME.trim() && !/[\r\n]/.test(settings.ODOO_USERNAME)
+    && typeof settings.ODOO_API_KEY === 'string' && settings.ODOO_API_KEY.trim() && !/[\r\n]/.test(settings.ODOO_API_KEY);
+  childEnv.ODOO_REPORT_ENABLED = odooEnabled ? '1' : '0';
+  if (odooEnabled) {
+    childEnv.ODOO_URL = settings.ODOO_URL;
+    childEnv.ODOO_DB = settings.ODOO_DB;
+    childEnv.ODOO_USERNAME = settings.ODOO_USERNAME;
+    childEnv.ODOO_API_KEY = settings.ODOO_API_KEY;
+    if (/^\d{1,4}$/.test(settings.ODOO_LOW_STOCK_THRESHOLD || '')) childEnv.ODOO_LOW_STOCK_THRESHOLD = settings.ODOO_LOW_STOCK_THRESHOLD;
+    if (typeof settings.ODOO_CURRENCY_LABEL === 'string' && settings.ODOO_CURRENCY_LABEL.length <= 20 && !/[\r\n]/.test(settings.ODOO_CURRENCY_LABEL)) {
+      childEnv.ODOO_CURRENCY_LABEL = settings.ODOO_CURRENCY_LABEL;
+    }
+    if (/^([0-9]|1[0-9]|2[0-3])$/.test(settings.ODOO_REPORT_DAILY_HOUR || '')) childEnv.ODOO_REPORT_DAILY_HOUR = settings.ODOO_REPORT_DAILY_HOUR;
+    if (/^[0-6]$/.test(settings.ODOO_REPORT_WEEKLY_DAY || '')) childEnv.ODOO_REPORT_WEEKLY_DAY = settings.ODOO_REPORT_WEEKLY_DAY;
+    if (/^([0-9]|1[0-9]|2[0-3])$/.test(settings.ODOO_REPORT_WEEKLY_HOUR || '')) childEnv.ODOO_REPORT_WEEKLY_HOUR = settings.ODOO_REPORT_WEEKLY_HOUR;
   }
   // Phone/user mapping only; no names or AI key. launchPrivate separately grants
   // the validated settings path for fresh outbox authorization, never from an override.

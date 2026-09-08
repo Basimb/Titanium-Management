@@ -18,7 +18,7 @@ function withDeadline(work) {
 export function createBridgeRuntime({ config, store, auth, makeWASocket, jidNormalizedUser,
   makeCacheableSignalKeyStore, DisconnectReason, logger, onStop = () => {}, output = console,
   now = Date.now, timers = { setTimeout, clearTimeout, setInterval, clearInterval }, fetcher = fetch, otpQueue,
-  control, isActiveNumber = () => false, secretaryJobs, secretaryOutbox, agentFollowups, transcribeVoice,
+  control, isActiveNumber = () => false, secretaryJobs, secretaryOutbox, agentFollowups, odooReportJobs, transcribeVoice,
   proto, generateWAMessageContent, generateWAMessage, decryptPollVote, normalizeMessageContent }) {
   let socket;
   let ready = false;
@@ -256,10 +256,10 @@ export function createBridgeRuntime({ config, store, auth, makeWASocket, jidNorm
   }
 
   async function drainBackground() {
-    const jobs = preferOutbox ? ['outbox', 'reminder', 'followup'] : ['reminder', 'outbox', 'followup'];
+    const jobs = preferOutbox ? ['outbox', 'reminder', 'followup', 'odoo_report'] : ['reminder', 'outbox', 'followup', 'odoo_report'];
     for (const kind of jobs) {
       if (!ready || stopped) return false;
-      const queue = kind === 'outbox' ? secretaryOutbox : kind === 'followup' ? agentFollowups : secretaryJobs;
+      const queue = kind === 'outbox' ? secretaryOutbox : kind === 'followup' ? agentFollowups : kind === 'odoo_report' ? odooReportJobs : secretaryJobs;
       if (!queue) continue;
       let result;
       try { result = await queue.deliverNext(message => sendScheduled(message, kind === 'outbox')); }
@@ -270,7 +270,7 @@ export function createBridgeRuntime({ config, store, auth, makeWASocket, jidNorm
       }
       if (result.status !== 'idle') {
         preferOutbox = kind !== 'outbox';
-        const label = kind === 'outbox' ? 'outbox' : kind === 'followup' ? 'followup' : 'delivery';
+        const label = kind === 'outbox' ? 'outbox' : kind === 'followup' ? 'followup' : kind === 'odoo_report' ? 'odoo_report' : 'delivery';
         const status = result.status === 'sent' ? 'sent' : result.status === 'submitted' ? 'submitted' : result.status === 'uncertain' ? 'uncertain' : 'failed';
         output.info(`Titanium secretary ${label}: ${status}.`);
         return true;
