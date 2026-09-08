@@ -137,8 +137,8 @@ it authenticates that host, not every possible assertion made by malicious code.
 phone/user mapping from administrator-owned contacts. Contact records explicitly
 marked inactive or unverified are excluded from the sender allowlist. Before
 processing or delivering task messages, the bridge checks the website's current
-`users.active = 1` row. Missing/invalid database authorization fails closed without
-altering the separate OTP worker. A contact phone remap or group allowlist change
+`users.active = 1` row. Missing/invalid database authorization fails closed. A
+contact phone remap or group allowlist change
 still requires a graceful service restart to refresh its startup configuration;
 do not pair again or erase session state. Website user deactivation applies
 immediately without that restart.
@@ -202,13 +202,12 @@ contacts/groups. No AI key is passed to this worker. The bridge accepts its
 `deliverNext(send)` interface; recipient authorization and fresh group privacy
 checks still run immediately before send. Its abort signal also bounds a hung
 transport call; a send accepted before timeout can have an uncertain outcome.
-OTP always has queue priority. `TEAM_CHAT_ENABLED=0` pauses secretary/task delivery
-without disabling OTP. The bridge accepts protected `SECRETARY_WEB_ENABLED` and
-`SECRETARY_VOICE_ENABLED` settings for shared-config compatibility, but it does
-not forward web-search configuration into transport. With the owner's explicit
-voice consent, `SECRETARY_ENABLED=1` plus `SECRETARY_VOICE_ENABLED=1` passes the
-Groq key only to the server-side, bounded voice transcriber. Text-only mode and
-OTP alone still receive no Groq key.
+`TEAM_CHAT_ENABLED=0` pauses secretary/task delivery. The bridge accepts protected
+`SECRETARY_WEB_ENABLED` and `SECRETARY_VOICE_ENABLED` settings for shared-config
+compatibility, but it does not forward web-search configuration into transport.
+With the owner's explicit voice consent, `SECRETARY_ENABLED=1` plus
+`SECRETARY_VOICE_ENABLED=1` passes the Groq key only to the server-side, bounded
+voice transcriber. Text-only mode still receives no Groq key.
 
 ## Free-tier web and voice feasibility (not transport activation)
 

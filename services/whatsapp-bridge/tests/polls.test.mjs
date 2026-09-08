@@ -254,7 +254,7 @@ async function runtimeFixture(t, f, rejectPoll = false) {
   const auth = createAuthState(f.store, baileys);
   auth.state.creds.registered = true;
   auth.state.creds.me = { id: `${BOT}:9@s.whatsapp.net`, lid: '999999999@lid' };
-  let socket, otpPending = true;
+  let socket;
   const runtime = createBridgeRuntime({ ...baileys, config: f.config, store: f.store, auth,
     logger: { trace() {}, debug() {}, info() {}, warn() {}, error() {} },
     makeCacheableSignalKeyStore: keys => keys, now: () => f.now,
@@ -279,12 +279,6 @@ async function runtimeFixture(t, f, rejectPoll = false) {
         ? { status: 'clarify', reply: 'شو أولوية المهمة؟ يمكنك الاختيار أو الرد كتابة.', choices: choices() }
         : { status: 'confirmation', reply: 'راجع التفاصيل ثم أكد رمز المعاينة.' });
     },
-    otpQueue: { async deliverNext(send) {
-      if (!otpPending) return { status: 'idle' };
-      otpPending = false;
-      await send({ to: MEMBER, code: '123456', challengeId: 'ab'.repeat(16), expiresAt: f.now + 300_000, signal: new AbortController().signal });
-      return { status: 'sent' };
-    } },
     output: { info: value => output.push(value), error: value => output.push(value) },
   });
   const flush = async () => { for (let i = 0; i < 12; i++) await new Promise(resolve => setImmediate(resolve)); };
@@ -294,21 +288,17 @@ async function runtimeFixture(t, f, rejectPoll = false) {
   t.after(() => runtime.stop('service_shutdown'));
   return { socket, runtime, texts, requests, output, flush,
     async tick() { callbacks[0](); await flush(); },
-    requestOtp() { otpPending = true; },
   };
 }
 
-test('runtime preserves OTP priority then text fallback, one poll, authenticated vote and deterministic backend choice', async t => {
+test('runtime delivers text fallback, one poll, authenticated vote and deterministic backend choice', async t => {
   const f = fixture(t), h = await runtimeFixture(t, f);
   h.socket.ev.emit('messages.upsert', { type: 'notify', messages: [{ key: { id: 'REQUEST_POLL', fromMe: false, remoteJid: `${MEMBER}@s.whatsapp.net` },
     messageTimestamp: f.now / 1000, message: { conversation: 'أضف مهمة تجريبية' } }] });
   await h.flush();
-  await h.tick();
-  assert.equal(h.requests.length, 0);
-  assert.match(h.texts[0].content.text, /رمز دخولك/);
   await h.tick(); await h.tick();
   assert.equal(f.sent.length, 1);
-  assert.match(h.texts[1].content.text, /الاختيار أو الرد كتابة/);
+  assert.match(h.texts[0].content.text, /الاختيار أو الرد كتابة/);
   const vote = f.vote({ creation: { fromMe: false, remoteJid: `${BOT}@s.whatsapp.net` } });
   baileys.cleanMessage(vote, `${BOT}@s.whatsapp.net`, '999999999@lid');
   h.socket.ev.emit('messages.upsert', { type: 'notify', messages: [vote, vote] });
@@ -319,19 +309,20 @@ test('runtime preserves OTP priority then text fallback, one poll, authenticated
   assert.equal(h.requests[1].replyToMessageId, undefined);
   assert.equal(f.sent.length, 1);
   assert.equal(h.runtime.status().ready, true);
-  assert.doesNotMatch(h.output.join('\n'), /123456|SYNTHETIC|messageSecret|155512345/);
+  assert.doesNotMatch(h.output.join('\n'), /SYNTHETIC|messageSecret|155512345/);
 });
 
-test('ambiguous poll transport failure keeps the successful text, does not repeat the poll and does not break OTP', async t => {
+test('ambiguous poll transport failure keeps the successful text, does not repeat the poll and does not stall later delivery', async t => {
   const f = fixture(t), h = await runtimeFixture(t, f, true);
   f.store.enqueue({ chatJid: `${MEMBER}@s.whatsapp.net`, body: { messageId: 'REQUEST_FAILING_POLL', senderNumber: MEMBER, groupId: null, text: 'أضف مهمة', receivedAt: f.now } });
-  await h.tick(); await h.tick(); await h.tick();
+  await h.tick(); await h.tick();
   assert.equal(f.sent.length, 1);
   assert.equal(f.store.db.prepare('SELECT state FROM choice_polls').get().state, 'uncertain');
   assert.equal(f.store.next(f.now), undefined);
-  h.requestOtp(); await h.tick(); await h.tick();
-  assert.equal(h.texts.filter(item => item.content.text.includes('رمز دخولك')).length, 2);
+  f.store.enqueue({ chatJid: `${MEMBER}@s.whatsapp.net`, body: { messageId: 'FOLLOWUP', senderNumber: MEMBER, groupId: null, text: 'شكرا', receivedAt: f.now } });
+  await h.tick(); await h.tick();
+  assert.equal(h.texts.filter(item => item.content.text.includes('راجع التفاصيل')).length, 1);
   assert.equal(f.sent.length, 1);
   assert.equal(h.runtime.status().ready, true);
-  assert.doesNotMatch(h.output.join('\n'), /SYNTHETIC_PRIVATE_RELAY_ERROR|123456/);
+  assert.doesNotMatch(h.output.join('\n'), /SYNTHETIC_PRIVATE_RELAY_ERROR/);
 });

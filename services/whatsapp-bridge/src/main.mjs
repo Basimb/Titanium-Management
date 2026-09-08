@@ -67,22 +67,8 @@ async function main() {
       }) });
     }
   }
-  let otpQueue;
-  if (['1', 'pilot'].includes(process.env.WHATSAPP_LOGIN_ENABLED)) {
-    const { DatabaseSync } = await import('node:sqlite');
-    const { createWhatsAppLoginQueue } = await import('../../../lib/whatsapp-login-queue.ts');
-    const { lstatSync, realpathSync } = await import('node:fs');
-    const filename = process.env.WHATSAPP_LOGIN_DATABASE;
-    if (!filename || !path.isAbsolute(filename) || realpathSync(filename) !== filename ||
-      !lstatSync(filename).isFile() || lstatSync(filename).isSymbolicLink()) throw new Error('Invalid login database.');
-    const otpDatabase = new DatabaseSync(filename);
-    otpDatabase.exec('PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000; PRAGMA foreign_keys = ON;');
-    const contacts = JSON.parse(process.env.WHATSAPP_LOGIN_CONTACTS_JSON);
-    otpQueue = createWhatsAppLoginQueue({ db: otpDatabase,
-      secret: Buffer.from(process.env.WHATSAPP_LOGIN_SECRET, 'hex'), contacts: () => contacts });
-  }
   const runtime = createBridgeRuntime({
-    config, store, auth, makeWASocket, jidNormalizedUser, makeCacheableSignalKeyStore, DisconnectReason, logger, otpQueue,
+    config, store, auth, makeWASocket, jidNormalizedUser, makeCacheableSignalKeyStore, DisconnectReason, logger,
     control, isActiveNumber, secretaryJobs, secretaryOutbox, agentFollowups, odooReportJobs, proto, generateWAMessageContent, generateWAMessage, decryptPollVote, normalizeMessageContent,
     ...(config.voiceEnabled ? { transcribeVoice: createVoiceTranscriber({ apiKey: process.env.OPENAI_API_KEY, downloadContent: downloadContentFromMessage }) } : {}),
     onStop: code => { process.exitCode = code === 'service_shutdown' ? 0 : 78; },

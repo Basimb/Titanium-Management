@@ -105,7 +105,7 @@ export function bridgeChildEnvironment(settings, env, pair, serviceDirectory = S
     if (typeof env[key] === 'string') childEnv[key] = env[key];
   }
   Object.assign(childEnv, {
-    TEAM_CHAT_BRIDGE_ENABLED: pair || settings.TEAM_CHAT_ENABLED === '1' || ['1', 'pilot'].includes(settings.WHATSAPP_LOGIN_ENABLED) ? '1' : '0',
+    TEAM_CHAT_BRIDGE_ENABLED: pair || settings.TEAM_CHAT_ENABLED === '1' ? '1' : '0',
     TEAM_CHAT_TASKS_ENABLED: settings.TEAM_CHAT_ENABLED === '1' ? '1' : '0',
     TEAM_CHAT_PAIR: pair ? '1' : '0',
     TEAM_CHAT_SHARED_KEY: settings.TEAM_CHAT_SHARED_KEY,
@@ -154,17 +154,6 @@ export function bridgeChildEnvironment(settings, env, pair, serviceDirectory = S
       ...(contact.active === false ? { active: false } : {}), ...(contact.verified === false ? { verified: false } : {}),
     })));
   }
-  if (['1', 'pilot'].includes(settings.WHATSAPP_LOGIN_ENABLED)) {
-    if (!/^[a-fA-F0-9]{64}$/.test(settings.WHATSAPP_LOGIN_SECRET || '') ||
-      settings.WHATSAPP_LOGIN_SECRET.toLowerCase() === settings.TEAM_CHAT_SHARED_KEY?.toLowerCase() ||
-      !path.isAbsolute(settings.WHATSAPP_LOGIN_DATABASE || '')) throw new Error('Invalid private login settings.');
-    Object.assign(childEnv, {
-      WHATSAPP_LOGIN_ENABLED: settings.WHATSAPP_LOGIN_ENABLED,
-      WHATSAPP_LOGIN_SECRET: settings.WHATSAPP_LOGIN_SECRET,
-      WHATSAPP_LOGIN_DATABASE: settings.WHATSAPP_LOGIN_DATABASE,
-      WHATSAPP_LOGIN_CONTACTS_JSON: settings.TEAM_CHAT_CONTACTS_JSON,
-    });
-  }
   loadConfig(childEnv, serviceDirectory);
   return childEnv;
 }
@@ -203,7 +192,7 @@ export async function launchPrivate({ env = process.env, args = process.argv.sli
     const pair = args[0] === '--pair';
     const settingsPath = env.TITANIUM_TEAM_CHAT_CONFIG;
     const settings = readPrivateConfig(settingsPath, fs);
-    if (!pair && settings.TEAM_CHAT_ENABLED !== '1' && !['1', 'pilot'].includes(settings.WHATSAPP_LOGIN_ENABLED)) return 0;
+    if (!pair && settings.TEAM_CHAT_ENABLED !== '1') return 0;
     const childEnv = bridgeChildEnvironment(settings, env, pair, serviceDirectory);
     if (childEnv.SECRETARY_ENABLED === '1' && childEnv.TEAM_CHAT_AUTH_DATABASE) {
       childEnv.TEAM_CHAT_AUTH_CONFIG_PATH = path.resolve(settingsPath);

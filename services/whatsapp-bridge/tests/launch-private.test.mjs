@@ -184,22 +184,18 @@ test('only launcher-validated settings path is explicitly granted to outbox, nev
   assert.equal(unsafe.spawns.length, 0);
 });
 
-test('OTP worker gets only its private secret and contacts, never Groq', () => {
+test('the now-vestigial WHATSAPP_LOGIN_ENABLED/SECRET settings are never forwarded to the bridge child', () => {
   const child = bridgeChildEnvironment({ ...settings, WHATSAPP_LOGIN_ENABLED: 'pilot',
     WHATSAPP_LOGIN_SECRET: 'cd'.repeat(32), WHATSAPP_LOGIN_DATABASE: path.join(os.tmpdir(), 'otp-test.sqlite') }, env, false, serviceDirectory);
-  assert.equal(child.WHATSAPP_LOGIN_ENABLED, 'pilot');
-  assert.equal(child.WHATSAPP_LOGIN_SECRET, 'cd'.repeat(32));
+  assert.equal(child.WHATSAPP_LOGIN_ENABLED, undefined);
+  assert.equal(child.WHATSAPP_LOGIN_SECRET, undefined);
   assert.equal(child.GROQ_API_KEY, undefined);
   assert.equal(child.TITANIUM_TEAM_CHAT_CONFIG, undefined);
-  assert.throws(() => bridgeChildEnvironment({ ...settings, WHATSAPP_LOGIN_ENABLED: '1',
-    WHATSAPP_LOGIN_SECRET: secret, WHATSAPP_LOGIN_DATABASE: path.join(os.tmpdir(), 'otp-test.sqlite') }, env, false, serviceDirectory));
 });
-test('OTP service remains enabled when task automation is disabled', () => {
-  const child = bridgeChildEnvironment({ ...settings, TEAM_CHAT_ENABLED: '0', WHATSAPP_LOGIN_ENABLED: '1',
-    WHATSAPP_LOGIN_SECRET: 'cd'.repeat(32), WHATSAPP_LOGIN_DATABASE: path.join(os.tmpdir(), 'otp-test.sqlite') }, env, false, serviceDirectory);
+test('task automation can be disabled independently of TEAM_CHAT_BRIDGE_ENABLED pairing', () => {
+  const child = bridgeChildEnvironment({ ...settings, TEAM_CHAT_ENABLED: '0' }, env, true, serviceDirectory);
   assert.equal(child.TEAM_CHAT_BRIDGE_ENABLED, '1');
   assert.equal(child.TEAM_CHAT_TASKS_ENABLED, '0');
-  assert.equal(child.WHATSAPP_LOGIN_ENABLED, '1');
 });
 
 test('secretary settings pass no Groq key and disabled/unverified contacts never enter sender allowlist', () => {

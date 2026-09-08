@@ -91,22 +91,10 @@ button, input, textarea, select { font-family:"Cairo", Arial, sans-serif; }
 .titanium-start svg { width:15px; height:15px; }
 .titanium-empty { border:1px dashed #cbd3c5; border-radius:14px; padding:34px 16px; text-align:center; color:#70766c; }
 .titanium-loading { padding:50px 12px; text-align:center; color:#70766c; }
-.titanium-dialog-grid { display:grid; gap:12px; } .titanium-dialog-note { margin:0; color:#70766c; font-size:.8rem; }
+.titanium-dialog-grid { display:grid; gap:12px; }
 .titanium-loading-screen { min-height:100vh; display:grid; place-items:center; background:#f6f8f2; color:#596155; font-family:"Cairo",Arial,sans-serif; }
 .titanium-warning { margin:0; padding:10px 12px; border:1px solid #f0d08a; border-radius:10px; background:#fff7df; color:#855c09; font-size:.82rem; }
 .titanium-login-dialog { max-width:460px; }
-.titanium-whatsapp-login { display:grid; gap:14px; }
-.titanium-login-method { display:flex; align-items:center; gap:9px; color:#376d26; font-size:.85rem; font-weight:700; }
-.titanium-login-method svg { width:23px; height:23px; flex-shrink:0; }
-.titanium-whatsapp-login input { min-height:46px; font-size:1rem; }
-.titanium-whatsapp-login button { min-height:44px; height:auto; padding-top:10px; padding-bottom:10px; white-space:normal; }
-.titanium-login-phone { text-align:left; letter-spacing:.025em; }
-.titanium-whatsapp-login .titanium-login-code { min-height:54px; text-align:center; font-size:1.45rem; letter-spacing:.35em; padding-inline:12px; }
-.titanium-login-security { display:flex; align-items:center; gap:7px; margin:0; color:#687460; font-size:.76rem; line-height:1.7; }
-.titanium-login-security svg { width:17px; height:17px; flex-shrink:0; }
-.titanium-login-sent { margin:0; padding:11px 13px; border:1px solid #cfe4bf; border-radius:11px; background:#f0f8ea; color:#376329; font-size:.83rem; line-height:1.85; }
-.titanium-login-number { margin:0; color:#596155; font-size:.82rem; }
-.titanium-login-number bdi { display:inline-block; font-weight:700; margin-inline-start:4px; }
 .titanium-login-code-actions { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:8px; }
 .titanium-users-list .titanium-user-row-whatsapp { grid-template-columns:minmax(0,1fr) auto; }
 .titanium-wide-dialog { max-width:min(920px,calc(100% - 24px)); max-height:88vh; overflow:auto; }

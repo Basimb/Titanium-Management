@@ -9,8 +9,6 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, Di
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { WhatsAppLogin } from "@/components/whatsapp-login";
-import { publicWhatsAppLoginUsers, type WhatsAppLoginSuccess, type WhatsAppLoginUser } from "@/components/whatsapp-login-helpers";
 import { SecretaryActivity } from "@/components/secretary-activity";
 import { SecretaryLinkButton } from "@/components/secretary-link-button";
 import { createSecretaryLink, resolveSecretaryDeepLink, secretaryActivityTarget, type SecretaryTarget } from "@/components/secretary-ui-helpers";
@@ -39,9 +37,8 @@ export default function Dashboard() {
   const [data, setData] = useState<State>(emptyState);
   const [loading, setLoading] = useState(true);
   const [loginUsers, setLoginUsers] = useState<Array<{id:string;name:string;pinSet:number}>>([]);
-  const [whatsappUsers, setWhatsappUsers] = useState<WhatsAppLoginUser[]>([]);
   const [setupRequired, setSetupRequired] = useState(false);
-  const [authMethod, setAuthMethod] = useState<"pin" | "whatsapp" | null>(null);
+  const [authMethod, setAuthMethod] = useState<"pin" | null>(null);
   const [platformAuthenticated, setPlatformAuthenticated] = useState(false);
   const [loginUserId, setLoginUserId] = useState("basem");
   const [loginPin, setLoginPin] = useState("");
@@ -93,7 +90,6 @@ export default function Dashboard() {
   const editing = !readonly;
   const monitoring = data.monitoring;
   const selectedLoginUser = loginUsers.find(user => user.id === loginUserId);
-  const whatsappLogin = authMethod === "whatsapp";
 
   function sessionHeaders(json = false):Record<string,string> {
     const headers:Record<string,string> = {};
@@ -108,12 +104,9 @@ export default function Dashboard() {
       const response = await fetch(`/api/auth?v=${crypto.randomUUID()}`, { cache:"no-store", credentials:"include", headers:sessionHeaders() });
       const auth = await response.json();
       if (!response.ok) throw new Error(auth.error || "تعذر فحص الدخول");
-      if (auth.authMethod !== "whatsapp" && auth.authMethod !== "pin") throw new Error("تعذر تحميل طريقة الدخول");
-      const whatsapp = auth.authMethod === "whatsapp";
-      setAuthMethod(whatsapp ? "whatsapp" : "pin");
-      setWhatsappUsers(whatsapp ? publicWhatsAppLoginUsers(auth.loginUsers) : []);
-      setLoginUsers(whatsapp ? [] : auth.users || []); setSetupRequired(!whatsapp && Boolean(auth.setupRequired)); setPlatformAuthenticated(Boolean(auth.platformAuthenticated));
-      if (whatsapp) { setLoginPin(""); setSetupPin(""); setUserPins({}); setOldPin(""); setNewPin(""); setChangePinOpen(false); }
+      if (auth.authMethod !== "pin") throw new Error("تعذر تحميل طريقة الدخول");
+      setAuthMethod("pin");
+      setLoginUsers(auth.users || []); setSetupRequired(Boolean(auth.setupRequired)); setPlatformAuthenticated(Boolean(auth.platformAuthenticated));
       if (auth.authenticated && auth.user) {
         // Reflect the authenticated user immediately. This also avoids keeping the
         // login dialog open while mobile WebKit applies the session cookie.
@@ -121,8 +114,7 @@ export default function Dashboard() {
         await loadState();
       }
     } catch (error) {
-      setWhatsappUsers([]);
-      setAuthMethod(current => current === "whatsapp" ? "whatsapp" : null);
+      setAuthMethod(null);
       toast.error(error instanceof Error ? error.message : "تعذر فحص الدخول");
     }
     finally { setLoading(false); }
@@ -150,15 +142,6 @@ export default function Dashboard() {
     if (next.user) setData(current => ({ ...current, currentUser: next.user }));
     await loadState();
     return true;
-  }
-
-  async function completeWhatsAppLogin(next: WhatsAppLoginSuccess) {
-    if (next.sessionToken) sessionTokenRef.current = next.sessionToken;
-    setData(current => ({ ...current, currentUser: next.user }));
-    setSetupRequired(false);
-    toast.success("تم تسجيل الدخول");
-    try { await loadState(); }
-    catch { toast.error("تم تأكيد الدخول، لكن تعذر تحميل المهام. حدّث الصفحة للمحاولة مجددًا."); }
   }
 
   async function logout() {
@@ -324,8 +307,8 @@ export default function Dashboard() {
     <Toaster position="top-center" richColors />
     <Dialog open={!currentUser} onOpenChange={() => undefined}>
       <DialogContent dir="rtl" showCloseButton={false} className="titanium-login-dialog">
-        <DialogHeader className="text-right"><DialogTitle>{setupRequired ? "إعداد حساب باسم لأول مرة" : "دخول فريق الإدارة"}</DialogTitle><DialogDescription>{authMethod === null ? "يلزم الاتصال بالموقع للتحقق من طريقة الدخول المتاحة." : whatsappLogin ? "اختر اسمك واضغط إرسال الرمز، ثم أدخل رمز التحقق الذي يصلك على واتساب المسجّل لك." : setupRequired ? "مالك الموقع يحدد كود باسم أولاً، وبعد الدخول يحدد أكواد باقي الفريق." : "اختر اسمك واكتب الكود الخاص بك."}</DialogDescription></DialogHeader>
-        {authMethod === null ? <div className="titanium-dialog-grid"><p className="titanium-warning" role="alert">تعذر تحميل إعدادات الدخول. تأكد من الإنترنت ثم أعد المحاولة.</p><Button onClick={() => void refreshAuth()}>إعادة المحاولة</Button></div> : whatsappLogin ? <WhatsAppLogin users={whatsappUsers} onAuthenticated={completeWhatsAppLogin} /> : setupRequired ? <div className="titanium-dialog-grid">
+        <DialogHeader className="text-right"><DialogTitle>{setupRequired ? "إعداد حساب باسم لأول مرة" : "دخول فريق الإدارة"}</DialogTitle><DialogDescription>{authMethod === null ? "يلزم الاتصال بالموقع للتحقق من طريقة الدخول المتاحة." : setupRequired ? "مالك الموقع يحدد كود باسم أولاً، وبعد الدخول يحدد أكواد باقي الفريق." : "اختر اسمك واكتب الكود الخاص بك."}</DialogDescription></DialogHeader>
+        {authMethod === null ? <div className="titanium-dialog-grid"><p className="titanium-warning" role="alert">تعذر تحميل إعدادات الدخول. تأكد من الإنترنت ثم أعد المحاولة.</p><Button onClick={() => void refreshAuth()}>إعادة المحاولة</Button></div> : setupRequired ? <div className="titanium-dialog-grid">
           {!platformAuthenticated && <p className="titanium-warning">الإعداد الأول متاح لمالك الموقع من الصفحة الخاصة فقط.</p>}
           <div className="titanium-field"><label>كود باسم الجديد</label><Input type="password" inputMode="numeric" value={setupPin} onChange={event => setSetupPin(event.target.value)} placeholder="من 4 إلى 8 أرقام" /></div>
           <Button disabled={!platformAuthenticated} onClick={() => authAction({ action:"setup", pin:setupPin }, "تم إعداد حساب باسم")}>بدء الاستخدام</Button>
@@ -346,7 +329,7 @@ export default function Dashboard() {
           {editing&&isAdmin&&<Dialog open={projectOpen} onOpenChange={setProjectOpen}><DialogTrigger asChild><Button variant="secondary"><FolderPlus /> مشروع</Button></DialogTrigger><DialogContent dir="rtl"><DialogHeader className="text-right"><DialogTitle>إضافة مشروع</DialogTitle><DialogDescription>سيظهر المشروع مباشرة للفريق.</DialogDescription></DialogHeader><div className="titanium-dialog-grid"><div className="titanium-field"><label>اسم المشروع</label><Input value={projectName} onChange={event => setProjectName(event.target.value)} placeholder="مثال: افتتاح فرع جديد" /></div><Button onClick={async () => { if (await mutate({ action:"add_project", name:projectName }, "تمت إضافة المشروع")) { setProjectName(""); setProjectOpen(false); } }}>إضافة المشروع</Button></div></DialogContent></Dialog>}
           <Button variant="secondary" onClick={() => setActivityOpen(true)}><History /> النشاط</Button>
           {isAdmin && <Button variant="secondary" onClick={() => setUsersOpen(true)}><UserCog /> المستخدمون</Button>}
-          {!whatsappLogin && <Button variant="secondary" onClick={() => setChangePinOpen(true)}><KeyRound /> الكود</Button>}
+          <Button variant="secondary" onClick={() => setChangePinOpen(true)}><KeyRound /> الكود</Button>
           <Button variant="secondary" onClick={logout}><LogOut /> {currentUser.name}</Button>
         </div>}
       </div>
@@ -384,8 +367,8 @@ export default function Dashboard() {
     <Dialog open={Boolean(rejectProject)} onOpenChange={open=>{if(!open)setRejectProject(null);}}><DialogContent dir="rtl"><DialogHeader className="text-right"><DialogTitle>رفض المشروع</DialogTitle><DialogDescription>{rejectProject?.name}</DialogDescription></DialogHeader><div className="titanium-field"><label>سبب الرفض</label><Textarea value={projectRejectReason} onChange={event=>setProjectRejectReason(event.target.value)} /></div><Button variant="destructive" onClick={async()=>{if(rejectProject&&await mutate({action:"reject_project",projectId:rejectProject.id,reason:projectRejectReason},"تم رفض المشروع"))setRejectProject(null);}}>تأكيد الرفض</Button></DialogContent></Dialog>
     <AlertDialog open={Boolean(deleteTask)} onOpenChange={open=>{if(!open)setDeleteTask(null);}}><AlertDialogContent dir="rtl"><AlertDialogHeader><AlertDialogTitle>حذف المهمة نهائياً؟</AlertDialogTitle><AlertDialogDescription>سيتم حذف المهمة وتعليقاتها وملفاتها. لا يمكن التراجع عن هذه العملية. يمكنك استخدام الأرشفة بدلاً منها.</AlertDialogDescription></AlertDialogHeader><AlertDialogFooter><AlertDialogCancel>إلغاء</AlertDialogCancel><AlertDialogAction onClick={async()=>{if(deleteTask&&await mutate({action:"delete_task",taskId:deleteTask.id},"تم حذف المهمة نهائياً"))setDeleteTask(null);}}>حذف نهائي</AlertDialogAction></AlertDialogFooter></AlertDialogContent></AlertDialog>
 
-    <Dialog open={usersOpen} onOpenChange={setUsersOpen}><DialogContent dir="rtl" className="titanium-wide-dialog"><DialogHeader className="text-right"><DialogTitle>{whatsappLogin ? "إدارة المستخدمين" : "إدارة المستخدمين والأكواد"}</DialogTitle><DialogDescription>باسم هو المدير الوحيد. أعضاء الفريق يستلمون مهامهم ويحدّثون التنفيذ فقط.</DialogDescription></DialogHeader>{whatsappLogin && <p className="titanium-dialog-note">الدخول برمز مؤقت يُرسل إلى رقم واتساب المسجّل للموظف. إضافة اسم جديد هنا لا تربطه برقم؛ يلزم تسجيل رقمه في إعدادات الدخول الخاصة.</p>}<div className="titanium-user-add"><Input value={userName} onChange={event=>setUserName(event.target.value)} placeholder="اسم المستخدم الجديد" /><Button onClick={async()=>{if(await mutate({action:"add_user",name:userName},"تمت إضافة المستخدم")){setUserName("");}}}><Plus /> إضافة عضو</Button></div><div className="titanium-users-list">{data.users.map(user=><div className={`titanium-user-row${whatsappLogin?" titanium-user-row-whatsapp":""}${user.active?"":" inactive"}`} key={user.id}><div><strong>{user.name}</strong><span>{user.id==="basem"?"المدير الوحيد":whatsappLogin?"عضو · الدخول برمز واتساب":user.pinSet?"عضو · الكود مضبوط":"عضو · بحاجة لكود"}</span></div><Button size="sm" variant={user.active?"outline":"secondary"} disabled={user.id==="basem"} onClick={()=>mutate({action:"update_user",userId:user.id,role:user.role,active:!user.active},user.active?"تم إيقاف المستخدم":"تم تفعيل المستخدم")}>{user.active?"إيقاف":"تفعيل"}</Button>{!whatsappLogin && <><Input type="password" inputMode="numeric" value={userPins[user.id]||""} onChange={event=>setUserPins(current=>({...current,[user.id]:event.target.value}))} placeholder="كود جديد" /><Button size="sm" onClick={async()=>{if(await mutate({action:"set_user_pin",userId:user.id,pin:userPins[user.id]||""},`تم تغيير كود ${user.name}`))setUserPins(current=>({...current,[user.id]:""}));}}><KeyRound /> حفظ الكود</Button></>}</div>)}</div></DialogContent></Dialog>
-    {!whatsappLogin && <Dialog open={changePinOpen} onOpenChange={setChangePinOpen}><DialogContent dir="rtl"><DialogHeader className="text-right"><DialogTitle>تغيير كودي</DialogTitle><DialogDescription>اكتب الكود الحالي ثم الكود الجديد من 4 إلى 8 أرقام.</DialogDescription></DialogHeader><div className="titanium-dialog-grid"><Input type="password" inputMode="numeric" value={oldPin} onChange={event=>setOldPin(event.target.value)} placeholder="الكود الحالي" /><Input type="password" inputMode="numeric" value={newPin} onChange={event=>setNewPin(event.target.value)} placeholder="الكود الجديد" /><Button onClick={async()=>{if(await mutate({action:"change_own_pin",oldPin,newPin},"تم تغيير الكود")){setOldPin("");setNewPin("");setChangePinOpen(false);}}}>حفظ الكود الجديد</Button></div></DialogContent></Dialog>}
+    <Dialog open={usersOpen} onOpenChange={setUsersOpen}><DialogContent dir="rtl" className="titanium-wide-dialog"><DialogHeader className="text-right"><DialogTitle>إدارة المستخدمين والأكواد</DialogTitle><DialogDescription>باسم هو المدير الوحيد. أعضاء الفريق يستلمون مهامهم ويحدّثون التنفيذ فقط.</DialogDescription></DialogHeader><div className="titanium-user-add"><Input value={userName} onChange={event=>setUserName(event.target.value)} placeholder="اسم المستخدم الجديد" /><Button onClick={async()=>{if(await mutate({action:"add_user",name:userName},"تمت إضافة المستخدم")){setUserName("");}}}><Plus /> إضافة عضو</Button></div><div className="titanium-users-list">{data.users.map(user=><div className={`titanium-user-row${user.active?"":" inactive"}`} key={user.id}><div><strong>{user.name}</strong><span>{user.id==="basem"?"المدير الوحيد":user.pinSet?"عضو · الكود مضبوط":"عضو · بحاجة لكود"}</span></div><Button size="sm" variant={user.active?"outline":"secondary"} disabled={user.id==="basem"} onClick={()=>mutate({action:"update_user",userId:user.id,role:user.role,active:!user.active},user.active?"تم إيقاف المستخدم":"تم تفعيل المستخدم")}>{user.active?"إيقاف":"تفعيل"}</Button><Input type="password" inputMode="numeric" value={userPins[user.id]||""} onChange={event=>setUserPins(current=>({...current,[user.id]:event.target.value}))} placeholder="كود جديد" /><Button size="sm" onClick={async()=>{if(await mutate({action:"set_user_pin",userId:user.id,pin:userPins[user.id]||""},`تم تغيير كود ${user.name}`))setUserPins(current=>({...current,[user.id]:""}));}}><KeyRound /> حفظ الكود</Button></div>)}</div></DialogContent></Dialog>
+    <Dialog open={changePinOpen} onOpenChange={setChangePinOpen}><DialogContent dir="rtl"><DialogHeader className="text-right"><DialogTitle>تغيير كودي</DialogTitle><DialogDescription>اكتب الكود الحالي ثم الكود الجديد من 4 إلى 8 أرقام.</DialogDescription></DialogHeader><div className="titanium-dialog-grid"><Input type="password" inputMode="numeric" value={oldPin} onChange={event=>setOldPin(event.target.value)} placeholder="الكود الحالي" /><Input type="password" inputMode="numeric" value={newPin} onChange={event=>setNewPin(event.target.value)} placeholder="الكود الجديد" /><Button onClick={async()=>{if(await mutate({action:"change_own_pin",oldPin,newPin},"تم تغيير الكود")){setOldPin("");setNewPin("");setChangePinOpen(false);}}}>حفظ الكود الجديد</Button></div></DialogContent></Dialog>
     <Dialog open={activityOpen} onOpenChange={setActivityOpen}><DialogContent dir="rtl" className="titanium-wide-dialog"><DialogHeader className="text-right"><DialogTitle>سجل النشاط المتاح لك</DialogTitle><DialogDescription>صاحب التغيير وتوقيته، وتفاصيل طلب السكرتير وتأكيده بحسب صلاحياتك.</DialogDescription></DialogHeader><div className="titanium-activity-list">{data.activity.length===0?<div className="titanium-empty">لا يوجد نشاط مسجل بعد.</div>:data.activity.map(item=><SecretaryActivity key={item.id} activity={item} viewer={currentUser} target={secretaryActivityTarget(item,currentUser,data.projects,data.tasks)} onOpen={openSecretaryTarget} />)}</div></DialogContent></Dialog>
   </main>;
 }

@@ -14,7 +14,7 @@ const botNumber = '15551234568';
 const member = '15551234567';
 const flush = () => new Promise(resolve => setImmediate(resolve));
 
-function harness(t, { paired = true, ownNumber = botNumber, allowPairing = false, otpQueue,
+function harness(t, { paired = true, ownNumber = botNumber, allowPairing = false,
   isActiveNumber = number => number === member, control, secretaryJobs, secretaryOutbox } = {}) {
   if (secretaryOutbox && typeof secretaryOutbox.recordTransportUpdate !== 'function') secretaryOutbox.recordTransportUpdate = () => ({ status: 'recorded' });
   const directory = mkdtempSync(path.join(os.tmpdir(), 'titanium-bridge-runtime-test-'));
@@ -37,7 +37,7 @@ function harness(t, { paired = true, ownNumber = botNumber, allowPairing = false
     clearInterval(job) { if (job) job.cleared = true; },
   };
   const runtime = createBridgeRuntime({
-    ...baileys, config, store, auth, logger, now: () => clock, timers, otpQueue, isActiveNumber, control, secretaryJobs, secretaryOutbox,
+    ...baileys, config, store, auth, logger, now: () => clock, timers, isActiveNumber, control, secretaryJobs, secretaryOutbox,
     makeWASocket(options) {
       // Never call the actual Baileys factory. Every network-capable method is mocked.
       const socket = { options, ev: new EventEmitter(), ws: new EventEmitter(), authState: options.auth, pairCalls: [], endCalls: 0,
@@ -136,43 +136,7 @@ test('installed Baileys exports and real auth serialization are compatible witho
   assert.equal(h.sockets.length, 0);
 });
 
-test('OTP sends to allowlisted private phone only after account verification and logs no code', async t => {
-  let calls = 0;
-  const h = harness(t, { otpQueue: { async deliverNext(send) {
-    calls++;
-    await send({ to: member, code: '012345', challengeId: 'synthetic-challenge', expiresAt: clock + 300000, signal: new AbortController().signal });
-    return { status: 'sent' };
-  } } });
-  await h.runtime.start();
-  const sent = [];
-  h.sockets[0].sendMessage = async (...args) => sent.push(args);
-  h.intervals[0].fn(); await flush();
-  assert.equal(calls, 0);
-  h.sockets[0].ev.emit('connection.update', { connection: 'open' }); await flush();
-  h.intervals[0].fn(); await flush();
-  assert.equal(calls, 1);
-  assert.equal(sent[0][0], `${member}@s.whatsapp.net`);
-  assert.match(sent[0][1].text, /012345/);
-  assert.doesNotMatch(h.output.join('\n'), /012345|15551234567/);
-  assert.match(h.output.join('\n'), /Titanium login delivery: sent/);
-});
-
-test('OTP refuses groups, unregistered phones, expired code and shutdown', async t => {
-  const h = harness(t, { otpQueue: { async deliverNext(send) {
-    for (const override of [{ to: '120363000@g.us' }, { to: '15559999999' }, { expiresAt: clock }, { code: 'bad' }]) {
-      await assert.rejects(() => send({ to: member, code: '012345', challengeId: 'test', expiresAt: clock + 300000,
-        signal: new AbortController().signal, ...override }));
-    }
-    return { status: 'failed' };
-  } } });
-  await h.runtime.start();
-  h.sockets[0].ev.emit('connection.update', { connection: 'open' }); await flush();
-  h.intervals[0].fn(); await flush();
-  assert.deepEqual(h.stopped, []);
-  assert.match(h.output.join('\n'), /Titanium login delivery: failed/);
-});
-
-test('scheduled secretary jobs keep private recipients allowlisted and abort hung sends without stopping OTP runtime', async t => {
+test('scheduled secretary jobs keep private recipients allowlisted and abort hung sends without stopping the runtime', async t => {
   const controller = new AbortController();
   let attempted = false;
   const h = harness(t, { secretaryJobs: { async deliverNext(send) {
@@ -212,19 +176,13 @@ test('scheduled group delivery checks latest membership and never uses an outsid
   assert.deepEqual(h.stopped, []);
 });
 
-test('OTP has priority over secretary jobs and disabled task automation pauses secretary jobs', async t => {
+test('disabled task automation pauses secretary jobs', async t => {
   let jobs = 0;
-  const h = harness(t, { otpQueue: { deliverNext: async () => ({ status: 'sent' }) },
-    secretaryJobs: { deliverNext: async () => { jobs++; return { status: 'idle' }; } } });
+  const h = harness(t, { secretaryJobs: { deliverNext: async () => { jobs++; return { status: 'idle' }; } } });
+  h.config.tasksEnabled = false;
   await h.runtime.start();
   h.sockets[0].ev.emit('connection.update', { connection: 'open' }); await flush();
   h.intervals[0].fn(); await flush();
-  assert.equal(jobs, 0);
-  const second = harness(t, { secretaryJobs: { deliverNext: async () => { jobs++; return { status: 'idle' }; } } });
-  second.config.tasksEnabled = false;
-  await second.runtime.start();
-  second.sockets[0].ev.emit('connection.update', { connection: 'open' }); await flush();
-  second.intervals[0].fn(); await flush();
   assert.equal(jobs, 0);
 });
 
@@ -310,12 +268,12 @@ test('private outbox rechecks connection and allowlist after asynchronous accoun
   assert.deepEqual(h.stopped, []);
 });
 
-test('aborted ambiguous outbox delivery does not hang or tear down subsequent OTP delivery', async t => {
+test('aborted ambiguous outbox delivery does not hang or tear down subsequent secretary job delivery', async t => {
   const controller = new AbortController();
-  let otpReady = false;
-  const h = harness(t, { otpQueue: { async deliverNext(send) {
-    if (!otpReady) return { status: 'idle' };
-    await send({ to: member, code: '012345', challengeId: 'synthetic', expiresAt: clock + 300000, signal: new AbortController().signal });
+  let reminderReady = false;
+  const h = harness(t, { secretaryJobs: { async deliverNext(send) {
+    if (!reminderReady) return { status: 'idle' };
+    await send({ to: member, text: 'PRIVATE_REMINDER', messageId: 'REMINDER_SAFE_ID', signal: new AbortController().signal });
     return { status: 'sent' };
   } }, secretaryOutbox: { async deliverNext(send) {
     await assert.rejects(() => send({ to: `${member}@s.whatsapp.net`, text: 'SYNTHETIC_HUNG_SEND', messageId: 'TITANIUMOUT_HUNG', signal: controller.signal }));
@@ -332,25 +290,21 @@ test('aborted ambiguous outbox delivery does not hang or tear down subsequent OT
   };
   h.intervals[0].fn(); await flush(); await flush();
   assert.match(h.output.join('\n'), /outbox: uncertain/);
-  otpReady = true;
+  reminderReady = true;
   h.intervals[0].fn(); await flush(); await flush();
   assert.equal(sent.length, 1);
-  assert.match(sent[0][1].text, /012345/);
+  assert.match(sent[0][1].text, /PRIVATE_REMINDER/);
   assert.deepEqual(h.stopped, []);
-  assert.doesNotMatch(h.output.join('\n'), /012345|SYNTHETIC_HUNG_SEND/);
+  assert.doesNotMatch(h.output.join('\n'), /SYNTHETIC_HUNG_SEND/);
 });
 
-test('OTP stays first while inbox replies, outbox and reminders take fair turns under sustained backlogs', async t => {
-  let otpPending = true;
+test('inbox replies, outbox and reminders take fair alternating turns under sustained backlogs', async t => {
   const order = [];
   const job = text => { let sequence = 0; return { async deliverNext(send) {
     await send({ to: `${member}@s.whatsapp.net`, text, messageId: `SYNTHETIC_${text}_${++sequence}`, signal: new AbortController().signal });
     return { status: text === 'OUTBOX' ? 'submitted' : 'sent' };
   } }; };
-  const h = harness(t, { otpQueue: { async deliverNext() {
-    if (!otpPending) return { status: 'idle' };
-    otpPending = false; order.push('OTP'); return { status: 'sent' };
-  } }, secretaryOutbox: job('OUTBOX'), secretaryJobs: job('REMINDER') });
+  const h = harness(t, { secretaryOutbox: job('OUTBOX'), secretaryJobs: job('REMINDER') });
   await h.runtime.start();
   const socket = h.sockets[0];
   socket.ev.emit('connection.update', { connection: 'open' }); await flush();
@@ -365,8 +319,8 @@ test('OTP stays first while inbox replies, outbox and reminders take fair turns 
     const row = h.store.db.prepare("SELECT id FROM inbox WHERE json_extract(raw_body,'$.messageId')=?").get(messageId);
     h.store.backendResult(row.id, { status: 'summary', reply: 'INBOX' });
   }
-  for (let tick = 0; tick < 7; tick++) { h.intervals[0].fn(); await flush(); await flush(); }
-  assert.deepEqual(order, ['OTP', 'INBOX', 'OUTBOX', 'INBOX', 'REMINDER', 'INBOX', 'OUTBOX']);
+  for (let tick = 0; tick < 6; tick++) { h.intervals[0].fn(); await flush(); await flush(); }
+  assert.deepEqual(order, ['INBOX', 'OUTBOX', 'INBOX', 'REMINDER', 'INBOX', 'OUTBOX']);
   assert.deepEqual(h.stopped, []);
 });
 

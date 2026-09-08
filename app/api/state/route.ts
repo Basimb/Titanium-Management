@@ -13,7 +13,6 @@ import {
 } from "@/lib/titanium-server";
 import { notifyManagementGroup, taskNotification } from "@/lib/whatsapp";
 import { readTeamChatSettings } from "@/lib/team-chat-settings";
-import { whatsappLoginSettings } from "@/lib/whatsapp-login-settings";
 import { executeManagementAction, getManagementSnapshot, isManagementAction, ManagementActionError, parseManagementCommand } from "@/lib/management-actions";
 import { listApprovals, decideApproval } from "@/lib/approvals";
 import { activeRules } from "@/lib/rules";
@@ -156,7 +155,6 @@ export async function POST(request: Request) {
       if (!active) await db().prepare("DELETE FROM sessions WHERE user_id = ?").bind(userId).run();
       await audit(user, "edit", "user", userId, `حدّث صلاحيات المستخدم ${target.name}`);
     } else if (action === "set_user_pin") {
-      if (whatsappLoginSettings(readTeamChatSettings()).replacePin) return privateJson({ error: "الدخول الآن برمز واتساب؛ أكواد PIN معطّلة" }, { status: 410 });
       const denied = requireAdmin(user); if (denied) return denied;
       const userId = text(body.userId); const pin = body.pin;
       if (!validPin(pin)) return bad("الكود يجب أن يكون من 4 إلى 8 أرقام");
@@ -166,7 +164,6 @@ export async function POST(request: Request) {
       if (userId !== user.id) await db().prepare("DELETE FROM sessions WHERE user_id = ?").bind(userId).run();
       await audit(user, "pin_reset", "user", userId, `غيّر كود المستخدم ${target.name}`);
     } else if (action === "change_own_pin") {
-      if (whatsappLoginSettings(readTeamChatSettings()).replacePin) return privateJson({ error: "الدخول الآن برمز واتساب؛ أكواد PIN معطّلة" }, { status: 410 });
       const oldPin = text(body.oldPin); const newPin = body.newPin;
       if (!validPin(newPin)) return bad("الكود الجديد يجب أن يكون من 4 إلى 8 أرقام");
       const record = await db().prepare("SELECT pin_salt AS pinSalt, pin_hash AS pinHash FROM users WHERE id = ?").bind(user.id).first<{pinSalt:string|null;pinHash:string|null}>();

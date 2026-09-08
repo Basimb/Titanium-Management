@@ -353,6 +353,6 @@ test("state route uses the shared engine/snapshot and preserves private response
   assert.ok(!source.includes("UPDATE tasks SET") && !source.includes("DELETE FROM tasks"));
   assert.match(source, /result\.deletedObjectKeys\.map/);
   assert.match(source, /private, no-store, no-cache/);
-  assert.equal((source.match(/whatsappLoginSettings\(readTeamChatSettings\(\)\)\.replacePin/g) ?? []).length, 2);
+  assert.doesNotMatch(source, /whatsappLoginSettings|whatsapp-login-settings/);
   assert.match(source, /entity_type = 'project' LIMIT 1/);
 });

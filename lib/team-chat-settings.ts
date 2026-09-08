@@ -2,6 +2,12 @@ import { closeSync, constants, fstatSync, lstatSync, openSync, readSync, type St
 import path from "node:path";
 
 const MAX_SETTINGS_BYTES = 32_768;
+// WHATSAPP_LOGIN_ENABLED/SECRET/DATABASE/ORIGIN are no longer read by any dashboard
+// login code (the WhatsApp-OTP login feature was removed). They stay in this
+// allowlist only so an existing private settings file that still carries them keeps
+// parsing -- an unknown key throws below. WHATSAPP_LOGIN_DATABASE's value is also
+// still consumed directly by the bridge launcher (see launch-private.mjs) to derive
+// TEAM_CHAT_AUTH_DATABASE, which is unrelated secretary/task-authorization plumbing.
 const ALLOWED_KEYS = ["TEAM_CHAT_ENABLED", "TEAM_CHAT_SHARED_KEY", "TEAM_CHAT_CONTACTS_JSON", "TEAM_CHAT_GROUP_IDS_JSON", "GROQ_API_KEY", "GROQ_MODEL", "OPENAI_API_KEY", "OPENAI_MODEL", "OPENAI_SEARCH_MODEL",
   "WHATSAPP_LOGIN_ENABLED", "WHATSAPP_LOGIN_SECRET", "WHATSAPP_LOGIN_DATABASE", "WHATSAPP_LOGIN_ORIGIN", "SECRETARY_ENABLED", "SECRETARY_WEB_ENABLED", "SECRETARY_VOICE_ENABLED", "SECRETARY_FOLLOWUP_ENABLED", "TITANIUM_PUBLIC_URL", "DASHBOARD_READONLY",
   "ODOO_REPORT_ENABLED", "ODOO_URL", "ODOO_DB", "ODOO_USERNAME", "ODOO_API_KEY", "ODOO_LOW_STOCK_THRESHOLD", "ODOO_CURRENCY_LABEL", "ODOO_REPORT_DAILY_HOUR", "ODOO_REPORT_WEEKLY_DAY", "ODOO_REPORT_WEEKLY_HOUR"];
