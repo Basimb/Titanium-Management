@@ -18,6 +18,11 @@ const SELECT = "SELECT id,type,status,requested_by AS requestedBy,requested_by_n
 const TYPE_LABEL: Record<ApprovalType, string> = { deadline_extension: "تمديد موعد", task_close: "اعتماد إغلاق مهمة", task_ownership: "طلب مسؤولية مهمة", task_transfer: "طلب تحويل مهمة", task_create: "فتح مهمة", project_create: "فتح مشروع", project_close: "اعتماد إغلاق مشروع", rule: "اعتماد قاعدة", policy: "اعتماد سياسة" };
 const PRIORITY_ARABIC: Record<string, string> = { red: "🔴 عاجلة", yellow: "🟡 متوسطة", green: "🟢 عادية" };
 export const APPROVAL_TTL_MS = 14 * 24 * 60 * 60_000;
+// Every approval request DM ends with this same explicit 🟢/🔴 choice, so
+// whether Basim is looking at a single request the moment it's filed or
+// several at once via formatPendingList/the ambiguous-candidates clarify
+// above, "how do I answer this" always looks and reads the same way.
+const APPROVAL_CHOICE_HINT = "\n\n🟢 اعتماد: اكتب «اعتمد»\n🔴 رفض: اكتب «ارفض»";
 
 function hydrate(row: Record<string, unknown>): Approval {
   let payload: Record<string, unknown> = {};
@@ -94,7 +99,7 @@ export function requestDeadlineExtension(db: DatabaseSync, claimed: ManagementAc
   const reason = text(input.reason, "سبب التمديد", 1000);
   const summary = `تمديد «${task.title}» من ${task.dueDate ?? "بدون موعد"} إلى ${newDueDate}`;
   const approval = insert(db, actor, { type: "deadline_extension", entityType: "task", entityId: task.id, summary, payload: { oldDueDate: task.dueDate, newDueDate, reason, taskTitle: task.title, expectedUpdatedAt: task.updatedAt } }, now(options));
-  const ownerMessage = `${actor.name} طلب تمديد مهمة «${task.title}»\nالموعد السابق: ${task.dueDate ?? "غير محدد"}\nالموعد المقترح: ${newDueDate}\nالسبب: ${reason}\n\nأوافق؟ (اعتمد / ارفض)`;
+  const ownerMessage = `${actor.name} طلب تمديد مهمة «${task.title}»\nالموعد السابق: ${task.dueDate ?? "غير محدد"}\nالموعد المقترح: ${newDueDate}\nالسبب: ${reason}${APPROVAL_CHOICE_HINT}`;
   return { approval, ownerMessage };
 }
 
@@ -109,7 +114,7 @@ export function requestTaskClose(db: DatabaseSync, claimed: ManagementActor, inp
   const effect = task.status === "approval" ? null : executeManagementAction(db, actor, { action: "submit", taskId: task.id }, { now: at, source: "approval" });
   const summary = `إغلاق «${task.title}»`;
   const approval = insert(db, actor, { type: "task_close", entityType: "task", entityId: task.id, summary, payload: { result, taskTitle: task.title } }, at);
-  const ownerMessage = `${actor.name} يقول إن مهمة «${task.title}» انتهت.\nالنتيجة: ${result}\n\nهل تعتمد الإغلاق؟ (اعتمد / ارفض مع السبب)`;
+  const ownerMessage = `${actor.name} يقول إن مهمة «${task.title}» انتهت.\nالنتيجة: ${result}${APPROVAL_CHOICE_HINT}\n(لو رفضت، اذكر السبب)`;
   return { approval, ownerMessage, effect: effect ?? { ok: true, action: "submit", entityType: "task", entityId: task.id, message: "المهمة بانتظار الاعتماد", deletedObjectKeys: [] } };
 }
 
@@ -125,7 +130,7 @@ export function requestTaskOwnership(db: DatabaseSync, claimed: ManagementActor,
   const reason = text(input.reason, "سبب الطلب", 1000, true);
   const summary = `${actor.name} يطلب مسؤولية «${task.title}»`;
   const approval = insert(db, actor, { type: "task_ownership", entityType: "task", entityId: task.id, summary, payload: { taskTitle: task.title, requestedOwnerId: actor.id, requestedOwnerName: actor.name, previousOwner: task.owner, previousSuggestedOwner: task.suggestedOwner, expectedUpdatedAt: task.updatedAt, reason } }, now(options));
-  return { approval, ownerMessage: `${summary}${task.owner || task.suggestedOwner ? `\nالمسؤول الحالي: ${task.owner || task.suggestedOwner}` : "\nالمهمة غير معيّنة حاليًا"}${reason ? `\nالسبب: ${reason}` : ""}\n\nهل تعتمد نقل المسؤولية له؟` };
+  return { approval, ownerMessage: `${summary}${task.owner || task.suggestedOwner ? `\nالمسؤول الحالي: ${task.owner || task.suggestedOwner}` : "\nالمهمة غير معيّنة حاليًا"}${reason ? `\nالسبب: ${reason}` : ""}${APPROVAL_CHOICE_HINT}` };
 }
 
 /** Employee holding a task hands it to a named colleague, or declines it outright
@@ -150,8 +155,8 @@ export function requestTaskTransfer(db: DatabaseSync, claimed: ManagementActor, 
   const approval = insert(db, actor, { type: "task_transfer", entityType: "task", entityId: task.id,
     summary, payload: { taskTitle: task.title, fromOwnerId: actor.id, fromOwnerName: actor.name, suggestedOwnerId, suggestedOwnerName, reason, expectedUpdatedAt: task.updatedAt } }, now(options));
   const ownerMessage = suggestedOwnerName
-    ? `${actor.name} بده يحوّل مهمة «${task.title}» إلى ${suggestedOwnerName}${reason ? `\nالسبب: ${reason}` : ""}\n\nهل تعتمد التحويل؟`
-    : `${actor.name} يقول إن مهمة «${task.title}» مش مسؤوليته${reason ? `\nالسبب: ${reason}` : ""}\n\nاعتماد الطلب بيشيلها عنه بانتظار تعيين مسؤول جديد. تعتمد؟`;
+    ? `${actor.name} بده يحوّل مهمة «${task.title}» إلى ${suggestedOwnerName}${reason ? `\nالسبب: ${reason}` : ""}${APPROVAL_CHOICE_HINT}`
+    : `${actor.name} يقول إن مهمة «${task.title}» مش مسؤوليته${reason ? `\nالسبب: ${reason}` : ""}\nاعتماد الطلب بيشيلها عنه بانتظار تعيين مسؤول جديد.${APPROVAL_CHOICE_HINT}`;
   return { approval, ownerMessage };
 }
 
@@ -171,7 +176,7 @@ export function requestProjectClose(db: DatabaseSync, claimed: ManagementActor, 
   const openTasks = (db.prepare("SELECT count(*) AS n FROM tasks WHERE project_id=? AND archived_at IS NULL AND status!='completed'").get(project.id) as { n: number }).n;
   const summary = `إغلاق مشروع «${project.name}»`;
   const approval = insert(db, actor, { type: "project_close", entityType: "project", entityId: project.id, summary, payload: { projectName: project.name, reason, openTasks } }, now(options));
-  const ownerMessage = `${actor.name} يطلب إغلاق مشروع «${project.name}»${reason ? `\nالسبب: ${reason}` : ""}${openTasks ? `\n⚠️ لسا فيه ${taskCountPhrase(openTasks)} مفتوحة بالمشروع.` : "\nكل مهام المشروع منتهية."}\n\nهل تعتمد الإغلاق؟`;
+  const ownerMessage = `${actor.name} يطلب إغلاق مشروع «${project.name}»${reason ? `\nالسبب: ${reason}` : ""}${openTasks ? `\n⚠️ لسا فيه ${taskCountPhrase(openTasks)} مفتوحة بالمشروع.` : "\nكل مهام المشروع منتهية."}${APPROVAL_CHOICE_HINT}`;
   return { approval, ownerMessage };
 }
 
@@ -185,7 +190,7 @@ export function requestProjectCreate(db: DatabaseSync, claimed: ManagementActor,
   const summary = `فتح مشروع «${name}»${tasks.length ? ` مع ${taskCountPhrase(tasks.length)}` : ""}`;
   const approval = insert(db, actor, { type: "project_create", entityType: "project", entityId: null, summary, payload: { name, goal, tasks } }, now(options));
   const lines = tasks.map((task, index) => `${index + 1}. ${task.title}${task.ownerId ? ` — ${task.ownerId}` : ""} — ${task.priority}${task.dueDate ? ` — ${task.dueDate}` : ""}`);
-  const ownerMessage = `${actor.name} يقترح فتح مشروع «${name}»${goal ? `\nالهدف: ${goal}` : ""}${lines.length ? `\nالمهام:\n${lines.join("\n")}` : ""}\n\nأعتمد الإنشاء؟`;
+  const ownerMessage = `${actor.name} يقترح فتح مشروع «${name}»${goal ? `\nالهدف: ${goal}` : ""}${lines.length ? `\nالمهام:\n${lines.join("\n")}` : ""}${APPROVAL_CHOICE_HINT}`;
   return { approval, ownerMessage };
 }
 
@@ -207,7 +212,7 @@ export function requestTaskCreate(db: DatabaseSync, claimed: ManagementActor, in
   const summary = `فتح مهمة «${title}» بمشروع «${project.name}»`;
   const approval = insert(db, actor, { type: "task_create", entityType: "task", entityId: null, summary,
     payload: { projectId: project.id, projectName: project.name, title, details, priority: input.priority, dueDate, ownerId, ownerName } }, now(options));
-  const ownerMessage = `${actor.name} يقترح فتح مهمة «${title}» بمشروع «${project.name}»${details ? `\nالتفاصيل: ${details}` : ""}\nالمسؤول: ${ownerName}\nالأولوية: ${PRIORITY_ARABIC[input.priority]}\nالموعد: ${dueDate ?? "بدون موعد"}\n\nأعتمد الإنشاء؟ تقدر كمان تصحح قبل ما توافق، مثلاً: «اعتمد بس خلها حمراء ومدتها يومين».`;
+  const ownerMessage = `${actor.name} يقترح فتح مهمة «${title}» بمشروع «${project.name}»${details ? `\nالتفاصيل: ${details}` : ""}\nالمسؤول: ${ownerName}\nالأولوية: ${PRIORITY_ARABIC[input.priority]}\nالموعد: ${dueDate ?? "بدون موعد"}${APPROVAL_CHOICE_HINT}\n(تقدر كمان تصحح قبل ما توافق، مثلاً: «اعتمد بس خلها حمراء ومدتها يومين»)`;
   return { approval, ownerMessage };
 }
 
@@ -238,7 +243,7 @@ export function requestRule(db: DatabaseSync, claimed: ManagementActor, input: {
   const actor = resolveManagementActor(db, claimed);
   const statement = text(input.statement, "نص القاعدة", 1000);
   const approval = insert(db, actor, { type: input.kind === "policy" ? "policy" : "rule", entityType: "rule", entityId: null, summary: statement, payload: { kind: input.kind, statement, match: input.match ?? {}, effect: input.effect ?? {} } }, now(options));
-  return { approval, ownerMessage: `اقتراح قاعدة:\n${statement}\n\nأعتمدها؟` };
+  return { approval, ownerMessage: `اقتراح قاعدة:\n${statement}${APPROVAL_CHOICE_HINT}` };
 }
 
 /** Owner decides. The effect is applied through the same audited action engine. */
@@ -359,9 +364,23 @@ export function findPendingApproval(db: DatabaseSync, claimed: ManagementActor, 
   return { approval: candidates.length === 1 ? candidates[0] : null, candidates };
 }
 
+// Basim asked for this after WhatsApp screenshots showed several unrelated
+// pending requests crammed into one plain numbered list with no visual
+// separation -- on a phone screen he could not tell where one request's
+// details ended and the next began, and had no explicit per-item action to
+// type. Each request now gets its own block (number, type/summary/requester,
+// then an explicit 🟢 approve / 🔴 reject line naming that exact number),
+// and multiple requests are separated by a full blank line between blocks --
+// shared by every place that lists more than one pending request so the
+// format stays one convention everywhere, not just here.
+export function formatApprovalChoice(approval: Approval, index: number): string {
+  const number = index + 1;
+  return `${number}. ${TYPE_LABEL[approval.type]} — ${approval.summary} (${approval.requestedByName})\n🟢 اعتماد: اكتب «اعتمد ${number}»\n🔴 رفض: اكتب «ارفض ${number}»`;
+}
 export function formatPendingList(approvals: Approval[]): string {
   if (!approvals.length) return "لا يوجد شيء بانتظار قرارك حاليًا.";
-  return `عندك ${approvals.length} ${approvals.length === 1 ? "طلب" : "طلبات"} بانتظار قرارك:\n${approvals.map((approval, index) => `${index + 1}. ${TYPE_LABEL[approval.type]} — ${approval.summary} (${approval.requestedByName})`).join("\n")}\n\nقل مثلًا: «اعتمد الأول» أو «ارفض تمديد خالد، السبب...»`;
+  if (approvals.length === 1) return `عندك طلب واحد بانتظار قرارك:\n\n${formatApprovalChoice(approvals[0], 0)}`;
+  return `عندك ${approvals.length} طلبات بانتظار قرارك:\n\n${approvals.map((approval, index) => formatApprovalChoice(approval, index)).join("\n\n")}\n\nاختر رقم الطلب، أو قل «اعتمد الكل» أو «ارفض الكل».`;
 }
 
 /** Expire stale requests and return those that deserve an owner nudge. */

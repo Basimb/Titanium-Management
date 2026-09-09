@@ -4,7 +4,7 @@
  * files durable approvals, and never mutates without the action engine.
  */
 import type { DatabaseSync } from "node:sqlite";
-import { decideApproval, findPendingApproval, formatPendingList, listApprovals, patchTaskCreateApproval, requestDeadlineExtension, requestProjectClose, requestProjectCreate, requestTaskClose, requestTaskOwnership, requestTaskTransfer, approvalTypeLabel, type Approval } from "./approvals.ts";
+import { decideApproval, findPendingApproval, formatApprovalChoice, formatPendingList, listApprovals, patchTaskCreateApproval, requestDeadlineExtension, requestProjectClose, requestProjectCreate, requestTaskClose, requestTaskOwnership, requestTaskTransfer, approvalTypeLabel, type Approval } from "./approvals.ts";
 import { executeManagementAction, ManagementActionError, type ManagementActor } from "./management-actions.ts";
 import { addKnowledge, formatKnowledgeHits, searchKnowledge } from "./knowledge.ts";
 import { activeRules, formatRules, policyViolations, proposeRuleFromStatement, recordCorrection, suggestOwner } from "./rules.ts";
@@ -142,7 +142,10 @@ export function handleAgentIntent(plan: SecretaryIntent, ctx: AgentContext): Age
           const requester = ctx.users.find(user => combined.includes(user.name))?.name ?? null;
           const found = findPendingApproval(db, actor, { requesterName: requester, text: combined });
           if (found.approval) target = found.approval;
-          else if (found.candidates.length > 1) return { status: "clarify", reply: `في أكثر من طلب مطابق:\n${found.candidates.map((approval, index) => `${index + 1}. ${approvalTypeLabel(approval.type)} — ${approval.summary} (${approval.requestedByName})`).join("\n")}\nقل «اعتمد الأول» أو «ارفض الكل» أو حدد الطلب.` };
+          // Same per-item 🟢/🔴 block + blank-line separation as formatPendingList
+          // (see its comment) -- this is the other place several pending
+          // requests can land in one message, and it must look the same way.
+          else if (found.candidates.length > 1) return { status: "clarify", reply: `في أكثر من طلب مطابق:\n\n${found.candidates.map((approval, index) => formatApprovalChoice(approval, index)).join("\n\n")}\n\nاختر رقم الطلب، أو قل «اعتمد الكل» أو «ارفض الكل».` };
         }
         if (!target) return { status: "clarify", reply: `ما قدرت أحدد الطلب المقصود.\n${formatPendingList(pending)}` };
         // Basim may correct a still-pending task-open request in the very
