@@ -43,21 +43,36 @@ async function createStandaloneTaskViaChat(f, overrides={}) {
   return { preview, result };
 }
 
-test('choosing "بدون مشروع" resolves the project question and previews it as the project',async t=>{
+test('an admin who never names a project is never asked -- the task opens standalone by default',async t=>{
   const f=fixture(t);
-  assert.match((await f.run(draft())).reply,/بأي مشروع/);
-  // Answering with the sentinel (what the planner emits for a typed "بدون
-  // مشروع"/"من غير مشروع" answer) resolves the project question exactly like
-  // naming a real or brand-new project would.
-  assert.match((await f.run(draft({},'no_project','continue'),{text:'بدون مشروع'})).reply,/الشغل المطلوب/);
+  // No "بأي مشروع؟" question at all, and no tappable project choices either --
+  // an unspecified project now defaults straight to "no project" for Basim/admin
+  // instead of blocking the draft on a question (see taskIntake in
+  // secretary-service.ts). He can still name a real or brand-new project any
+  // turn; that always wins over this default (see the noProjectChoice/recent
+  // project handling above it).
+  const first=await f.run(draft());
+  assert.match(first.reply,/الشغل المطلوب/);
+  assert.equal(first.choices,undefined,'no project choices are offered since the question never comes up');
   assert.match((await f.run(draft({title:complete.title},null,'continue'),{text:complete.title})).reply,/مين بدك/);
   assert.match((await f.run(draft({ownerId:'member'},null,'continue'),{text:'لخالد'})).reply,/أولويتها/);
   assert.match((await f.run(draft({priority:'red'},null,'continue'),{text:'حمرا'})).reply,/شو موعدها/);
   const preview=await f.run(draft({dueDate:complete.dueDate},null,'continue'),{text:complete.dueDate});
   assert.equal(preview.status,'confirmation');
-  assert.match(preview.reply,/المشروع: بدون مشروع/);
+  assert.doesNotMatch(preview.reply,/المشروع/,'no project line at all -- the concept is invisible to him');
   assert.match(preview.reply,new RegExp(complete.title));
   assert.equal(tasks(f).length,1,'nothing created before confirmation');
+});
+
+test('an admin naming a real project on the first turn still uses it instead of defaulting to standalone',async t=>{
+  const f=fixture(t);
+  const first=await f.run(draft({},'p'),{text:'ضيف مهمة على مشروع تجريبي'});
+  assert.match(first.reply,/الشغل المطلوب/);
+  const preview=await f.run(draft(complete,null,'continue'),{text:`${complete.title} لخالد حمرا ${complete.dueDate}`});
+  assert.equal(preview.status,'confirmation');
+  assert.doesNotMatch(preview.reply,/المشروع/,'project is never named in the preview even when one was picked internally');
+  const created=await f.run(undefined,{text:`موافق ${pending(f).token}`});
+  assert.equal(tasks(f).find(row=>row.id!=='existing').project_id,'p','the real project is still used under the hood');
 });
 
 test('confirming a "بدون مشروع" draft creates exactly one wrapper project and one task, with a plain single-task reply',async t=>{
@@ -67,9 +82,8 @@ test('confirming a "بدون مشروع" draft creates exactly one wrapper proje
   assert.equal(result.status,'applied');
   assert.match(result.reply,/^✅ أضفت مهمة:/);
   assert.match(result.reply,new RegExp(complete.title));
-  assert.match(result.reply,/\(بدون مشروع\)/);
-  // Reads like an ordinary single-task confirmation -- no project-announcement wording.
-  assert.doesNotMatch(result.reply,/أنشأت مشروع|مشروع جديد/);
+  // Reads like an ordinary single-task confirmation -- no project mention at all.
+  assert.doesNotMatch(result.reply,/مشروع/);
   const after=projects(f);
   assert.equal(after.length,before+1,'exactly one new project');
   const wrapper=after.find(p=>p.name==='بدون مشروع');
@@ -85,20 +99,6 @@ test('confirming a "بدون مشروع" draft creates exactly one wrapper proje
   assert.equal(created.status,'open');
   // No group notice about a new project (or anything else) for this path.
   assert.equal(outbox(f).length,0);
-});
-
-test('tapping the "بدون مشروع" choice button resolves the project question with no follow-up text',async t=>{
-  const f=fixture(t);
-  const first=await f.run(draft());
-  assert.ok(first.choices);
-  const option=first.choices.options.find(o=>o.label.includes('بدون مشروع'));
-  assert.ok(option,'a "بدون مشروع" option is offered alongside the real project list');
-  const tap=f.event({text:option.label,choice:{questionId:first.choices.id,optionId:option.id}});
-  const result=await f.execute(tap,async()=>{throw Error('a tapped choice must never invoke inference');});
-  assert.match(result.reply,/الشغل المطلوب/);
-  const saved=JSON.parse(f.db.prepare('SELECT draft_json FROM secretary_task_intake').get().draft_json);
-  assert.equal(saved.projectId,null);
-  assert.equal(saved.noProject,true);
 });
 
 test('a non-admin who reaches "بدون مشروع" gets a clear decline instead of a silent project',async t=>{

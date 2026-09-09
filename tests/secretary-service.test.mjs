@@ -77,7 +77,7 @@ test('task card colors are actual priority, never completion or lateness',()=>{
   ['red','completed',null,'🔴','قصوى'],['green','progress','2020-01-01','🟢','عادية'],['yellow','open',null,'🟡','متوسطة'],
  ]){
   const text=secretaryTaskCard({id:'t',projectId:'p',title:'مهمة',priority,status,dueDate},state,1788580000000);
-  assert.ok(text.startsWith('🔵 *مشروع*\n\n'+emoji+' مهمة'));assert.match(text,new RegExp(`الأولوية: ${label}`));
+  assert.ok(text.startsWith(emoji+' مهمة'));assert.match(text,new RegExp(`الأولوية: ${label}`));
   if(priority==='green')assert.match(text,/متأخرة عن الموعد/);
  }
  assert.ok(secretaryTaskCard({id:'t',priority:'invalid'},state,1788580000000).startsWith('⚪'));
@@ -114,7 +114,7 @@ test('priority pagination declares counts, stays bounded and preserves every tas
  let text='المهام الحمراء';const seen=new Set();let pages=0;
  for(;;){
   const r=await run(text);pages++;assert.ok(r.reply.length<=3800);assert.match(r.reply,/المطابق ضمن صلاحياتك \(دون الأرشيف\): 19/);
-  for(const match of r.reply.matchAll(/^🔴 ((?:لوحة|تجربة قائمة \d+))$/gm)){assert.ok(!seen.has(match[1]));seen.add(match[1]);}
+  for(const match of r.reply.matchAll(/^\d+\. 🔴 ((?:لوحة|تجربة قائمة \d+))$/gm)){assert.ok(!seen.has(match[1]));seen.add(match[1]);}
   const next=/للتكملة اكتب: «([^»]+)»/.exec(r.reply);if(!next)break;text=next[1];assert.ok(pages<10);
  }
  assert.equal(seen.size,19);assert.ok(pages>=2);
@@ -532,8 +532,8 @@ test('general task question recovers from inference failure with scoped live dat
  const f=fixture(t);const fail=async()=>{throw Error('provider unavailable');};
  for(const text of ['شو المهام المطلوبه','شو المهام المطلوبة؟','شو مهامي؟']){
    const r=await f.run(null,{text},fail);assert.equal(r.status,'summary');
-   assert.match(r.reply,/🔵 \*مشروع تجريبي\*/);assert.match(r.reply,/🔴 لوحة/);
-   assert.doesNotMatch(r.reply,/مهمة شادي|تفاصيل سرية|https?:/);
+   assert.match(r.reply,/🔴 لوحة/);
+   assert.doesNotMatch(r.reply,/مهمة شادي|تفاصيل سرية|https?:|مشروع/);
  }
  for(const text of ['احذف المهام','شو المهام المطلوبة في مشروع ثان','شو المهام المطلوبة بكرا']){
    await assert.rejects(f.run(null,{text},fail),/provider unavailable/);
@@ -573,12 +573,12 @@ test('ordinary task listing bypasses unavailable provider without dropping filte
  assert.equal(called,true);
 });
 
-test('general summary groups all 25 short tasks under one bold heading without trailing spaces',async t=>{
+test('general summary lists all 25 short tasks in one flat list without trailing spaces',async t=>{
  const f=fixture(t);
  f.db.prepare("DELETE FROM tasks WHERE id='private'").run();
  for(let i=2;i<=25;i++)f.db.prepare("INSERT INTO tasks(id,project_id,title,details,priority,status,owner,suggested_owner,created_at,updated_at) VALUES(?, 'p', ?, '', 'green', 'open', NULL, 'خالد', 1, 1)").run('grouped-'+i,'مهمة تجريبية '+i);
  const r=await f.run(null,{text:'وريني المهام كلها كمان مره'},async()=>assert.fail());
- assert.equal((r.reply.match(/🔵 \*مشروع تجريبي\*/g)||[]).length,1);
+ assert.doesNotMatch(r.reply,/مشروع/);
  assert.match(r.reply,/مهمة تجريبية 25/);assert.match(r.reply,/جميع المهام \(25\)/);
  assert.doesNotMatch(r.reply,/&#x20;| +\n|\*مهمة/);assert.ok(r.reply.length<4000);
 });
@@ -620,7 +620,7 @@ test('admin adding a task directly for someone else broadcasts to the group and 
  assert.equal(result.status,'applied');
  const rows=outbox(f.db);
  const group=rows.find(r=>r.toUser==='group');
- assert.ok(group,'a new task must broadcast to the group');assert.match(group.text,/🆕/);assert.match(group.text,/مشروع تجريبي/);assert.match(group.text,/شادي/);
+ assert.ok(group,'a new task must broadcast to the group');assert.match(group.text,/🆕/);assert.doesNotMatch(group.text,/مشروع/);assert.match(group.text,/شادي/);
  assert.ok(rows.some(r=>r.toUser==='other'),'the assigned owner must get a private heads-up');
  assert.ok(rows.some(r=>r.toUser==='other'&&/تذكير بأوامر المهام/.test(r.text)),'the newly assigned employee also gets the standalone command legend');
  assert.ok(!rows.some(r=>r.toUser==='basem'));

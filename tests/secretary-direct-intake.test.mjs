@@ -45,13 +45,15 @@ test('shortcut rejects rich fields, quotations, negation, questions, hypothetica
   assert.equal(directTaskCreationIntent({...plannerInput('أضف مهمة تجربة'),actor:{id:'member',role:'member',name:'خالد'}}),null);
 });
 
-test('live regression: expired old proposal -> literal creation -> project choices -> fresh exact confirmation only',async t=>{
+test('live regression: expired old proposal -> literal creation -> owner choices -> fresh exact confirmation only',async t=>{
   const f=fixture(t);const old=await f.oldPending();f.tick(600001);
   const creation=f.event('اضف مهمه تجربه');let r=await f.run(creation);
-  assert.equal(r.status,'clarify');assert.match(r.choices.title,/المشروع/);assert.equal(saved(f).title,'تجربه');assert.equal(f.pending(),undefined);
+  // No project question anymore -- a literal creation defaults straight to
+  // standalone (no project) for the owner/admin, so the first question here
+  // is the owner, not the project.
+  assert.equal(r.status,'clarify');assert.match(r.choices.title,/المسؤول/);assert.equal(saved(f).title,'تجربه');assert.equal(f.pending(),undefined);
   assert.equal((await f.run(creation)).status,'duplicate');assert.equal(count(f),1);
   assert.equal((await f.run(f.event(`موافق ${old.token}`))).status,'clarify');assert.equal(saved(f).title,'تجربه');
-  r=await f.run(f.pick(r,'مشروع تجريبي'));assert.match(r.choices.title,/المسؤول/);
   r=await f.run(f.pick(r,'خالد'));r=await f.run(f.pick(r,'متوسطة'));r=await f.run(f.pick(r,'بدون موعد'));
   assert.equal(r.status,'confirmation');assert.ok(r.choices);assert.equal(count(f),1);assert.notEqual(f.pending().token,old.token);
   // The old, already-expired token can never approve the new (fresh) proposal.
@@ -68,7 +70,7 @@ test('fresh literal creation replaces even an unexpired complete draft without i
   await f.run(f.event('ضيف مهمة جديدة ضمن مشروع تجريبي'),async()=>({...p,intakeMode:'start',projectId:'p',fields:{...p.fields,title:'عنوان سابق',ownerId:'member',priority:'green',dueDate:'2026-09-10'}}));
   const old=f.pending();assert.ok(old);
   const r=await f.run(f.event('أضف مهمة تجريبية'));assert.ok(r.choices);assert.equal(f.pending(),undefined);
-  assert.deepEqual(saved(f),{projectId:null,newProjectName:null,title:'تجريبية',details:null,priority:null,ownerId:null,dueDate:null});
+  assert.deepEqual(saved(f),{projectId:null,newProjectName:null,noProject:true,title:'تجريبية',details:null,priority:null,ownerId:null,dueDate:null});
   assert.equal((await f.run(f.event(`موافق ${old.token}`))).status,'clarify');assert.equal(count(f),1);
 });
 
@@ -90,7 +92,9 @@ test('expiry restores a valid current draft question and fresh choices without e
   const expires=f.db.prepare('SELECT expires_at FROM secretary_task_intake').get().expires_at;f.tick(600001);
   const staleChoice=r.choices.id;r=await f.run(f.event('موافق'));assert.equal(r.status,'clarify');assert.ok(r.choices);assert.notEqual(r.choices.id,staleChoice);
   assert.equal(r.choices.expiresAt,expires);assert.doesNotMatch(r.reply,new RegExp(old.token));assert.equal(f.pending(),undefined);
-  r=await f.run(f.pick(r,'مشروع تجريبي'));assert.match(r.choices.title,/المسؤول/);assert.equal(saved(f).title,'تجربه');assert.equal(count(f),1);
+  // No project question to pick anymore -- the restored draft already defaulted
+  // to standalone, so the restored choices are the owner question directly.
+  assert.match(r.choices.title,/المسؤول/);assert.equal(saved(f).title,'تجربه');assert.equal(count(f),1);
 });
 
 test('bare affirmation with only a valid intake restores actionable choices but never completes it',async t=>{
@@ -114,7 +118,7 @@ test('negation and discussion never enter the shortcut or hide a provider failur
 
 test('choice labels cannot trigger the literal shortcut; voice and quoted messages keep their existing path',async t=>{
   const f=fixture(t);const first=await f.run(f.event('اضف مهمه تجربه'));
-  const selection=f.pick(first,'مشروع تجريبي');selection.text='أضف مهمة غيرها';await f.run(selection);assert.equal(saved(f).title,'تجربه');assert.equal(saved(f).projectId,'p');
+  const selection=f.pick(first,'خالد');selection.text='أضف مهمة غيرها';await f.run(selection);assert.equal(saved(f).title,'تجربه');assert.equal(saved(f).ownerId,'member');
   let calls=0;const infer=async()=>{calls++;return emptySecretaryIntent('clarify','وضح الطلب الصوتي أو الرد المقصود.');};
   await f.run(f.event('أضف مهمة تجريبية',{inputKind:'voice'}),infer);assert.equal(calls,1);
   await f.run(f.event('أضف مهمة تجريبية',{replyToMessageId:'REPLY-1'}),infer);assert.equal(calls,2);assert.equal(count(f),1);assert.equal(f.pending(),undefined);

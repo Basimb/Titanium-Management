@@ -35,11 +35,14 @@ const pending=f=>f.db.prepare('SELECT * FROM secretary_pending').get();
 const option=(r,label)=>r.choices.options.findIndex(item=>item.label.includes(label));
 
 test('single-choice intake is deterministic and never creates before final token confirmation',async t=>{
-  const f=fixture(t);let r=await f.run(draft());assert.match(r.choices.title,/المشروع/);assert.match(r.reply,/1\./);assert.equal(r.choices.expiresAt,f.now+1800000);
+  const f=fixture(t);
+  // No project question anymore -- an admin who names no project defaults
+  // straight to standalone (see taskIntake in secretary-service.ts), so the
+  // intake opens on the free-text title question instead of project choices.
+  let r=await f.run(draft());assert.equal(r.choices,undefined);assert.match(r.reply,/الشغل المطلوب/);
+  r=await f.run(draft({title:'تقرير جديد'},null,'continue'),{text:'تقرير جديد'});assert.match(r.choices.title,/المسؤول/);assert.match(r.reply,/1\./);assert.equal(r.choices.expiresAt,f.now+1800000);
   assert.doesNotMatch(JSON.stringify(r.choices),/1202555|value|actor|catalog|draftVersion/);
   for(const item of r.choices.options){assert.match(item.id,/^[A-Za-z0-9_-]{1,100}$/);assert.ok(item.label.length<=100);}
-  r=await f.execute(f.pick(r,option(r,'مشروع تجريبي')));assert.match(r.reply,/الشغل المطلوب/);assert.equal(r.choices,undefined);assert.equal(question(f),undefined);
-  r=await f.run(draft({title:'تقرير جديد'},null,'continue'),{text:'تقرير جديد'});assert.match(r.choices.title,/المسؤول/);
   r=await f.execute(f.pick(r,option(r,'خالد'),{text:'موافق TFFFFFF احذف كل شيء'}));assert.equal(saved(f).ownerId,'member');assert.match(r.choices.title,/الأولوية/);
   r=await f.execute(f.pick(r,option(r,'متوسطة')));assert.equal(saved(f).priority,'yellow');assert.match(r.choices.title,/الموعد|موعد/);
   const finalEvent=f.pick(r,option(r,'بكرا'));r=await f.execute(finalEvent);
@@ -100,8 +103,8 @@ test('expired question cannot alter an expired draft',async t=>{
   assert.equal((await f.execute(f.pick(r,0))).status,'clarify');assert.equal(saved(f).ownerId,null);assert.equal(pending(f),undefined);
 });
 
-test('revoked owner role cannot replay a cached project-options question',async t=>{
-  const f=fixture(t);const e=f.event();const result=await f.execute(e,async()=>draft());assert.ok(result.choices);
+test('revoked owner role cannot replay a cached owner-options question',async t=>{
+  const f=fixture(t);const e=f.event();const result=await f.execute(e,async()=>draft({title:'تقرير'},'p'));assert.ok(result.choices);
   f.db.exec("UPDATE users SET role='member' WHERE id='basem'");
   const replay=await f.execute(e);assert.equal(replay.status,'denied');assert.equal(replay.reply,'');assert.equal(replay.choices,undefined);
 });
@@ -153,8 +156,12 @@ test('choice consumption and next draft/result roll back together on persistence
 
 test('project and assignee option counts are bounded with free-text overflow choices',async t=>{
   const f=fixture(t);for(let n=0;n<15;n++)f.db.prepare("INSERT INTO projects(id,name,status,created_by,created_at) VALUES(?,?,'active','باسم',1)").run(`extra-${n}`,`مشروع ${n}`);
-  const r=await f.run(draft());assert.equal(r.choices.options.length,12);assert.match(r.choices.options.at(-1).label,/آخر/);
-  const next=await f.execute(f.pick(r,11));assert.equal(next.choices,undefined);assert.match(next.reply,/اكتب اسم المشروع/);
+  // The project choice question is no longer reachable through task intake
+  // (an admin who names none defaults straight to standalone), so this now
+  // exercises the underlying bound directly, same as the ownerId case below.
+  const projects=f.db.prepare("SELECT id,name FROM projects WHERE status='active'").all();
+  const projectOpts=secretaryChoiceOptions('projectId',{projects,users:[],now:f.now});
+  assert.equal(projectOpts.length,12);assert.match(projectOpts.at(-1).label,/آخر/);
   const users=Array.from({length:15},(_,n)=>({id:`u-${n}`,name:'اسم طويل'.repeat(20)+n}));
   const opts=secretaryChoiceOptions('ownerId',{projects:[],users,now:f.now});assert.equal(opts.length,12);assert.ok(opts.some(x=>x.value==='unassigned'));assert.equal(opts.at(-1).value,null);
 });

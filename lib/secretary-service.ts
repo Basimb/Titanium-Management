@@ -255,17 +255,12 @@ const PRIORITIES: Record<string, { icon: string; label: string; color: string }>
 // perfect fix -- a long title still wraps back to the bare margin).
 export function stableOrdinal(index: number, total = index) { const width = String(total).length; return `\u200F*\u2066${String(index).padStart(width, "0")}\u2069.*`; }
 
-function numberedTaskList(tasks: Task[], state: Snapshot, now: number) {
-  let previousProject = "";
+function numberedTaskList(tasks: Task[], now: number) {
   return tasks.map((task, index) => {
-    const project = state.projects.find(p => p.id === task.projectId);
-    const projectName = project?.name || "مشروع غير محدد";
-    const heading = projectName === previousProject ? "" : `\n🔵 *${clean(projectName, 100).replace(/\*/g, "")}*\n`;
-    previousProject = projectName;
     const priority = PRIORITIES[task.priority];
     const overdue = task.status !== "completed" && task.dueDate && task.dueDate < new Date(now + 3 * 3600_000).toISOString().slice(0, 10);
     const suffix = overdue ? ` • 🔴 متأخرة` : task.dueDate ? ` • الموعد: ${clean(task.dueDate, 10)}` : "";
-    return `${heading}${stableOrdinal(index + 1, tasks.length)} ${priority?.icon || "⚪"} ${clean(task.title, 90).replace(/\*/g, "")} — ${LABELS[task.status] || clean(task.status)} • ${clean(task.owner || task.suggestedOwner || "غير معيّن", 50)}${suffix}`;
+    return `${stableOrdinal(index + 1, tasks.length)} ${priority?.icon || "⚪"} ${clean(task.title, 90).replace(/\*/g, "")} — ${LABELS[task.status] || clean(task.status)} • ${clean(task.owner || task.suggestedOwner || "غير معيّن", 50)}${suffix}`;
   }).join("\n");
 }
 export function formatSecretaryProjectHeadings(reply: string, state: Pick<Snapshot, "projects" | "tasks">) {
@@ -280,11 +275,10 @@ export function formatSecretaryProjectHeadings(reply: string, state: Pick<Snapsh
   }).join("\n");
 }
 export function secretaryTaskCard(task: Task, state: Snapshot, now: number, detailed = false) {
-  const project = state.projects.find(p => p.id === task.projectId);
   const latest = state.comments.filter(c => c.taskId === task.id).sort((a, b) => b.createdAt - a.createdAt)[0];
   const priority = PRIORITIES[task.priority];
   const overdue = task.status !== "completed" && task.dueDate && task.dueDate < new Date(now + 3 * 3600_000).toISOString().slice(0, 10);
-  return `${project ? `🔵 *${clean(project.name, 90)}*\n\n` : ""}${priority?.icon || "⚪"} ${clean(task.title, 150)}\n${LABELS[task.status] || clean(task.status)}${overdue ? " • متأخرة عن الموعد" : ""}\nالأولوية: ${priority?.label || "غير محددة"}\nالمسؤول: ${clean(task.owner || task.suggestedOwner || "لم يُعيّن")} ${task.dueDate ? `• الموعد: ${clean(task.dueDate, 10)}` : ""}${detailed ? `\nالمطلوب: ${clean(task.details || "لا توجد تفاصيل إضافية", 600)}${latest ? `\nآخر تحديث (${clean(latest.author, 50)}): ${clean(latest.body, 500)}` : "\nلا يوجد تحديث مسجّل بعد."}` : ""}`;
+  return `${priority?.icon || "⚪"} ${clean(task.title, 150)}\n${LABELS[task.status] || clean(task.status)}${overdue ? " • متأخرة عن الموعد" : ""}\nالأولوية: ${priority?.label || "غير محددة"}\nالمسؤول: ${clean(task.owner || task.suggestedOwner || "لم يُعيّن")} ${task.dueDate ? `• الموعد: ${clean(task.dueDate, 10)}` : ""}${detailed ? `\nالمطلوب: ${clean(task.details || "لا توجد تفاصيل إضافية", 600)}${latest ? `\nآخر تحديث (${clean(latest.author, 50)}): ${clean(latest.body, 500)}` : "\nلا يوجد تحديث مسجّل بعد."}` : ""}`;
 }
 function priorityReadReply(query: Extract<PriorityTaskQuery, { kind: "query" }>, state: Snapshot, now: number, text: string): { result: Result; scope: string[] } {
   const priority = PRIORITIES[query.priority];
@@ -295,8 +289,7 @@ function priorityReadReply(query: Extract<PriorityTaskQuery, { kind: "query" }>,
     && (!query.ownerId || !!owner && (t.owner || t.suggestedOwner) === owner.name)
     && (!query.status || (query.status === "overdue" ? t.status !== "completed" && !!t.dueDate && t.dueDate < today : t.status === query.status)))
     .sort((a, b) => a.projectId.localeCompare(b.projectId) || a.id.localeCompare(b.id, "en", { numeric: true }));
-  const project = state.projects.find(p => p.id === query.projectId);
-  const header = `${priority.icon} *المهام ${priority.color} — أولوية ${priority.label}*${project ? `\n🔵 *${clean(project.name, 100)}*` : ""}${owner ? `\nالمسؤول: ${clean(owner.name, 60)}` : ""}${query.status ? `\nالحالة: ${query.status === "overdue" ? "متأخرة عن الموعد" : LABELS[query.status]}` : ""}\nالمطابق ضمن صلاحياتك (دون الأرشيف): ${tasks.length}\nاللون للأولوية؛ حالة التنفيذ مذكورة لكل مهمة.\n`;
+  const header = `${priority.icon} *المهام ${priority.color} — أولوية ${priority.label}*${owner ? `\nالمسؤول: ${clean(owner.name, 60)}` : ""}${query.status ? `\nالحالة: ${query.status === "overdue" ? "متأخرة عن الموعد" : LABELS[query.status]}` : ""}\nالمطابق ضمن صلاحياتك (دون الأرشيف): ${tasks.length}\nاللون للأولوية؛ حالة التنفيذ مذكورة لكل مهمة.\n`;
   const offset = query.offset || 0;
   const cards: string[] = [];
   for (const task of tasks.slice(offset, offset + 10)) {
@@ -309,7 +302,7 @@ function priorityReadReply(query: Extract<PriorityTaskQuery, { kind: "query" }>,
   const footer = !tasks.length ? "\nما في مهام تطابق هذا الطلب حاليًا."
     : !cards.length ? `\nالقائمة فيها ${tasks.length} مهام فقط. ابدأ من 1.`
     : `\n\nعرض ${offset + 1}–${next} من ${tasks.length}.${next < tasks.length ? ` للتكملة اكتب: «${clean(continuation, 260)} من ${next + 1}».` : ""}`;
-  return { result: { status: "summary", reply: header + "\n" + cards.join("\n\n") + footer }, scope: [...tasks.map(t => "t:" + t.id), ...(project ? ["p:" + project.id] : [])] };
+  return { result: { status: "summary", reply: header + "\n" + cards.join("\n\n") + footer }, scope: [...tasks.map(t => "t:" + t.id), ...(query.projectId ? ["p:" + query.projectId] : [])] };
 }
 function readReply(plan: SecretaryIntent, actor: ChatUser, state: Snapshot, now: number): { result: Result; scope: string[] } {
   const greeting = `أهلًا يا ${clean(actor.name, 60)}، `;
@@ -344,33 +337,26 @@ function readReply(plan: SecretaryIntent, actor: ChatUser, state: Snapshot, now:
   const today = new Date(now + 3 * 3600_000).toISOString().slice(0, 10);
   const overdue = tasks.filter(t => t.status !== "completed" && t.dueDate && t.dueDate < today);
   const pending = tasks.filter(t => t.status === "approval");
-  const header = plan.kind === "report" ? `📋 *${reportOwner ? `ملخص مهام ${clean(reportOwner.name, 60)}` : "ملخص الإدارة"}*\nالمشاريع: ${reportOwner ? new Set(tasks.map(t => t.projectId)).size : state.projects.length}\nمعتمدة: ${tasks.filter(t => t.status === "completed").length}\nقيد التنفيذ: ${tasks.filter(t => t.status === "progress").length}\nبانتظار باسم: ${pending.length}\nمتأخرة بموعد مسجل: ${overdue.length}\nبدون موعد: ${tasks.filter(t => !t.dueDate && t.status !== "completed").length}\n🔴 قصوى: ${tasks.filter(t => t.priority === "red").length} • 🟡 متوسطة: ${tasks.filter(t => t.priority === "yellow").length} • 🟢 عادية: ${tasks.filter(t => t.priority === "green").length}\n` : `${greeting}المهام المتاحة إلك: ${tasks.length}\n`;
+  const header = plan.kind === "report" ? `📋 *${reportOwner ? `ملخص مهام ${clean(reportOwner.name, 60)}` : "ملخص الإدارة"}*\nمعتمدة: ${tasks.filter(t => t.status === "completed").length}\nقيد التنفيذ: ${tasks.filter(t => t.status === "progress").length}\nبانتظار باسم: ${pending.length}\nمتأخرة بموعد مسجل: ${overdue.length}\nبدون موعد: ${tasks.filter(t => !t.dueDate && t.status !== "completed").length}\n🔴 قصوى: ${tasks.filter(t => t.priority === "red").length} • 🟡 متوسطة: ${tasks.filter(t => t.priority === "yellow").length} • 🟢 عادية: ${tasks.filter(t => t.priority === "green").length}\n` : `${greeting}المهام المتاحة إلك: ${tasks.length}\n`;
   // orderedTasks always re-derives its own list from the FULL state.tasks --
   // it knows nothing about reportOwner -- so without this filter the report
   // header would say "ملخص مهام خالد" while the grouped listing below it
   // still dumped every task from everyone, exactly the bug being fixed here.
   const ordered = orderedTasks(state, now).filter(t => !reportOwner || (t.owner || t.suggestedOwner) === reportOwner.name);
   if (plan.kind === "summary") {
-    const list = numberedTaskList(ordered, state, now);
+    const list = numberedTaskList(ordered, now);
     const reply = `${header.trimEnd()}${list ? `\n${list}` : "\nما في مهام متاحة إلك حاليًا."}\n\nتم عرض جميع المهام (${ordered.length}).\nاختار رقم المهمة كما هو مكتوب، مثل: «رقم 12».`;
     return { result: { status: "summary", reply: reply.slice(0, 3750) }, scope: ordered.map(t => "t:" + t.id) };
   }
   let body = "", shown = 0;
-  const groups = new Map<string, Task[]>();
-  for (const task of ordered) { const group = groups.get(task.projectId) || []; group.push(task); groups.set(task.projectId, group); }
-  outer: for (const [projectId, group] of groups) {
-    const name = state.projects.find(p => p.id === projectId)?.name || "مشروع غير محدد";
-    let section = `\n\n🔵 *${clean(name, 100).replace(/\*/g, "")}*`;
-    for (const task of group) {
-      const priority = PRIORITIES[task.priority];
-      const days = task.status !== "completed" && task.dueDate && task.dueDate < today ? Math.floor((Date.parse(today) - Date.parse(task.dueDate)) / 86400000) : 0;
-      const item = `\n\n${priority?.icon || "⚪"} ${clean(task.title, 150).replace(/\*/g, "")}\n${LABELS[task.status] || clean(task.status)} • ${clean(task.owner || task.suggestedOwner || "غير معيّن", 50)}${days ? ` • 🔴 متأخرة ${days} يوم` : task.dueDate ? ` • الموعد: ${clean(task.dueDate, 10)}` : ""}`;
-      if (header.length + body.length + section.length + item.length > 3500) break outer;
-      section += item; shown++;
-      body += section; section = "";
-    }
+  outer: for (const task of ordered) {
+    const priority = PRIORITIES[task.priority];
+    const days = task.status !== "completed" && task.dueDate && task.dueDate < today ? Math.floor((Date.parse(today) - Date.parse(task.dueDate)) / 86400000) : 0;
+    const item = `\n\n${priority?.icon || "⚪"} ${clean(task.title, 150).replace(/\*/g, "")}\n${LABELS[task.status] || clean(task.status)} • ${clean(task.owner || task.suggestedOwner || "غير معيّن", 50)}${days ? ` • 🔴 متأخرة ${days} يوم` : task.dueDate ? ` • الموعد: ${clean(task.dueDate, 10)}` : ""}`;
+    if (header.length + body.length + item.length > 3500) break outer;
+    body += item; shown++;
   }
-  const footer = shown < tasks.length ? `\n\nعرضت ${shown} من ${tasks.length} بسبب طول الرسالة. حدد اسم مشروع لأعرض مهامه.` : tasks.length ? `\n\nتم عرض جميع المهام (${shown}).` : "\nما في مهام متاحة إلك حاليًا.";
+  const footer = shown < tasks.length ? `\n\nعرضت ${shown} من ${tasks.length} بسبب طول الرسالة.` : tasks.length ? `\n\nتم عرض جميع المهام (${shown}).` : "\nما في مهام متاحة إلك حاليًا.";
   return { result: { status: "summary", reply: header.trimEnd() + body + footer }, scope: tasks.map(t => "t:" + t.id) };
 }
 function commandFrom(plan: SecretaryIntent, state: Snapshot): Record<string, unknown> {
@@ -589,6 +575,20 @@ function taskIntake(db: DatabaseSync, event: Event, actor: ChatUser, state: Snap
     const recent = recentProject(db, key, now);
     if (recent) proposed.projectId = recent.id;
   }
+  // Basim/admin is never forced to pick a project: on a brand-new draft where
+  // he still hasn't named one (and none was just reused above), the task
+  // opens standalone instead of the intake question blocking on it -- see
+  // create_standalone_task below. He can still name a project this or a
+  // later turn; that always wins over this default (see the
+  // noProjectChoice/continue-mode handling above). This is deliberately
+  // start-only: a "continue" turn reaches here with proposed.projectId still
+  // null only because a project it already had got invalidated meanwhile
+  // (e.g. rejected/archived -- see availableDraft's hasProject check on the
+  // existingDraft above), and that case must keep re-asking for a project,
+  // never silently fall back to standalone. Employees keep naming a project
+  // every turn for now -- there is no request-to-Basim path yet for a
+  // project-less employee task.
+  if (isAdmin && plan.intakeMode === "start" && proposed.projectId === null && !proposed.newProjectName && !proposed.noProject) proposed.noProject = true;
   // An employee always opens a task for himself -- there is no one else to
   // assign it to from this flow -- so the owner question never applies to him.
   if (!isAdmin && proposed.ownerId === null) proposed.ownerId = actor.id;
@@ -649,7 +649,7 @@ function taskIntake(db: DatabaseSync, event: Event, actor: ChatUser, state: Snap
     const command = { action: "create_standalone_task", title: draft.title, ...(draft.details ? { details: draft.details } : {}),
       ownerId: draft.ownerId === "unassigned" ? null : draft.ownerId, priority: draft.priority,
       dueDate: draft.dueDate === "unscheduled" ? null : draft.dueDate };
-    const reply = `للتأكيد قبل إنشاء المهمة:\nالمشروع: بدون مشروع\nالمهمة: ${draft.title}${draft.details ? `\nالمطلوب: ${draft.details}` : ""}\nالمسؤول: ${owner ? clean(owner.name, 200) : "بدون مسؤول حاليًا"}\nالأولوية: ${PRIORITIES[draft.priority!].icon} ${PRIORITIES[draft.priority!].label}\nالموعد: ${draft.dueDate === "unscheduled" ? "بدون موعد" : draft.dueDate}\nالحالة عند الإنشاء: مفتوحة بانتظار الاستلام.\n\nلم أنشئ المهمة بعد. اكتب «موافق ${token}» أو رد مباشرة بالموافقة على هذه المعاينة؛ وللتراجع اكتب «إلغاء». التأكيد صالح 10 دقائق.`;
+    const reply = `للتأكيد قبل إنشاء المهمة:\nالمهمة: ${draft.title}${draft.details ? `\nالمطلوب: ${draft.details}` : ""}\nالمسؤول: ${owner ? clean(owner.name, 200) : "بدون مسؤول حاليًا"}\nالأولوية: ${PRIORITIES[draft.priority!].icon} ${PRIORITIES[draft.priority!].label}\nالموعد: ${draft.dueDate === "unscheduled" ? "بدون موعد" : draft.dueDate}\nالحالة عند الإنشاء: مفتوحة بانتظار الاستلام.\n\nلم أنشئ المهمة بعد. اكتب «موافق ${token}» أو رد مباشرة بالموافقة على هذه المعاينة؛ وللتراجع اكتب «إلغاء». التأكيد صالح 10 دقائق.`;
     if (reply.length > 3700) return save(db, event, actor, { status: "clarify", reply: "تفاصيل المهمة طويلة للمعاينة الكاملة. اختصر التفاصيل حتى أعرضها كلها قبل التأكيد." }, scope, now);
     db.prepare("INSERT INTO secretary_pending VALUES(?,?,?,?,?,?,?)").run(key, token, JSON.stringify(command), fingerprint(state), event.text, event.messageId, now + CONFIRM_MS);
     log(db, actor, event, "secretary_proposal", { summary: "عرض إنشاء مهمة بدون مشروع", proposedCommand: command, confirmationRequired: true }, now);
@@ -669,7 +669,7 @@ function taskIntake(db: DatabaseSync, event: Event, actor: ChatUser, state: Snap
   const command = { action: "add_task", projectId: draft.projectId, title: draft.title, ...(draft.details ? { details: draft.details } : {}),
     ownerId: draft.ownerId === "unassigned" ? null : draft.ownerId, priority: draft.priority,
     dueDate: draft.dueDate === "unscheduled" ? null : draft.dueDate, expectedProjectUpdatedAt: project!.updatedAt ?? null, expectedProjectStatus: "active" };
-  const reply = `للتأكيد قبل إنشاء المهمة:\nالمشروع: ${clean(project!.name, 240)}\nالمهمة: ${draft.title}${draft.details ? `\nالمطلوب: ${draft.details}` : ""}\nالمسؤول: ${owner ? clean(owner.name, 200) : "بدون مسؤول حاليًا"}\nالأولوية: ${PRIORITIES[draft.priority!].icon} ${PRIORITIES[draft.priority!].label}\nالموعد: ${draft.dueDate === "unscheduled" ? "بدون موعد" : draft.dueDate}\nالحالة عند الإنشاء: مفتوحة بانتظار الاستلام.\n\nلم أنشئ المهمة بعد. اكتب «موافق ${token}» أو رد مباشرة بالموافقة على هذه المعاينة؛ وللتراجع اكتب «إلغاء». التأكيد صالح 10 دقائق.`;
+  const reply = `للتأكيد قبل إنشاء المهمة:\nالمهمة: ${draft.title}${draft.details ? `\nالمطلوب: ${draft.details}` : ""}\nالمسؤول: ${owner ? clean(owner.name, 200) : "بدون مسؤول حاليًا"}\nالأولوية: ${PRIORITIES[draft.priority!].icon} ${PRIORITIES[draft.priority!].label}\nالموعد: ${draft.dueDate === "unscheduled" ? "بدون موعد" : draft.dueDate}\nالحالة عند الإنشاء: مفتوحة بانتظار الاستلام.\n\nلم أنشئ المهمة بعد. اكتب «موافق ${token}» أو رد مباشرة بالموافقة على هذه المعاينة؛ وللتراجع اكتب «إلغاء». التأكيد صالح 10 دقائق.`;
   if (reply.length > 3700) return save(db, event, actor, { status: "clarify", reply: "تفاصيل المهمة طويلة للمعاينة الكاملة. اختصر التفاصيل حتى أعرضها كلها قبل التأكيد." }, scope, now);
   db.prepare("INSERT INTO secretary_pending VALUES(?,?,?,?,?,?,?)").run(key, token, JSON.stringify(command), fingerprint(state), event.text, event.messageId, now + CONFIRM_MS);
   log(db, actor, event, "secretary_proposal", { summary: "عرض إنشاء مهمة بعد استكمال بياناتها", proposedCommand: command, confirmationRequired: true }, now);
@@ -1148,7 +1148,7 @@ function formatManagementNotice(notification: NonNullable<ManagementResult["noti
   const title = clean(notification.title, 200);
   const who = clean(notification.actor, 100);
   switch (notification.action) {
-    case "create": return `🆕 مهمة جديدة: ${title}${projectName ? ` — ${projectName}` : ""}${notification.extra ? ` — ${notification.extra}` : ""}`;
+    case "create": return `🆕 مهمة جديدة: ${title}${notification.extra ? ` — ${notification.extra}` : ""}`;
     case "claim": return `👋 ${who} استلم مهمة «${title}»`;
     case "submit": return `📤 ${who} أنهى «${title}» وبانتظار اعتماد باسم`;
     case "approve": return `✅ اعتُمد إنجاز «${title}» (${who})`;

@@ -35,8 +35,7 @@ const tasks=f=>f.db.prepare('SELECT * FROM tasks ORDER BY created_at,id').all();
 
 test('intake asks one missing field at a time and preserves omitted known answers',async t=>{
   const f=fixture(t);
-  assert.match((await f.run(draft())).reply,/بأي مشروع/);
-  assert.match((await f.run(draft({},'p','continue'),{text:'مشروع تجريبي'})).reply,/الشغل المطلوب/);
+  assert.match((await f.run(draft({},'p'),{text:'ضيف مهمة جديدة ضمن مشروع تجريبي'})).reply,/الشغل المطلوب/);
   assert.match((await f.run(draft({title:complete.title},null,'continue'),{text:complete.title})).reply,/مين بدك/);
   let input;
   assert.match((await f.run(draft({ownerId:'member'},null,'continue'),{text:'لخالد'},async value=>{input=value;return draft({ownerId:'member'},null,'continue');})).reply,/أولويتها/);
@@ -46,7 +45,8 @@ test('intake asks one missing field at a time and preserves omitted known answer
   assert.equal(saved(f).priority,'yellow');assert.equal(tasks(f).length,1);
   const preview=await f.run(draft({dueDate:'2026-09-12'},null,'continue'),{text:'12 سبتمبر 2026'});
   assert.equal(preview.status,'confirmation');assert.equal(intake(f),undefined);assert.equal(tasks(f).length,1);
-  for(const known of ['مشروع تجريبي',complete.title,'خالد','متوسطة','2026-09-12','مفتوحة'])assert.ok(preview.reply.includes(known));
+  assert.doesNotMatch(preview.reply,/مشروع/,'the project used under the hood is never named in the preview');
+  for(const known of [complete.title,'خالد','متوسطة','2026-09-12','مفتوحة'])assert.ok(preview.reply.includes(known));
   await f.run(undefined,{text:`موافق ${pending(f).token}`});
   const task=tasks(f).find(row=>row.id!=='existing');
   assert.equal(task.project_id,'p');assert.equal(task.title,complete.title);assert.equal(task.priority,'yellow');assert.equal(task.suggested_owner,'خالد');assert.equal(task.status,'open');
@@ -72,7 +72,10 @@ test('explicit no assignee and no deadline map to null without guessing priority
 test('starting a different task does not inherit the previous draft fields',async t=>{
   const f=fixture(t);await f.run(draft({title:'الأولى',ownerId:'member',priority:'red'},'p'));
   const result=await f.run(draft({title:'الثانية'},null,'start'),{text:'لا خلينا نعمل مهمة ثانية'});
-  assert.match(result.reply,/بأي مشروع/);assert.deepEqual(saved(f),{projectId:null,newProjectName:null,title:'الثانية',details:null,priority:null,ownerId:null,dueDate:null});
+  // No project inherited from the abandoned draft, nor asked again -- a fresh
+  // start with no project named defaults straight to standalone for admin.
+  assert.match(result.reply,/مين بدك/);
+  assert.deepEqual(saved(f),{projectId:null,newProjectName:null,noProject:true,title:'الثانية',details:null,priority:null,ownerId:null,dueDate:null});
 });
 
 test('corrections overwrite only supplied fields and optional details never add a question',async t=>{

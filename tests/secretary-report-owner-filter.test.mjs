@@ -41,13 +41,13 @@ test('"مهام خالد" (report with fields.ownerId) returns only that person\
   assert.doesNotMatch(r.reply, /مهمة شادي/);
 });
 
-test('a plain management report (no named person) still lists everyone, unchanged project count', async t => {
+test('a plain management report (no named person) still lists everyone, no project mention at all', async t => {
   const f = fixture(t);
   const r = await f.run(f.event('اعطيني تقرير الإدارة'), async () => f.reportPlan(null));
   assert.equal(r.status, 'summary');
   assert.match(r.reply, /ملخص الإدارة/);
   assert.doesNotMatch(r.reply, /ملخص مهام/);
-  assert.match(r.reply, /المشاريع: 2/); // state.projects.length, not a distinct-project count over tasks
+  assert.doesNotMatch(r.reply, /مشروع/);
   assert.match(r.reply, /مهمة خالد/);
   assert.match(r.reply, /مهمة شادي/);
 });

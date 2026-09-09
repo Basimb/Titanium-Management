@@ -79,7 +79,7 @@ export function createStandaloneTask(db: DatabaseSync, actor: ManagementActor, t
   const created = executeManagementAction(db, actor, { action: "add_project", name: "بدون مشروع" }, { now, source: "whatsapp_secretary", auditContext: context });
   db.prepare("UPDATE projects SET is_standalone=1 WHERE id=?").run(created.entityId);
   const added = executeManagementAction(db, actor, { action: "add_task", projectId: created.entityId, title: task.title, details: task.details || "", priority: task.priority, dueDate: task.dueDate, ownerId: task.ownerId }, { now: now + 1, source: "whatsapp_secretary", auditContext: context });
-  return { status: "applied", taskId: added.entityId, projectId: created.entityId, reply: `✅ أضفت مهمة: ${clean(task.title)} (بدون مشروع).`, groupNotice: null };
+  return { status: "applied", taskId: added.entityId, projectId: created.entityId, reply: `✅ أضفت مهمة: ${clean(task.title)}.`, groupNotice: null };
 }
 
 /** Execute a confirmed decision (owner, voice path) — called from the confirmation flow. */
