@@ -63,7 +63,10 @@ test("member snapshot scopes projects, tasks, files, comments, users and audit m
   const snapshot = getManagementSnapshot(db, member);
   assert.deepEqual(snapshot.tasks.map(x => x.id).sort(), ["assigned", "blocked", "own"]);
   assert.deepEqual(snapshot.projects.map(x => x.id).sort(), ["p", "pending"]);
-  assert.deepEqual(snapshot.users.map(x => x.id), ["member"]);
+  // A member sees every active colleague (needed to name one in a transfer,
+  // message, or correction), not just themselves -- task/project/comment/
+  // attachment/activity detail stays scoped, asserted separately below.
+  assert.deepEqual(snapshot.users.map(x => x.id).sort(), ["basem", "fake-admin", "member", "other"]);
   assert.equal(snapshot.attachments.length, 0);
   assert.deepEqual(snapshot.comments.map(x => x.body), ["تحديث ظاهر"]);
   assert.deepEqual(Object.keys(JSON.parse(snapshot.activity[0].details)).sort(), ["source", "summary"]);

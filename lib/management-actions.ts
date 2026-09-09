@@ -139,8 +139,17 @@ export function getManagementSnapshot(sqlite: DatabaseSync, claimed: ManagementA
       .map(project => ({ ...project, status: project.archivedAt === null ? project.status : "archived" }));
     const comments = sqlite.prepare("SELECT id,task_id AS taskId,author,body,created_at AS createdAt FROM comments ORDER BY created_at DESC,id DESC")
       .all().filter(row => manager || taskIds.has(String(row.taskId)));
+    // A plain member used to see only their own row here, which fed straight
+    // into the WhatsApp secretary's "users" context (both the AI classifier's
+    // roster and the ownerId/recipient validation in secretary-intent.ts) --
+    // so an employee naming an actual teammate ("حول المهمة لأيمن") looked, to
+    // the model and to the validator alike, like there was no such employee at
+    // all ("قائمة الموظفين سوى شادي"). Members still can't see the task/project/
+    // comment/attachment/activity detail of colleagues (filtered separately
+    // below and above), but they need to see who their active colleagues ARE
+    // to name them in a transfer, a message, or a correction.
     const users = sqlite.prepare("SELECT id,name,role,active,department,CASE WHEN pin_hash IS NULL THEN 0 ELSE 1 END AS pinSet,created_at AS createdAt,updated_at AS updatedAt FROM users ORDER BY role,created_at,name")
-      .all().filter(row => manager || actor.role === "manager" || row.id === actor.id);
+      .all().filter(row => manager || actor.role === "manager" || row.active === 1 || row.id === actor.id);
     const attachments = sqlite.prepare("SELECT id,task_id AS taskId,file_name AS fileName,content_type AS contentType,size,uploaded_by AS uploadedBy,created_at AS createdAt FROM attachments ORDER BY created_at DESC")
       .all().filter(row => manager || taskIds.has(String(row.taskId)));
     const activity = sqlite.prepare("SELECT id,actor_user_id AS actorUserId,actor_name AS actorName,action,entity_type AS entityType,entity_id AS entityId,details,created_at AS createdAt FROM audit_logs ORDER BY created_at DESC,id DESC")
