@@ -334,6 +334,46 @@ test("follow-ups: overdue owner nudge once per day, stale approval to owner, dig
   assert.ok(isGroupWorthy("create", "project") && !isGroupWorthy("comment", "task"));
 });
 
+test("unclaimed task: hourly nudge to its suggested owner during work hours, stopping once they respond", async t => {
+  const db = fixture(t);
+  // t2 (open, no suggested_owner) must never nudge -- nobody is responsible yet.
+  db.exec(`INSERT INTO tasks (id,project_id,title,status,owner,suggested_owner,due_date,created_at,updated_at)
+    VALUES ('t6','p','تجديد الرخصة','open',NULL,'شادي',NULL,100,100)`);
+  const config = { enabled: true, contacts: [{ userId: "basem", number: "966500000000" }, { userId: "khaled", number: "962770000000" }, { userId: "shadi", number: "962780000000" }], groupId: "123@g.us" };
+  const at = Date.UTC(2026, 8, 10, 7, 0); // 10:00 Amman, inside the 9-18 work-hours window
+
+  const plans = planFollowups(db, config, at).filter(plan => plan.kind === "unclaimed_task");
+  assert.equal(plans.length, 1, "t2 has no suggested owner and never nudges");
+  assert.equal(plans[0].targetUser, "shadi");
+  assert.equal(plans[0].to, "962780000000@s.whatsapp.net");
+  assert.match(plans[0].text, /تجديد الرخصة/);
+  assert.match(plans[0].text, /استلمت/);
+
+  assert.equal(planFollowups(db, config, Date.UTC(2026, 8, 10, 20, 0)).filter(plan => plan.kind === "unclaimed_task").length, 0, "outside working hours");
+
+  // Once delivered, no duplicate within the same hour -- but it fires again an hour later if still unclaimed.
+  db.prepare("INSERT INTO agent_followups (id,kind,target_user,entity_id,sent_at,response) VALUES ('nudge1','unclaimed_task','shadi','t6',?,'sent')").run(at);
+  assert.equal(planFollowups(db, config, at + 30 * 60_000).filter(plan => plan.kind === "unclaimed_task").length, 0, "no duplicate within the same hour");
+  assert.equal(planFollowups(db, config, at + 60 * 60_000 + 1000).filter(plan => plan.kind === "unclaimed_task").length, 1, "fires again once the hour has passed");
+
+  // Declining it moves the decision to Basim -- the employee already
+  // responded, so the hourly nag must stop even though the task itself
+  // stays "open" until Basim decides.
+  requestTaskTransfer(db, shadi, { taskId: "t6", reason: "مش مسؤوليتي" }, { now: at + 2 * 60 * 60_000 });
+  assert.equal(planFollowups(db, config, at + 3 * 60 * 60_000).filter(plan => plan.kind === "unclaimed_task").length, 0, "stops once the employee has responded, pending Basim's decision");
+});
+
+test("unclaimed task nudge stops as soon as the task is claimed", t => {
+  const db = fixture(t);
+  db.exec(`INSERT INTO tasks (id,project_id,title,status,owner,suggested_owner,due_date,created_at,updated_at)
+    VALUES ('t7','p','جرد المستودع','open',NULL,'شادي',NULL,100,100)`);
+  const config = { enabled: true, contacts: [{ userId: "basem", number: "966500000000" }, { userId: "shadi", number: "962780000000" }], groupId: "123@g.us" };
+  const at = Date.UTC(2026, 8, 10, 7, 0);
+  assert.equal(planFollowups(db, config, at).filter(plan => plan.kind === "unclaimed_task").length, 1);
+  executeManagementAction(db, shadi, { action: "claim", taskId: "t7" }, { now: at + 1000 });
+  assert.equal(planFollowups(db, config, at + 60 * 60_000 + 1000).filter(plan => plan.kind === "unclaimed_task").length, 0, "claimed tasks never nudge again");
+});
+
 test("twice-daily auto reminder fires at local 8am/8pm regardless of work hours, once per owner per slot, private + one group post each", async t => {
   const db = fixture(t);
   // t3 is only suggested (never claimed) -- still belongs on شادي's reminder,

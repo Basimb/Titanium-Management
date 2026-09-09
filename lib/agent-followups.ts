@@ -12,8 +12,8 @@ import { getManagementSnapshot, migrateManagementActions, type ManagementActor, 
 import { GROUP_EVENT_ALLOWLIST, groupBudgetRemaining } from "./team-chat-policy.ts";
 
 export type FollowupConfig = { enabled: boolean; contacts: Array<{ userId: string; number: string }>; groupId?: string | null; workStartHour?: number; workEndHour?: number; timezoneOffsetMinutes?: number; publicUrl?: string };
-type Planned = { id: string; kind: "overdue_task" | "silent_task" | "stale_approval" | "daily_digest" | "auto_reminder_morning" | "auto_reminder_evening"; targetUser: string; entityId: string | null; to: string; text: string };
-const DAY = 24 * 60 * 60_000, SILENT_AFTER = 3 * DAY, STALE_APPROVAL_AFTER = 2 * DAY;
+type Planned = { id: string; kind: "overdue_task" | "silent_task" | "stale_approval" | "daily_digest" | "auto_reminder_morning" | "auto_reminder_evening" | "unclaimed_task"; targetUser: string; entityId: string | null; to: string; text: string };
+const DAY = 24 * 60 * 60_000, SILENT_AFTER = 3 * DAY, STALE_APPROVAL_AFTER = 2 * DAY, HOUR = 60 * 60_000;
 const newMessageId = () => "3EB0" + randomBytes(18).toString("hex").toUpperCase();
 const clean = (value: string) => value.replace(/[\x00-\x1f\u202a-\u202e\u2066-\u2069]/g, " ").slice(0, 200);
 // Small per-file duplicates of secretary-service.ts's PRIORITIES/LABELS and
@@ -117,6 +117,27 @@ export function planFollowups(db: DatabaseSync, config: FollowupConfig, at: numb
       plans.push({ id: randomBytes(8).toString("hex"), kind: "silent_task", targetUser: userId, entityId: task.id, to: `${number}@s.whatsapp.net`,
         text: `👋 يا ${clean(task.owner)}، ما وصلني تحديث على «${clean(task.title)}» من 3 أيام. وين وصلت؟ اكتب لي أو سجّل صوت وأنا أحدّثها.` });
     }
+  }
+  // Basim asked for unclaimed (still "open", never rejected/transferred) tasks
+  // to keep nudging their suggested owner every hour, during working hours
+  // only, until they respond in any accepted way -- claim it ("استلمت"),
+  // or ask to transfer/decline it (which files a pending approval and moves
+  // the decision to Basim, so the employee-facing nag stops right away
+  // rather than waiting for Basim's decision). Applies uniformly to old and
+  // newly created open tasks alike, since this scans the live snapshot fresh
+  // every time rather than tracking task age.
+  for (const task of snapshot.tasks) {
+    if (task.archivedAt || task.status !== "open" || task.owner) continue;
+    const responsible = task.suggestedOwner;
+    if (!responsible) continue;
+    const project = snapshot.projects.find(candidate => candidate.id === task.projectId);
+    if (!project || project.status !== "active") continue;
+    const userId = userIdByName.get(responsible); const number = userId ? numberOf(userId) : null;
+    if (!userId || !number) continue;
+    if (alreadySent(db, "unclaimed_task", userId, task.id, at - HOUR)) continue;
+    if (db.prepare("SELECT id FROM approvals WHERE status='pending' AND entity_id=?").get(task.id)) continue;
+    plans.push({ id: randomBytes(8).toString("hex"), kind: "unclaimed_task", targetUser: userId, entityId: task.id, to: `${number}@s.whatsapp.net`,
+      text: `⏳ يا ${clean(responsible)}، مهمة «${clean(task.title)}» لسا بانتظار ردك.\nاكتب «استلمت» أو اسم المهمة لبدء التنفيذ، أو قلي إذا مش مسؤوليتك.${link}` });
   }
   const ownerNumber = numberOf(owner.id);
   if (ownerNumber && !alreadySent(db, "stale_approval", owner.id, null, at - DAY)) {
