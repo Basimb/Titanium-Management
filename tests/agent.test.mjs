@@ -5,7 +5,7 @@ import { executeManagementAction, getManagementSnapshot, migrateManagementAction
 import { decideApproval, findPendingApproval, listApprovals, requestDeadlineExtension, requestProjectClose, requestProjectCreate, requestTaskClose, requestTaskOwnership, requestTaskTransfer, staleApprovals } from "../lib/approvals.ts";
 import { can, capabilities, inScope } from "../lib/permissions.ts";
 import { activeRules, policyViolations, proposeRuleFromStatement, recordCorrection, suggestOwner, CORRECTION_THRESHOLD } from "../lib/rules.ts";
-import { addKnowledge, searchKnowledge } from "../lib/knowledge.ts";
+import { addKnowledge, searchKnowledge, formatKnowledgeHits } from "../lib/knowledge.ts";
 import { createFollowupJobs, enqueueAgentMessage, planFollowups } from "../lib/agent-followups.ts";
 import { handleAgentIntent, parseProjectTaskLines, createProjectBundle } from "../lib/secretary-agent.ts";
 import { emptySecretaryIntent } from "../lib/secretary-intent.ts";
@@ -268,6 +268,29 @@ test("knowledge: FTS search with visibility scoping, checked by the agent before
   const result = handleAgentIntent({ kind: "knowledge", intakeMode: null, action: null, taskId: null, projectId: null, recipientIds: [], message: "كيف نرخص صيدلية", fields: { title: null, name: null, details: null, priority: null, dueDate: null, ownerId: null, reason: null, body: null, remindAt: null } },
     { db, actor: khaled, now: T0, users: [], tasks: [], projects: [], stash: () => "T1" });
   assert.match(result.reply, /نقابة الصيادلة/);
+});
+// A short reference-list entry (Basim's real "دليل أوامر تيتانيوم" case) used
+// to come back as a truncated FTS snippet -- cut off mid-list, with no way
+// for a plain "وين الباقي؟" follow-up to recover the rest since nothing ties
+// that question back to a specific truncated answer. formatKnowledgeHits now
+// shows the FULL body for a normal-sized entry, and only degrades to a hard
+// cutoff once the combined reply would exceed a WhatsApp-reasonable budget.
+test("knowledge answers show the full body, not a truncated FTS snippet, unless the reply would get too long", t => {
+  const db = fixture(t);
+  const guide = "قائمة «أوامر» واتساب لتيتانيوم مرتبة حسب مراحل المهمة:\n🔵 إنشاء: افتح مشروع جديد / اضافة مهمة\n🟢 استلام وتنفيذ: استلمت / رجّع الاستلام\n🟡 تحديث ومتابعة: اضافة ملاحظة\n🟠 تحويل وتمديد: تحويل المهمة\n🟣 إنهاء واعتماد: انهاء المهمة";
+  addKnowledge(db, owner, { title: "دليل أوامر تيتانيوم", body: guide }, { now: T0 });
+  const hits = searchKnowledge(db, owner, "دليل أوامر تيتانيوم");
+  assert.equal(hits.length, 1);
+  const formatted = formatKnowledgeHits(hits);
+  assert.match(formatted, /📌 دليل أوامر تيتانيوم/);
+  assert.match(formatted, /تحديث ومتابعة: اضافة ملاحظة/, "the tail of the list must survive, not just the FTS match window");
+  assert.match(formatted, /إنهاء واعتماد: انهاء المهمة/, "the very last line must not be clipped");
+  // Multiple long entries together must still hard-stop at the budget rather
+  // than silently producing one giant WhatsApp message.
+  addKnowledge(db, owner, { title: "سياسة طويلة", body: "س".repeat(4000) }, { now: T0 + 1 });
+  const long = formatKnowledgeHits(searchKnowledge(db, owner, "دليل سياسة", 5));
+  assert.ok(long.length <= 3510, `expected a hard cap near 3500 chars, got ${long.length}`);
+  assert.match(long, /…$/);
 });
 
 test("agent handler: employee extension files a request and notifies owner; owner gets confirmation token instead", t => {

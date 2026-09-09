@@ -64,7 +64,26 @@ export function removeKnowledge(db: DatabaseSync, claimed: ManagementActor, id: 
   return Number(db.prepare("DELETE FROM knowledge WHERE id=?").run(id).changes) === 1;
 }
 
+// Used to show only hit.snippet (an FTS preview a couple dozen tokens wide,
+// or a bare 160-char slice on the LIKE fallback) -- fine for "does something
+// exist" but useless the moment an entry's own point is a short reference
+// list: the reply cut off mid-item and a plain "where's the rest?" follow-up
+// had nothing to resolve against (no stored state ties that question back to
+// a truncated knowledge answer). Shows the FULL body now, capped only by an
+// overall WhatsApp-reasonable budget across every returned hit combined --
+// so one short entry (the normal case) never gets clipped, and multiple/long
+// entries still degrade to a hard stop with "…" instead of one entry
+// silently eating the whole reply.
 export function formatKnowledgeHits(hits: KnowledgeHit[]): string {
   if (!hits.length) return "";
-  return hits.map(hit => `📌 ${hit.title}\n${hit.snippet.replace(/\s+/g, " ").trim()}`).join("\n\n");
+  const BUDGET = 3500;
+  const blocks: string[] = [];
+  let used = 0;
+  for (const hit of hits) {
+    const body = hit.body.replace(/[ \t]+/g, " ").replace(/\n{3,}/g, "\n\n").trim();
+    const block = `📌 ${hit.title}\n${body}`;
+    if (used + block.length > BUDGET) { blocks.push(block.slice(0, Math.max(0, BUDGET - used)).trimEnd() + "…"); break; }
+    blocks.push(block); used += block.length + 2;
+  }
+  return blocks.join("\n\n");
 }
