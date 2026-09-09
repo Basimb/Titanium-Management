@@ -187,8 +187,15 @@ export function validateSecretaryIntent(value: unknown, input: SecretaryModelInp
     // before it, same as before.
     const numbers = [...new Set([...input.text.matchAll(/[0-9٠-٩۰-۹]{1,3}/gu)].map(match => toOrdinal(match[0])))];
     const candidatesFor = numbers.length > 1 ? numbers : (() => {
-      const match = /(?:رقم|مهم[ةه])\s*[:#-]?\s*([0-9٠-٩۰-۹]{1,3})/u.exec(input.text);
-      return match ? [toOrdinal(match[1])] : [];
+      const withLabel = /(?:رقم|مهم[ةه])\s*[:#-]?\s*([0-9٠-٩۰-۹]{1,3})/u.exec(input.text);
+      if (withLabel) return [toOrdinal(withLabel[1])];
+      // No "رقم"/"مهمة" label: still unambiguous when the number sits right
+      // after the claim verb with nothing else in the message ("استلم 15") --
+      // there is only one number in the whole text at this point (the
+      // numbers.length <= 1 branch), so it cannot be naming anything but the
+      // task position, same as if he had typed "رقم 15".
+      const afterVerb = /^(?:اخذ|أخذ|اخد|أخد|استلم|خذلي|خذها|احمل)\s*[:#-]?\s*([0-9٠-٩۰-۹]{1,3})\s*$/u.exec(input.text.trim());
+      return afterVerb ? [toOrdinal(afterVerb[1])] : [];
     })();
     if (candidatesFor.length) {
       const items: Array<{ n: number; id: string; title: string }> = [];

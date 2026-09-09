@@ -109,6 +109,32 @@ test('ordinary task updates remain available without review context', () => {
   assert.equal(validateSecretaryIntent(plan, input).kind, 'command');
 });
 
+test('admin claiming an unassigned task by bare number ("استلم 15") resolves locally, same as "استلم رقم 15"', () => {
+  const ownershipCandidates = Array.from({ length: 15 }, (_, i) => ({
+    id: `task-${i + 1}`, title: `مهمة رقم ${i + 1}`, projectName: 'مشروع داخلي تجريبي', status: 'progress', assignee: null,
+  }));
+  for (const text of ['استلم 15', 'استلم رقم 15', 'خذلي 15', 'احمل 15']) {
+    const input = context({ review: undefined, text, ownershipCandidates });
+    const plan = validateSecretaryIntent(emptySecretaryIntent('ownership_request'), input);
+    assert.equal(plan.kind, 'claim_multiple', `expected a local self-claim for "${text}"`);
+    const { items, failed } = JSON.parse(plan.message);
+    assert.deepEqual(failed, []);
+    assert.equal(items.length, 1);
+    assert.equal(items[0].id, 'task-15');
+  }
+});
+
+test('a bare number is only treated as a task position when nothing follows the claim verb but the number', () => {
+  const ownershipCandidates = [{ id: 'task-15', title: 'مهمة رقم 15', projectName: 'مشروع داخلي تجريبي', status: 'progress', assignee: null }];
+  // Text after the number means the "15" is not necessarily naming the task by
+  // position (could be a file/phone/amount) -- this must still fall through to
+  // the model's own (here: ownership_request, since basem/admin hits the
+  // earlier clarify branch) rather than guessing.
+  const input = context({ review: undefined, text: 'استلم المهمة يلي حكينا عنها, رقم الملف مو 15', ownershipCandidates });
+  const plan = validateSecretaryIntent(emptySecretaryIntent('ownership_request'), input);
+  assert.notEqual(plan.kind, 'claim_multiple');
+});
+
 test('search remains evidence-based: no citation annotations means no invented verification', async () => {
   let seen;
   const answer = await searchSecretaryWeb('سؤال عام اصطناعي', { apiKey: 'synthetic-only', fetcher: async (url, options) => {
