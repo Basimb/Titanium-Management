@@ -7,7 +7,7 @@ import { activeTasks, overdue, overdueDays, delayLabel, pages, taskRank, type Di
 import './tv-dashboard.css';
 
 const labels:Record<string,string>={open:'بانتظار الاستلام',progress:'قيد التنفيذ',approval:'بانتظار الاعتماد',completed:'مكتملة'};
-const approvalLabels:Record<string,string>={deadline_extension:'تمديد موعد',task_close:'إغلاق مهمة',project_create:'مشروع جديد',rule:'قاعدة عمل',policy:'سياسة'};
+const approvalLabels:Record<string,string>={deadline_extension:'تمديد موعد',task_close:'إغلاق مهمة',task_ownership:'طلب مسؤولية مهمة',task_transfer:'تحويل مهمة',task_create:'فتح مهمة',project_create:'مشروع جديد',project_close:'إغلاق مشروع',rule:'قاعدة عمل',policy:'سياسة'};
 const followupLabels:Record<string,string>={overdue_task:'متابعة مهمة متأخرة',silent_task:'طلب تحديث',stale_approval:'تذكير بموافقة',daily_digest:'ملخص الفريق',queued:'إشعار'};
 type Slide={kind:'overview'|'tasks'|'team'|'decisions';title:string;page:number;total:number};
 function Ring({value,size=100}:{value:number;size?:number}) {return <svg width={size} height={size} viewBox="0 0 100 100" role="img" aria-label={`نسبة الإنجاز ${value} بالمئة`}><circle className="tv-ring-track" cx="50" cy="50" r="42"/><circle className="tv-ring-value" cx="50" cy="50" r="42" strokeDasharray="263.9" strokeDashoffset={263.9*(1-value/100)}/><text x="50" y="56" textAnchor="middle">{value}%</text></svg>;}

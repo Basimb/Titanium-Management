@@ -24,7 +24,7 @@ type Attachment = { id:string; taskId:string; fileName:string; contentType:strin
 type Activity = { id:number; actorUserId:string|null; actorName:string; action:string; entityType:string; entityId:string; details:string; createdAt:number };
 type CurrentUser = { id:string; name:string; role:"admin"|"member"; active:number };
 type State = { currentUser:CurrentUser|null; projects:Project[]; tasks:Task[]; comments:Comment[]; users:User[]; attachments:Attachment[]; activity:Activity[]; monitoring?:Monitoring };
-const APPROVAL_LABEL:Record<string,string> = { deadline_extension:"تمديد موعد", task_close:"إغلاق مهمة", project_create:"فتح مشروع", rule:"قاعدة", policy:"سياسة" };
+const APPROVAL_LABEL:Record<string,string> = { deadline_extension:"تمديد موعد", task_close:"إغلاق مهمة", task_ownership:"طلب مسؤولية مهمة", task_transfer:"تحويل مهمة", task_create:"فتح مهمة", project_create:"فتح مشروع", project_close:"إغلاق مشروع", rule:"قاعدة", policy:"سياسة" };
 const FOLLOWUP_LABEL:Record<string,string> = { overdue_task:"تنبيه تأخير", silent_task:"استفسار عن مهمة صامتة", stale_approval:"تذكير بموافقة معلّقة", daily_digest:"ملخص الجروب", queued:"إشعار" };
 
 const emptyState:State = { currentUser:null, projects:[], tasks:[], comments:[], users:[], attachments:[], activity:[] };
@@ -391,7 +391,7 @@ function MonitoringPanel({ monitoring, tasks, projects, now, isAdmin, onDecide }
     <div className="titanium-monitor-grid">
       <div className="titanium-monitor-card"><h3>بانتظار قرار باسم ({monitoring.approvals.length})</h3>
         {monitoring.approvals.length===0&&<p className="titanium-muted">لا توجد طلبات معلّقة.</p>}
-        {monitoring.approvals.map(approval=><div className="titanium-monitor-row" key={approval.id}><div><strong>{APPROVAL_LABEL[approval.type]||approval.type}</strong><span>{approval.summary} · {approval.requestedByName} · {new Date(approval.createdAt).toLocaleDateString("ar-JO")}</span>{typeof approval.payload.reason==="string"&&<span>السبب: {approval.payload.reason}</span>}</div>
+        {monitoring.approvals.map(approval=><div className="titanium-monitor-row" key={approval.id}><div><strong>{APPROVAL_LABEL[approval.type]||approval.type}</strong><span>{approval.summary} · {approval.requestedByName} · {new Date(approval.createdAt).toLocaleDateString("ar-JO")}</span>{typeof approval.payload.reason==="string"&&approval.payload.reason&&<span>السبب: {approval.payload.reason}</span>}{approval.type==="project_close"&&typeof approval.payload.openTasks==="number"&&<span>{approval.payload.openTasks?`⚠️ ${approval.payload.openTasks} مهمة مفتوحة`:"كل المهام منتهية"}</span>}</div>
           {isAdmin&&<div className="titanium-monitor-actions"><Input value={notes[approval.id]||""} onChange={event=>setNotes(current=>({...current,[approval.id]:event.target.value}))} placeholder="ملاحظة (اختياري)" /><Button size="sm" onClick={()=>onDecide(approval.id,"approved",notes[approval.id]||"")}>اعتماد</Button><Button size="sm" variant="destructive" onClick={()=>onDecide(approval.id,"rejected",notes[approval.id]||"")}>رفض</Button></div>}</div>)}
       </div>
       <div className="titanium-monitor-card"><h3>متأخرة ({overdue.length}) · معطّلة ({blocked.length})</h3>

@@ -15,6 +15,7 @@ import { readTeamChatSettings } from "@/lib/team-chat-settings";
 import { executeManagementAction, getManagementSnapshot, isManagementAction, ManagementActionError, parseManagementCommand } from "@/lib/management-actions";
 import { listApprovals, decideApproval } from "@/lib/approvals";
 import { activeRules } from "@/lib/rules";
+import { enqueueAgentMessage } from "@/lib/agent-followups";
 
 /** DASHBOARD_READONLY=1 turns the site into a monitoring screen: only the owner may write, and only approvals decisions. */
 function dashboardReadonly() { return (readTeamChatSettings().DASHBOARD_READONLY ?? process.env.DASHBOARD_READONLY) === "1"; }
@@ -125,7 +126,16 @@ export async function POST(request: Request) {
       const denied = requireAdmin(user); if (denied) return denied;
       const decision = body.decision === "approved" ? "approved" : body.decision === "rejected" ? "rejected" : null;
       if (!decision) return bad("حدد القرار: اعتماد أو رفض");
-      decideApproval(chatDatabase(), user, { approvalId: text(body.approvalId), decision, note: text(body.note) || undefined }, { now });
+      const decided = decideApproval(chatDatabase(), user, { approvalId: text(body.approvalId), decision, note: text(body.note) || undefined }, { now });
+      // A decision made here on the dashboard must reach people the same way
+      // a decision made through WhatsApp chat already does -- otherwise an
+      // employee (or, for task_transfer, the colleague a task was just handed
+      // to) never finds out Basim decided anything at all just because he
+      // happened to use the website instead of WhatsApp.
+      const queue = chatDatabase();
+      if (decided.approval.requestedBy !== user.id) enqueueAgentMessage(queue, { toUser: decided.approval.requestedBy, text: decided.notifyRequester }, now);
+      for (const extra of decided.notifyExtra) enqueueAgentMessage(queue, { toUser: extra.userId, text: extra.text }, now);
+      if (decided.notifyGroup) enqueueAgentMessage(queue, { toUser: "group", text: decided.notifyGroup }, now);
       return loadState(user);
     }
     if (dashboardReadonly() && user.id !== "basem") return forbidden("اللوحة للعرض فقط. التحديثات تتم عبر سكرتير باسم على واتساب.");

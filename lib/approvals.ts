@@ -3,19 +3,19 @@ import type { DatabaseSync } from "node:sqlite";
 import { executeManagementAction, getManagementSnapshot, ManagementActionError, migrateManagementActions, resolveManagementActor, type ManagementActor, type ManagementResult, type ManagementTask } from "./management-actions.ts";
 import { can, isOwner, type PermissionActor } from "./permissions.ts";
 
-export type ApprovalType = "deadline_extension" | "task_close" | "task_ownership" | "task_create" | "project_create" | "rule" | "policy";
+export type ApprovalType = "deadline_extension" | "task_close" | "task_ownership" | "task_transfer" | "task_create" | "project_create" | "project_close" | "rule" | "policy";
 export type ApprovalStatus = "pending" | "approved" | "rejected" | "expired";
 export type Approval = {
   id: string; type: ApprovalType; status: ApprovalStatus; requestedBy: string; requestedByName: string;
   entityType: "task" | "project" | "rule"; entityId: string | null; summary: string; payload: Record<string, unknown>;
   decidedBy: string | null; decisionNote: string | null; createdAt: number; decidedAt: number | null; lastNudgedAt: number | null;
 };
-export type ApprovalDecision = { approval: Approval; effect: ManagementResult | null; notifyRequester: string; notifyGroup: string | null };
+export type ApprovalDecision = { approval: Approval; effect: ManagementResult | null; notifyRequester: string; notifyGroup: string | null; notifyExtra: Array<{ userId: string; text: string }> };
 
 export class ApprovalError extends ManagementActionError {}
 const fail = (status: number, code: string, message: string): never => { throw new ApprovalError(status, code, message); };
 const SELECT = "SELECT id,type,status,requested_by AS requestedBy,requested_by_name AS requestedByName,entity_type AS entityType,entity_id AS entityId,summary,payload,decided_by AS decidedBy,decision_note AS decisionNote,created_at AS createdAt,decided_at AS decidedAt,last_nudged_at AS lastNudgedAt FROM approvals";
-const TYPE_LABEL: Record<ApprovalType, string> = { deadline_extension: "تمديد موعد", task_close: "اعتماد إغلاق مهمة", task_ownership: "طلب مسؤولية مهمة", task_create: "فتح مهمة", project_create: "فتح مشروع", rule: "اعتماد قاعدة", policy: "اعتماد سياسة" };
+const TYPE_LABEL: Record<ApprovalType, string> = { deadline_extension: "تمديد موعد", task_close: "اعتماد إغلاق مهمة", task_ownership: "طلب مسؤولية مهمة", task_transfer: "طلب تحويل مهمة", task_create: "فتح مهمة", project_create: "فتح مشروع", project_close: "اعتماد إغلاق مشروع", rule: "اعتماد قاعدة", policy: "اعتماد سياسة" };
 const PRIORITY_ARABIC: Record<string, string> = { red: "🔴 عاجلة", yellow: "🟡 متوسطة", green: "🟢 عادية" };
 export const APPROVAL_TTL_MS = 14 * 24 * 60 * 60_000;
 
@@ -34,6 +34,9 @@ function text(value: unknown, label: string, max: number, optional = false): str
   return value.trim();
 }
 function now(options?: { now?: number }) { return options?.now ?? Date.now(); }
+// Arabic count agreement for "مهمة" -- 1 and 2 have their own words, 3-10 take
+// the plural, 11+ reverts to the singular after the number.
+const taskCountPhrase = (n: number) => n === 1 ? "مهمة واحدة" : n === 2 ? "مهمتين" : n <= 10 ? `${n} مهام` : `${n} مهمة`;
 
 export function listApprovals(db: DatabaseSync, claimed: ManagementActor, filter: { status?: ApprovalStatus; limit?: number } = {}): Approval[] {
   migrateManagementActions(db);
@@ -125,6 +128,53 @@ export function requestTaskOwnership(db: DatabaseSync, claimed: ManagementActor,
   return { approval, ownerMessage: `${summary}${task.owner || task.suggestedOwner ? `\nالمسؤول الحالي: ${task.owner || task.suggestedOwner}` : "\nالمهمة غير معيّنة حاليًا"}${reason ? `\nالسبب: ${reason}` : ""}\n\nهل تعتمد نقل المسؤولية له؟` };
 }
 
+/** Employee holding a task hands it to a named colleague, or declines it outright
+ * (no colleague named -- "مش مسؤوليتي"). Nothing changes on the task until Basim
+ * decides; a decline with no suggested colleague simply clears the assignment. */
+export function requestTaskTransfer(db: DatabaseSync, claimed: ManagementActor, input: { taskId: string; suggestedOwnerId?: string | null; reason?: string }, options: { now?: number } = {}): { approval: Approval; ownerMessage: string } {
+  migrateManagementActions(db);
+  const actor = resolveManagementActor(db, claimed);
+  if (isOwner(actor as PermissionActor)) return fail(400, "employee_only", "أنت تقدر تعيد تعيين المهمة مباشرة");
+  const task = visibleTask(db, actor, input.taskId);
+  if (task.owner !== actor.name && task.suggestedOwner !== actor.name) return fail(403, "not_owned", "تحويل المهمة متاح للمسؤول عنها فقط");
+  if (task.status === "completed" || task.status === "approval") return fail(409, "invalid_transition", "المهمة منتهية أو بانتظار الاعتماد");
+  // A plain user-existence/name lookup, never the actor's own visibility-scoped
+  // snapshot -- getManagementSnapshot restricts a member's users list to just
+  // themselves, which would wrongly hide the very colleague they are naming here.
+  const suggestedOwnerId = input.suggestedOwnerId || null;
+  const suggestedOwnerName = suggestedOwnerId ? (db.prepare("SELECT name FROM users WHERE id=? AND active=1").get(suggestedOwnerId) as { name: string } | undefined)?.name ?? null : null;
+  if (suggestedOwnerId && !suggestedOwnerName) return fail(400, "owner_missing", "الموظف المقترح غير موجود أو غير مفعّل");
+  if (suggestedOwnerId === actor.id) return fail(400, "self_transfer", "هاي مهمتك أصلًا؛ اذكر اسم الزميل الذي تريد تحويلها له");
+  const reason = text(input.reason, "سبب التحويل", 1000, true);
+  const summary = suggestedOwnerName ? `تحويل «${task.title}» من ${actor.name} إلى ${suggestedOwnerName}` : `${actor.name} يعتذر عن «${task.title}» (مش مسؤوليته)`;
+  const approval = insert(db, actor, { type: "task_transfer", entityType: "task", entityId: task.id,
+    summary, payload: { taskTitle: task.title, fromOwnerId: actor.id, fromOwnerName: actor.name, suggestedOwnerId, suggestedOwnerName, reason, expectedUpdatedAt: task.updatedAt } }, now(options));
+  const ownerMessage = suggestedOwnerName
+    ? `${actor.name} بده يحوّل مهمة «${task.title}» إلى ${suggestedOwnerName}${reason ? `\nالسبب: ${reason}` : ""}\n\nهل تعتمد التحويل؟`
+    : `${actor.name} يقول إن مهمة «${task.title}» مش مسؤوليته${reason ? `\nالسبب: ${reason}` : ""}\n\nاعتماد الطلب بيشيلها عنه بانتظار تعيين مسؤول جديد. تعتمد؟`;
+  return { approval, ownerMessage };
+}
+
+/** Manager (or employee) asks to close/archive a whole project. Nothing changes
+ * until Basim decides -- see project.archive moving to OWNER_ONLY in permissions.ts. */
+export function requestProjectClose(db: DatabaseSync, claimed: ManagementActor, input: { projectId: string; reason?: string }, options: { now?: number } = {}): { approval: Approval; ownerMessage: string } {
+  migrateManagementActions(db);
+  const actor = resolveManagementActor(db, claimed);
+  if (isOwner(actor as PermissionActor)) return fail(400, "employee_only", "أنت تقدر تغلق المشروع مباشرة");
+  const project = db.prepare("SELECT id,name,status,archived_at AS archivedAt FROM projects WHERE id=?").get(input.projectId) as
+    { id: string; name: string; status: string; archivedAt: number | null } | undefined;
+  if (!project || project.archivedAt !== null) return fail(404, "project_missing", "المشروع غير موجود أو مؤرشف بالفعل");
+  const reason = text(input.reason, "سبب الإغلاق", 1000, true);
+  // Archiving never blocks on open tasks (Basim can already do it directly),
+  // but he's now the one deciding requests he didn't initiate himself -- he
+  // needs to know what's still open before approving blind.
+  const openTasks = (db.prepare("SELECT count(*) AS n FROM tasks WHERE project_id=? AND archived_at IS NULL AND status!='completed'").get(project.id) as { n: number }).n;
+  const summary = `إغلاق مشروع «${project.name}»`;
+  const approval = insert(db, actor, { type: "project_close", entityType: "project", entityId: project.id, summary, payload: { projectName: project.name, reason, openTasks } }, now(options));
+  const ownerMessage = `${actor.name} يطلب إغلاق مشروع «${project.name}»${reason ? `\nالسبب: ${reason}` : ""}${openTasks ? `\n⚠️ لسا فيه ${taskCountPhrase(openTasks)} مفتوحة بالمشروع.` : "\nكل مهام المشروع منتهية."}\n\nهل تعتمد الإغلاق؟`;
+  return { approval, ownerMessage };
+}
+
 /** Manager/employee proposes a project. Created as pending and filed as a request. */
 export function requestProjectCreate(db: DatabaseSync, claimed: ManagementActor, input: { name: string; goal?: string; tasks?: Array<{ title: string; ownerId?: string | null; priority?: "red" | "yellow" | "green"; dueDate?: string | null }> }, options: { now?: number } = {}): { approval: Approval; ownerMessage: string } {
   migrateManagementActions(db);
@@ -132,9 +182,6 @@ export function requestProjectCreate(db: DatabaseSync, claimed: ManagementActor,
   const name = text(input.name, "اسم المشروع", 240);
   const goal = text(input.goal, "الهدف", 2000, true);
   const tasks = (input.tasks ?? []).slice(0, 40).map(task => ({ title: text(task.title, "اسم المهمة", 240), ownerId: task.ownerId ?? null, priority: task.priority ?? "yellow", dueDate: task.dueDate ?? null }));
-  // Arabic count agreement for "مهمة" -- 1 and 2 have their own words, 3-10 take
-  // the plural, 11+ reverts to the singular after the number.
-  const taskCountPhrase = (n: number) => n === 1 ? "مهمة واحدة" : n === 2 ? "مهمتين" : n <= 10 ? `${n} مهام` : `${n} مهمة`;
   const summary = `فتح مشروع «${name}»${tasks.length ? ` مع ${taskCountPhrase(tasks.length)}` : ""}`;
   const approval = insert(db, actor, { type: "project_create", entityType: "project", entityId: null, summary, payload: { name, goal, tasks } }, now(options));
   const lines = tasks.map((task, index) => `${index + 1}. ${task.title}${task.ownerId ? ` — ${task.ownerId}` : ""} — ${task.priority}${task.dueDate ? ` — ${task.dueDate}` : ""}`);
@@ -225,6 +272,18 @@ export function decideApproval(db: DatabaseSync, claimed: ManagementActor, input
           notifyGroup = null;
           break;
         }
+        case "task_transfer": {
+          // A suggested colleague reassigns to them (pending their own claim,
+          // same as any other reassignment); no suggestion at all (a plain
+          // decline) just clears the assignment -- Basim assigns someone new
+          // separately, the same existing "عيّنها لـ..." flow as any other task.
+          const suggestedOwnerId = approval.payload.suggestedOwnerId ? String(approval.payload.suggestedOwnerId) : null;
+          effect = executeManagementAction(db, actor, { action: "reassign", taskId: approval.entityId!, ownerId: suggestedOwnerId, expectedUpdatedAt: Number(approval.payload.expectedUpdatedAt) }, { now: at, source: "approval", auditContext: { origin: "approval", confirmedBy: actor.id, approvalId: approval.id } });
+          notifyGroup = suggestedOwnerId
+            ? `🔁 حُوّلت مهمة «${approval.payload.taskTitle}» من ${approval.payload.fromOwnerName} إلى ${approval.payload.suggestedOwnerName}`
+            : `🔁 ${approval.payload.fromOwnerName} لم يعد مسؤولًا عن «${approval.payload.taskTitle}» — بانتظار تعيين مسؤول جديد`;
+          break;
+        }
         case "task_create": {
           effect = executeManagementAction(db, actor, { action: "add_task", projectId: String(approval.payload.projectId), title: String(approval.payload.title),
             ...(approval.payload.details ? { details: String(approval.payload.details) } : {}), priority: approval.payload.priority as "red" | "yellow" | "green",
@@ -238,6 +297,11 @@ export function decideApproval(db: DatabaseSync, claimed: ManagementActor, input
           for (const task of tasks) executeManagementAction(db, actor, { action: "add_task", projectId: created.entityId, title: task.title, priority: task.priority, dueDate: task.dueDate, ownerId: task.ownerId }, { now: at + 1, source: "approval" });
           effect = created;
           notifyGroup = `📁 مشروع جديد: ${approval.payload.name}${tasks.length ? `\n${tasks.map(task => `• ${task.title}${task.ownerId ? ` — ${task.ownerId}` : ""}`).join("\n")}` : ""}`;
+          break;
+        }
+        case "project_close": {
+          effect = executeManagementAction(db, actor, { action: "archive_project", projectId: approval.entityId! }, { now: at, source: "approval", auditContext: { origin: "approval", confirmedBy: actor.id } });
+          notifyGroup = `📁 اعتُمد إغلاق مشروع «${approval.payload.projectName}» (${approval.requestedByName})`;
           break;
         }
         case "rule": case "policy": {
@@ -260,7 +324,17 @@ export function decideApproval(db: DatabaseSync, claimed: ManagementActor, input
     const notifyRequester = input.decision === "approved"
       ? `✅ وافق باسم على ${TYPE_LABEL[approval.type]}: ${approval.summary}${note ? `\n${note}` : ""}`
       : `❌ لم يعتمد باسم ${TYPE_LABEL[approval.type]}: ${approval.summary}${note ? `\nالسبب: ${note}` : ""}`;
-    return { approval: decided, effect, notifyRequester, notifyGroup };
+    // task_transfer's requester is the OLD owner giving the task away, never
+    // the colleague receiving it (unlike task_ownership, where the requester
+    // IS the new owner and notifyRequester already reaches them) -- without
+    // this, a named colleague would have a task land on them with zero
+    // heads-up. Centralized here so every caller (WhatsApp decide, and the
+    // website's own decide_approval action) sends it the same way.
+    const notifyExtra: Array<{ userId: string; text: string }> = [];
+    if (decided.type === "task_transfer" && decided.status === "approved" && decided.payload.suggestedOwnerId) {
+      notifyExtra.push({ userId: String(decided.payload.suggestedOwnerId), text: `📌 عيّن لك باسم مهمة «${String(decided.payload.taskTitle).slice(0, 200)}» (كانت مع ${String(decided.payload.fromOwnerName).slice(0, 100)}). اكتب «استلمت» أو اسم المهمة لبدء التنفيذ.` });
+    }
+    return { approval: decided, effect, notifyRequester, notifyGroup, notifyExtra };
   } catch (error) { db.exec(nested ? "ROLLBACK TO approval_decision" : "ROLLBACK"); throw error; }
 }
 
@@ -275,7 +349,9 @@ export function findPendingApproval(db: DatabaseSync, claimed: ManagementActor, 
   if (!hint.type && !hint.requesterName && hint.text) {
     const lower = normalize(hint.text);
     if (/تمديد|مهله|موعد/.test(lower)) candidates = candidates.filter(approval => approval.type === "deadline_extension");
+    else if (/مشروع/.test(lower) && /اغلاق|سكر|ارشف|انهاء/.test(lower)) candidates = candidates.filter(approval => approval.type === "project_close");
     else if (/اغلاق|انهاء|خلص/.test(lower)) candidates = candidates.filter(approval => approval.type === "task_close");
+    else if (/تحويل|حول/.test(lower)) candidates = candidates.filter(approval => approval.type === "task_transfer");
     else if (/مسؤول|مسئول|استلام|استلم/.test(lower)) candidates = candidates.filter(approval => approval.type === "task_ownership");
     else if (/مشروع/.test(lower)) candidates = candidates.filter(approval => approval.type === "project_create");
     else if (/قاعده|سياسه/.test(lower)) candidates = candidates.filter(approval => approval.type === "rule" || approval.type === "policy");

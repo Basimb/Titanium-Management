@@ -23,8 +23,11 @@ export type Capability =
   | "knowledge.read" | "knowledge.write"
   | "user.manage" | "message.team" | "report.all";
 
-const OWNER_ONLY: readonly Capability[] = ["project.approve", "project.reject", "project.delete", "task.delete", "task.approve", "task.reject", "task.reopen", "approval.decide", "rule.approve", "user.manage", "message.team", "report.all"];
-const MANAGER: readonly Capability[] = ["project.create", "project.edit", "project.archive", "task.create", "task.edit", "task.assign", "task.move", "task.archive", "task.watch", "task.blocker", "task.expected", "task.claim", "task.update", "task.submit", "approval.request", "rule.propose", "knowledge.read", "knowledge.write"];
+// project.archive is owner-only: closing a project always needs Basim's
+// decision now, even when a department manager asks (see project_close in
+// approvals.ts) -- a manager files a request instead of archiving directly.
+const OWNER_ONLY: readonly Capability[] = ["project.approve", "project.reject", "project.delete", "project.archive", "task.delete", "task.approve", "task.reject", "task.reopen", "approval.decide", "rule.approve", "user.manage", "message.team", "report.all"];
+const MANAGER: readonly Capability[] = ["project.create", "project.edit", "task.create", "task.edit", "task.assign", "task.move", "task.archive", "task.watch", "task.blocker", "task.expected", "task.claim", "task.update", "task.submit", "approval.request", "rule.propose", "knowledge.read", "knowledge.write"];
 const MEMBER: readonly Capability[] = ["task.claim", "task.update", "task.submit", "task.blocker", "task.expected", "approval.request", "knowledge.read"];
 
 /** Which actions a manager/member cannot do directly but may request. */
@@ -32,7 +35,9 @@ export const REQUESTABLE: Record<string, Capability> = {
   deadline_extension: "task.edit",
   task_close: "task.approve",
   task_ownership: "task.assign",
+  task_transfer: "task.assign",
   project_create: "project.approve",
+  project_close: "project.archive",
   rule: "rule.approve",
   policy: "rule.approve",
 };

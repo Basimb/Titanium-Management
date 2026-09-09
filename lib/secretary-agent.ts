@@ -4,7 +4,7 @@
  * files durable approvals, and never mutates without the action engine.
  */
 import type { DatabaseSync } from "node:sqlite";
-import { decideApproval, findPendingApproval, formatPendingList, listApprovals, patchTaskCreateApproval, requestDeadlineExtension, requestProjectCreate, requestTaskClose, requestTaskOwnership, approvalTypeLabel, type Approval } from "./approvals.ts";
+import { decideApproval, findPendingApproval, formatPendingList, listApprovals, patchTaskCreateApproval, requestDeadlineExtension, requestProjectClose, requestProjectCreate, requestTaskClose, requestTaskOwnership, requestTaskTransfer, approvalTypeLabel, type Approval } from "./approvals.ts";
 import { executeManagementAction, ManagementActionError, type ManagementActor } from "./management-actions.ts";
 import { addKnowledge, formatKnowledgeHits, searchKnowledge } from "./knowledge.ts";
 import { activeRules, formatRules, policyViolations, proposeRuleFromStatement, recordCorrection, suggestOwner } from "./rules.ts";
@@ -65,7 +65,8 @@ export function createProjectBundle(db: DatabaseSync, actor: ManagementActor, bu
 /** Execute a confirmed decision (owner, voice path) — called from the confirmation flow. */
 export function applyDecision(db: DatabaseSync, actor: ManagementActor, input: { approvalId: string; decision: "approved" | "rejected"; note?: string }, now: number): AgentResult {
   const decision = decideApproval(db, actor, input, { now });
-  return { status: "applied", reply: `✅ ${decision.approval.status === "approved" ? "اعتمدت" : "رفضت"} ${approvalTypeLabel(decision.approval.type)}: ${decision.approval.summary}`, groupNotice: decision.notifyGroup, notify: [{ userId: decision.approval.requestedBy, text: decision.notifyRequester }] };
+  const notify = [{ userId: decision.approval.requestedBy, text: decision.notifyRequester }, ...decision.notifyExtra];
+  return { status: "applied", reply: `✅ ${decision.approval.status === "approved" ? "اعتمدت" : "رفضت"} ${approvalTypeLabel(decision.approval.type)}: ${decision.approval.summary}`, groupNotice: decision.notifyGroup, notify };
 }
 
 export function handleAgentIntent(plan: SecretaryIntent, ctx: AgentContext): AgentResult | null {
@@ -149,6 +150,23 @@ export function handleAgentIntent(plan: SecretaryIntent, ctx: AgentContext): Age
         if (!plan.taskId) return { status: "clarify", reply: "أي مهمة بدك تستلم مسؤوليتها؟" };
         const request = requestTaskOwnership(db, actor, { taskId: plan.taskId, reason: clean(plan.fields.reason, 1000) }, { now });
         return { status: "applied", reply: `📨 رفعت طلبك لباسم: ${request.approval.summary}. ما تغير المسؤول قبل موافقته.`, taskId: plan.taskId, notify: [{ userId: "basem", text: request.ownerMessage }], groupNotice: null };
+      }
+      case "task_transfer_request": {
+        if (owner) return { status: "clarify", reply: "أنت تقدر تعيد تعيين المهمة مباشرة. اذكر المهمة واسم الموظف الجديد." };
+        if (!plan.taskId) return { status: "clarify", reply: "أي مهمة بدك تحوّل أو تعتذر عنها؟" };
+        const suggestedOwnerId = plan.fields.ownerId || null;
+        const request = requestTaskTransfer(db, actor, { taskId: plan.taskId, suggestedOwnerId, reason: clean(plan.fields.reason, 1000) }, { now });
+        const reply = suggestedOwnerId
+          ? `📨 رفعت طلب التحويل لباسم: ${request.approval.summary}. ما تغير المسؤول قبل موافقته.`
+          : `📨 رفعت لباسم إنها مش مسؤوليتك. ما تغير شي قبل قراره.`;
+        return { status: "applied", reply, taskId: plan.taskId, notify: [{ userId: "basem", text: request.ownerMessage }], groupNotice: null };
+      }
+      case "project_close_request": {
+        if (owner) return { status: "clarify", reply: "أنت تقدر تغلق المشروع مباشرة. اذكر اسمه." };
+        if (!plan.projectId) return { status: "clarify", reply: "أي مشروع بدك تغلق؟" };
+        const project = ctx.projects.find(candidate => candidate.id === plan.projectId);
+        const request = requestProjectClose(db, actor, { projectId: plan.projectId, reason: clean(plan.fields.reason, 1000) }, { now });
+        return { status: "applied", reply: `📨 رفعت طلب إغلاق مشروع «${clean(project?.name ?? "")}» لباسم. بخبرك بقراره.`, projectId: plan.projectId, notify: [{ userId: "basem", text: request.ownerMessage }], groupNotice: null };
       }
       case "rule": {
         if (!owner) return { status: "denied", reply: "القواعد الدائمة يعتمدها باسم." };

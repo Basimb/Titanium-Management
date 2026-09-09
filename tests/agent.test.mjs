@@ -2,12 +2,13 @@ import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import { executeManagementAction, getManagementSnapshot, migrateManagementActions, ManagementActionError } from "../lib/management-actions.ts";
-import { decideApproval, findPendingApproval, listApprovals, requestDeadlineExtension, requestProjectCreate, requestTaskClose, requestTaskOwnership, staleApprovals } from "../lib/approvals.ts";
+import { decideApproval, findPendingApproval, listApprovals, requestDeadlineExtension, requestProjectClose, requestProjectCreate, requestTaskClose, requestTaskOwnership, requestTaskTransfer, staleApprovals } from "../lib/approvals.ts";
 import { can, capabilities, inScope } from "../lib/permissions.ts";
 import { activeRules, policyViolations, proposeRuleFromStatement, recordCorrection, suggestOwner, CORRECTION_THRESHOLD } from "../lib/rules.ts";
 import { addKnowledge, searchKnowledge } from "../lib/knowledge.ts";
 import { createFollowupJobs, enqueueAgentMessage, planFollowups } from "../lib/agent-followups.ts";
 import { handleAgentIntent, parseProjectTaskLines, createProjectBundle } from "../lib/secretary-agent.ts";
+import { emptySecretaryIntent } from "../lib/secretary-intent.ts";
 import { groupBudgetRemaining, isGroupWorthy, GROUP_DAILY_BUDGET } from "../lib/team-chat-policy.ts";
 
 const owner = { id: "basem", name: "باسم", role: "admin", active: 1 };
@@ -58,6 +59,9 @@ test("permission matrix: owner everything, manager creates, member only own work
   assert.ok(inScope(khaled, { owner: "خالد", suggestedOwner: null }));
   assert.ok(!inScope(khaled, { owner: "شادي", suggestedOwner: null }));
   assert.ok(inScope(khaled, { owner: "شادي", suggestedOwner: null, watcher: "خالد" }));
+  // Closing a project always needs Basim's decision now, even for a manager who
+  // used to archive directly -- see project.archive moving to OWNER_ONLY.
+  assert.ok(can(owner, "project.archive") && !can(manager, "project.archive"));
 });
 
 test("member cannot edit deadlines directly; extension request goes to owner and applies on approval", t => {
@@ -123,6 +127,80 @@ test("manager project goes pending; project_create approval creates project with
   assert.match(decision.notifyGroup, /مشروع جديد/);
 });
 
+test("a manager can no longer archive a project directly; must request Basim's approval", t => {
+  const db = fixture(t);
+  assert.throws(() => executeManagementAction(db, manager, { action: "archive_project", projectId: "p" }, { now: T0 }), ManagementActionError);
+  const { approval, ownerMessage } = requestProjectClose(db, manager, { projectId: "p", reason: "خلصت الرخصة" }, { now: T0 });
+  assert.equal(approval.type, "project_close");
+  assert.match(ownerMessage, /مدير القسم يطلب إغلاق مشروع/);
+  // t1 and t2 are both still open in the fixture -- Basim should see that
+  // before deciding blind, since archiving never blocks on it.
+  assert.match(ownerMessage, /لسا فيه مهمتين مفتوحة/);
+  assert.equal(db.prepare("SELECT archived_at FROM projects WHERE id='p'").get().archived_at, null);
+  assert.throws(() => requestProjectClose(db, manager, { projectId: "p" }, { now: T0 + 1 }), /مماثل/);
+  assert.throws(() => requestProjectClose(db, owner, { projectId: "p" }, { now: T0 + 1 }), ManagementActionError);
+  const decision = decideApproval(db, owner, { approvalId: approval.id, decision: "approved" }, { now: T0 + 2 });
+  assert.ok(db.prepare("SELECT archived_at FROM projects WHERE id='p'").get().archived_at);
+  assert.match(decision.notifyGroup, /اعتُمد إغلاق مشروع/);
+});
+
+test("project close request says all tasks are done when none are left open", t => {
+  const db = fixture(t);
+  db.prepare("UPDATE tasks SET status='completed' WHERE project_id='p'").run();
+  const { ownerMessage } = requestProjectClose(db, manager, { projectId: "p" }, { now: T0 });
+  assert.match(ownerMessage, /كل مهام المشروع منتهية/);
+  assert.doesNotMatch(ownerMessage, /مفتوحة/);
+});
+
+test("employee transfers their own task to a named colleague; nothing changes before Basim decides", t => {
+  const db = fixture(t);
+  // شادي merely watches t1 (so it is visible to him) but is not its owner --
+  // only the actual owner/suggested owner may request its transfer.
+  db.prepare("UPDATE tasks SET watcher='شادي' WHERE id='t1'").run();
+  assert.throws(() => requestTaskTransfer(db, shadi, { taskId: "t1", suggestedOwnerId: "khaled" }, { now: T0 }), /متاح للمسؤول عنها فقط/);
+  const { approval, ownerMessage } = requestTaskTransfer(db, khaled, { taskId: "t1", suggestedOwnerId: "shadi", reason: "مشغول بمهمة أخرى" }, { now: T0 });
+  assert.equal(approval.type, "task_transfer");
+  assert.match(ownerMessage, /خالد بده يحوّل مهمة/);
+  assert.equal(db.prepare("SELECT owner FROM tasks WHERE id='t1'").get().owner, "خالد");
+  const decision = decideApproval(db, owner, { approvalId: approval.id, decision: "approved" }, { now: T0 + 1 });
+  const task = db.prepare("SELECT status,owner,suggested_owner FROM tasks WHERE id='t1'").get();
+  assert.equal(task.status, "open"); assert.equal(task.owner, null); assert.equal(task.suggested_owner, "شادي");
+  assert.match(decision.notifyGroup, /حُوّلت مهمة/);
+  // شادي is the one actually receiving the task, not the requester (خالد) --
+  // decideApproval must tell him directly, on top of the group notice and
+  // خالد's own "your request was approved" message, or a task lands on him
+  // with zero heads-up (the same silent-notification gap Basim keeps hitting).
+  assert.equal(decision.notifyExtra.length, 1);
+  assert.equal(decision.notifyExtra[0].userId, "shadi");
+  assert.match(decision.notifyExtra[0].text, /عيّن لك باسم مهمة/);
+});
+
+test("declining a task (no suggested colleague) notifies nobody extra beyond the group and the requester", t => {
+  const db = fixture(t);
+  const { approval, ownerMessage } = requestTaskTransfer(db, khaled, { taskId: "t1", reason: "مش مسؤوليتي" }, { now: T0 });
+  assert.match(ownerMessage, /خالد يقول إن مهمة.*مش مسؤوليته/);
+  assert.throws(() => requestTaskTransfer(db, khaled, { taskId: "t1", suggestedOwnerId: "shadi" }, { now: T0 + 1 }), /مماثل/);
+  const decision = decideApproval(db, owner, { approvalId: approval.id, decision: "approved" }, { now: T0 + 1 });
+  assert.deepEqual(decision.notifyExtra, []);
+  const task = db.prepare("SELECT status,owner,suggested_owner FROM tasks WHERE id='t1'").get();
+  assert.equal(task.owner, null); assert.equal(task.suggested_owner, null); assert.equal(task.status, "open");
+});
+
+test("agent kinds: project_close_request and task_transfer_request file requests for non-owners, clarify for Basim", t => {
+  const db = fixture(t);
+  const ctx = { db, actor: manager, now: T0, users: [owner, khaled, shadi, manager], tasks: [], projects: [{ id: "p", name: "ترخيص دابوق", status: "active" }],
+    stash: () => { throw new Error("must not stash"); } };
+  const closeResult = handleAgentIntent({ ...emptySecretaryIntent("project_close_request"), projectId: "p" }, ctx);
+  assert.equal(closeResult.status, "applied");
+  assert.match(closeResult.reply, /رفعت طلب إغلاق مشروع/);
+  assert.equal(closeResult.notify[0].userId, "basem");
+  const asOwner = handleAgentIntent({ ...emptySecretaryIntent("project_close_request"), projectId: "p" }, { ...ctx, actor: owner });
+  assert.equal(asOwner.status, "clarify");
+  const transferResult = handleAgentIntent({ ...emptySecretaryIntent("task_transfer_request"), taskId: "t1", fields: { ...emptySecretaryIntent().fields, ownerId: "shadi" } }, { ...ctx, actor: khaled });
+  assert.equal(transferResult.status, "applied");
+  assert.match(transferResult.reply, /رفعت طلب التحويل/);
+});
+
 test("findPendingApproval resolves by requester name and type words", t => {
   const db = fixture(t);
   requestDeadlineExtension(db, khaled, { taskId: "t1", newDueDate: "2026-09-07", reason: "x" }, { now: T0 });
@@ -132,6 +210,21 @@ test("findPendingApproval resolves by requester name and type words", t => {
   assert.equal(findPendingApproval(db, owner, { text: "اعتمد اغلاق مهمة شادي" }).approval.type, "task_close");
   assert.equal(findPendingApproval(db, owner, {}).approval, null);
   assert.equal(findPendingApproval(db, owner, {}).candidates.length, 2);
+});
+
+test("findPendingApproval tells a project closure apart from a task closure, and finds a transfer by text", t => {
+  // "سكر/اغلاق مشروع..." must resolve to project_close, never task_close --
+  // the two heuristics share the word "اغلاق", so the مشروع+اغلاق check has to
+  // run before the bare اغلاق check, or every project closure would be
+  // mistaken for closing a random task instead.
+  const db = fixture(t);
+  const { approval: taskCloseApproval } = requestTaskClose(db, khaled, { taskId: "t1", result: "خلصت المتابعة" }, { now: T0 });
+  const { approval: projectCloseApproval } = requestProjectClose(db, manager, { projectId: "p", reason: "خلص الترخيص" }, { now: T0 + 1 });
+  db.prepare("UPDATE tasks SET owner='شادي' WHERE id='t2'").run();
+  const { approval: transferApproval } = requestTaskTransfer(db, shadi, { taskId: "t2", suggestedOwnerId: "khaled" }, { now: T0 + 2 });
+  assert.equal(findPendingApproval(db, owner, { text: "اعتمد اغلاق مشروع دابوق" }).approval.id, projectCloseApproval.id);
+  assert.equal(findPendingApproval(db, owner, { text: "اعتمد اغلاق مهمة عقد الايجار" }).approval.id, taskCloseApproval.id);
+  assert.equal(findPendingApproval(db, owner, { text: "اعتمد تحويل المهمة لخالد" }).approval.id, transferApproval.id);
 });
 
 test("stale approvals are surfaced once per day and expired after TTL", t => {

@@ -3,7 +3,7 @@ import { isDiscussionOnlyRequest } from "./secretary-conversation-policy.ts";
 export const SECRETARY_ACTIONS = ["add_project", "edit_project", "approve_project", "reject_project", "restore_project", "archive_project", "delete_project", "add_task", "edit_task", "claim", "cancel_claim", "comment", "submit", "approve", "reject", "reopen", "reassign", "move_task", "archive_task", "restore_task", "delete_task"] as const;
 export type SecretaryIntent = {
   kind: "summary" | "details" | "projects" | "report" | "help" | "chat" | "search" | "remind" | "command" | "clarify" | "message_team" | "message_status" | "announce_team" | "task_draft"
-    | "approvals" | "decide" | "extension" | "close_request" | "ownership_request" | "rule" | "correction" | "knowledge" | "project_draft"
+    | "approvals" | "decide" | "extension" | "close_request" | "ownership_request" | "task_transfer_request" | "project_close_request" | "rule" | "correction" | "knowledge" | "project_draft"
     /** Locally resolved only (never produced by the model, never in KINDS) -- see validateSecretaryIntent's admin take-task-by-number override. */
     | "claim_multiple";
   intakeMode: "start" | "continue" | null;
@@ -42,8 +42,8 @@ export type SecretaryModelInput = {
   awaitingProjectName?: boolean;
 };
 const KINDS = ["summary", "details", "projects", "report", "help", "chat", "search", "remind", "command", "clarify", "message_team", "message_status", "announce_team", "task_draft",
-  "approvals", "decide", "extension", "close_request", "ownership_request", "rule", "correction", "knowledge", "project_draft"];
-export const AGENT_KINDS = new Set(["approvals", "decide", "extension", "close_request", "ownership_request", "rule", "correction", "knowledge", "project_draft"]);
+  "approvals", "decide", "extension", "close_request", "ownership_request", "task_transfer_request", "project_close_request", "rule", "correction", "knowledge", "project_draft"];
+export const AGENT_KINDS = new Set(["approvals", "decide", "extension", "close_request", "ownership_request", "task_transfer_request", "project_close_request", "rule", "correction", "knowledge", "project_draft"]);
 const FIELD_NAMES = ["title", "name", "details", "priority", "dueDate", "ownerId", "reason", "body", "remindAt"];
 // Exported so the server can recognize this exact clarify (to arm/re-arm
 // awaitingProjectName) and consumers never duplicate the literal string.
@@ -80,7 +80,7 @@ For chat, message is a useful friendly Arabic reply, NEVER a claim that you perf
 If the user is complaining about how a PREVIOUSLY SENT list LOOKS (numbering, spacing, alignment, order, formatting — e.g. 'رتب الأرقام', 'الترقيم مش واضح/موزون', 'رتبها أحسن') rather than asking about its actual content, use clarify with a short honest note that WhatsApp plain-text messages cannot be reformatted or realigned on request, and offer to filter/shorten the list instead if that helps; never silently resend the identical list as if nothing was asked.
 Examples of tone/intent: 'هلا كيفك' -> chat with a natural greeting, no task list. 'رتب ترتيب الأرقام مش واضحة' after a task list -> clarify explaining WhatsApp text can't be realigned/reformatted on request, not a resend of the same list. After an explanation, 'مش فاهم وضحلي' -> chat explaining that same point more simply. 'بدي ارتب شغلي ومش عارف من وين ابلش' -> chat with a practical first step, not an invented task mutation. 'لا مش خلصت، بس حكيت معه' -> comment only when the task is clear, never submit.
 For all other kinds message is null. taskId/projectId null when not relevant.
-Actions: add_project(name), edit_project(name), approve_project, reject_project(reason), restore_project, archive_project, delete_project; add_task(projectId,title, optional details/priority/dueDate/ownerId); edit_task(taskId, changed fields only); claim (started/taking task); cancel_claim (return before any work); comment(body exactly based on current update; no status change); submit (fully completed NOW, asks Basim review only); approve (Basim approves, not staff completion); reject(reason); reopen; reassign(ownerId); move_task(projectId destination); archive_task; restore_task; delete_task.
+Actions: add_project(name), edit_project(name), approve_project, reject_project(reason), restore_project, archive_project, delete_project; add_task(projectId,title, optional details/priority/dueDate/ownerId); edit_task(taskId, changed fields only); claim (started/taking task); cancel_claim (return before any work); comment(body exactly based on current update; no status change); submit (fully completed NOW, asks Basim review only); approve (Basim approves, not staff completion); reject(reason); reopen; reassign(ownerId); move_task(projectId destination); archive_task; restore_task; delete_task. archive_project/reassign (on others) are Basim-only; others use project_close_request/task_transfer_request.
 TASK INTAKE: Creation of a task ALWAYS uses kind task_draft, action/taskId/message null, recipientIds [], intakeMode start for an explicit NEW creation request or continue for an answer/correction to the supplied active taskDraft. All other intents have intakeMode null. Never use a task draft found only in history after taskDraft becomes null. An unrelated conversation, cancellation or different action ends the draft; do not resurrect it from 'نعم' or an old assistant proposal.
 Return the FULL current creation draft in projectId and fields(title,details,priority,ownerId,dueDate), preserving already supplied answers from taskDraft ONLY for continue; start ignores old draft fields. Other fields null. Basim/admin creates directly; a member or manager may also start a task_draft, but the server files their finished draft for Basim's decision instead of creating it directly -- plan exactly the same way regardless of who is asking. The server asks ONE missing question at a time: project, descriptive title/what work, (owner only when Basim/admin is asking -- an employee's own task_draft never asks who the owner is, it is always them), priority, due date. Do not ask what is already answered in current text or the active draft. A descriptive title is sufficient; optional details need no extra form question. Never invent a responsible person, priority or date. Null means unanswered. For an EXPLICIT choice to leave the responsible person for later/no assignee (Basim/admin only), ownerId is the special string unassigned; for EXPLICIT no deadline/choose date later, dueDate is unscheduled. These sentinels are ONLY for task creation, never arbitrary IDs. User may answer all questions at once, or correct a previous answer. Never infer a sentinel from silence. Full draft produces a final exact preview and confirmation (or, for a non-admin, a request filed for Basim) on the server; no task is created during questioning.
 PROJECT WHILE OPENING A TASK: ask which project if not explicitly identified; do not select the first/only project silently. If the current text names a project that IS in the current projects list, set projectId to its real id and leave fields.name null. If it names a project NOT in that list (a brand-new project the user wants), that still counts as answered: set projectId null and fields.name to the project's name exactly as said -- the server creates it together with the task; do not ask about project again and never invent a fields.name the user did not say. If taskDraft.newProjectName is already set from an earlier turn in this same draft (continue mode), the project is already answered -- leave both projectId and fields.name null this turn unless the user is explicitly naming a different project instead.
@@ -95,6 +95,8 @@ AGENT KINDS (all planning only; the server enforces roles and asks for confirmat
 - extension: the task OWNER asks for more time ('بدي يوم زيادة', 'مد لي لحد الخميس'): taskId, fields.dueDate = requested YYYY-MM-DD, fields.reason. Employees never edit deadlines directly; this files a request to Basim.
 - close_request: the task OWNER says the work is fully finished ('خلصت عقد الإيجار', 'انتهيت'): taskId, fields.details = the result in their words. If the result/proof is unclear ask one question first (clarify). Do not use command submit anymore for employees.
 - ownership_request: an employee asks to take responsibility for a task not assigned to them ('بدي أستلم مهمة اللوحة', 'بدي مسؤولية مهمة رقم 25'). Choose taskId ONLY from ownershipCandidates; fields.reason contains their stated reason or null. This files a request for Basim and never assigns immediately. If a task is already assigned/suggested to this actor, use command claim instead. If a number is used, it is the 1-based position in ownershipCandidates. If ambiguous, clarify with project and task names.
+- task_transfer_request: task OWNER hands their own task to a named colleague ('حوّل مهمتي لخالد') or declines it ('مش مسؤوليتي'). taskId from their own tasks/ownershipCandidates or a number. fields.ownerId = colleague's id, else null. Files a request, never reassigns; not for Basim (use reassign).
+- project_close_request: a non-admin closes/archives a project ('سكر مشروع دابوق'). projectId required; fields.reason optional. Always needs Basim's decision now; not for Basim (use archive_project).
 - rule: Basim states a standing rule ('أي مهمة حكومية لدابوق خليها لخالد', 'ما في مهمة بدون موعد'): fields.body = the rule sentence, fields.ownerId = the employee it assigns to (or null), message = 3-6 comma-separated Arabic keywords that identify the rule scope, fields.reason = 'require_due_date' or 'require_owner' when the rule is a creation policy, otherwise null.
 - correction: Basim corrects an assignment the secretary/team made ('لا، شادي مش أيمن هو المسؤول عن اللوحات'): fields.ownerId = correct employee id, fields.name = wrong employee name if said, message = 2-5 keywords describing the task type. If the user also wants the live task reassigned, the server will ask; do not emit command.
 - knowledge: a question about company procedures, licensing steps, suppliers, forms, or 'كيف نعمل X عندنا' that may exist in the internal knowledge base: message = the standalone question. Also 'سجّل معلومة/احفظ هذي القاعدة المعرفية' from Basim/managers: fields.title and fields.body. Prefer knowledge over search for internal how-to questions.
@@ -264,12 +266,18 @@ export function validateSecretaryIntent(value: unknown, input: SecretaryModelInp
       if (input.actor.id !== "basem" || input.actor.role !== "admin") return emptySecretaryIntent("clarify", "القرار على الطلبات لباسم فقط. أقدر أعرض لك حالة طلبك.");
       if (!input.pendingApprovals?.length) return emptySecretaryIntent("clarify", "ما في طلبات بانتظار قرارك حاليًا.");
     } else if (plan.action !== null) return emptySecretaryIntent("clarify", "وضحلي بجملة وحدة شو بالضبط بدك تنفذ.");
-    if ((plan.kind === "extension" || plan.kind === "close_request") && (plan.taskId === null || !input.tasks.some(t => t.id === plan.taskId))) return emptySecretaryIntent("clarify", "أي مهمة تقصد؟ اذكر اسمها والمشروع.");
+    if ((plan.kind === "extension" || plan.kind === "close_request" || plan.kind === "task_transfer_request") && (plan.taskId === null || !input.tasks.some(t => t.id === plan.taskId))) return emptySecretaryIntent("clarify", "أي مهمة تقصد؟ اذكر اسمها والمشروع.");
     if (plan.kind === "ownership_request" && (input.actor.id === "basem" || input.actor.role === "admin")) return emptySecretaryIntent("clarify", "أنت تقدر تعيّن المسؤول مباشرة. اذكر المهمة واسم الموظف.");
+    if (plan.kind === "task_transfer_request" && (input.actor.id === "basem" || input.actor.role === "admin")) return emptySecretaryIntent("clarify", "أنت تقدر تعيد تعيين المهمة مباشرة. اذكر المهمة واسم الموظف الجديد.");
+    if (plan.kind === "project_close_request" && (input.actor.id === "basem" || input.actor.role === "admin")) return emptySecretaryIntent("clarify", "أنت تقدر تغلق المشروع مباشرة. اذكر اسمه.");
+    if (plan.kind === "project_close_request" && (plan.projectId === null || !input.projects.some(p => p.id === plan.projectId))) return emptySecretaryIntent("clarify", "أي مشروع بدك تغلق؟ اذكر اسمه.");
     // WhatsApp renders Arabic right-to-left text around bare numbers inconsistently.
     // When an employee explicitly says "رقم 12", resolve that number against the
     // server-issued candidate list instead of trusting the model's interpretation.
-    if (plan.kind === "ownership_request" && input.ownershipCandidates?.length) {
+    // The same numbered list backs "شو مهامي" (ordered/scoped identically per
+    // actor in secretary-service.ts), so "سكر رقم 2"/"حولها رقم 2" after seeing
+    // that list resolves against the exact same positions -- not just taking a task.
+    if ((plan.kind === "ownership_request" || plan.kind === "close_request" || plan.kind === "task_transfer_request") && input.ownershipCandidates?.length) {
       const match = /(?:رقم|مهم[ةه])\s*[:#-]?\s*([0-9٠-٩۰-۹]{1,3})/u.exec(input.text);
       if (match) {
         const ordinal = Number(match[1].normalize("NFKC").replace(/[٠-٩]/g, digit => String(digit.charCodeAt(0) - 0x660)).replace(/[۰-۹]/g, digit => String(digit.charCodeAt(0) - 0x6f0)));
@@ -282,6 +290,11 @@ export function validateSecretaryIntent(value: unknown, input: SecretaryModelInp
       const chosen = input.ownershipCandidates?.find(t => t.id === plan.taskId);
       if (chosen?.status === "completed") return emptySecretaryIntent("clarify", "هاي المهمة معتمدة خلص، ما بينفع تاخدها من جديد.");
       if (chosen?.status === "approval") return emptySecretaryIntent("clarify", "هاي المهمة بانتظار اعتماد باسم حاليًا، ما بينفع استلامها الآن.");
+    }
+    if (plan.kind === "task_transfer_request" && !input.ownershipCandidates?.some(t => t.id === plan.taskId && t.assignee === input.actor.name)) return emptySecretaryIntent("clarify", "هاي المهمة مو معيّنة إلك أصلًا. أي مهمة من مهامك بدك تحوّل؟");
+    if (plan.kind === "task_transfer_request" && plan.fields.ownerId !== null) {
+      if (plan.fields.ownerId === input.actor.id) return emptySecretaryIntent("clarify", "هاي مهمتك أصلًا؛ اذكر اسم الزميل الذي تريد تحويلها له.");
+      if (!input.users.some(u => u.id === plan.fields.ownerId)) return emptySecretaryIntent("clarify", "مين الزميل المقصود بالضبط؟ اذكر اسمه المسجّل.");
     }
     if (plan.kind === "extension" && !plan.fields.dueDate) return emptySecretaryIntent("clarify", "لأي تاريخ بدك التمديد؟ اكتب اليوم أو التاريخ والسبب.");
     if (plan.kind === "rule" && (!plan.fields.body?.trim() || (input.actor.id !== "basem"))) return emptySecretaryIntent("clarify", "القواعد الدائمة يعتمدها باسم. اكتب نص القاعدة بوضوح.");
@@ -470,6 +483,10 @@ const TOOLS: Record<string, { description: string; properties: Record<string, un
     properties: { taskId: STRING, fields: fieldsSchema({ details: "required" }) }, required: ["taskId", "fields"] },
   ownership_request: { description: "An employee asks to take responsibility for one specific unassigned task from ownershipCandidates.",
     properties: { taskId: STRING, fields: fieldsSchema({ reason: "optional" }) }, required: ["taskId", "fields"] },
+  task_transfer_request: { description: "The task owner hands off their own task to a named colleague, or declines it as not their responsibility.",
+    properties: { taskId: STRING, fields: fieldsSchema({ ownerId: "optional", reason: "optional" }) }, required: ["taskId", "fields"] },
+  project_close_request: { description: "A manager (not Basim) asks to close/archive a specific project; requires Basim's approval.",
+    properties: { projectId: STRING, fields: fieldsSchema({ reason: "optional" }) }, required: ["projectId", "fields"] },
   rule: { description: "Basim states a standing rule for future work.",
     properties: { message: STRING, fields: fieldsSchema({ body: "required", ownerId: "optional", reason: "optional" }) }, required: ["message", "fields"] },
   correction: { description: "Basim corrects an assignment the secretary or team made.",

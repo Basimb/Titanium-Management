@@ -971,7 +971,7 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
       db.prepare("DELETE FROM secretary_pending WHERE conversation_key=?").run(key);
       const result = handleAgentIntent(plan, { db, actor: freshActor, now, inputKind: event.inputKind, suppressNotices: event.groupId === null && /(?:لا|ما)\s+(?:تبعت|تبعث|ترسل)|بدون\s+(?:رسائل|إشعارات|اشعارات)/u.test(event.text), users: state.users, tasks: state.tasks, projects: state.projects,
         stash: command => { const token = "T" + randomBytes(3).toString("hex").toUpperCase(); db.prepare("INSERT INTO secretary_pending VALUES(?,?,?,?,?,?,?)").run(key, token, JSON.stringify(command), initialHash, event.text, event.messageId, now + CONFIRM_MS); log(db, freshActor, event, "secretary_proposal", { summary: "عرض تغييرًا ينتظر التأكيد", proposedCommand: command, confirmationRequired: true }, now); return token; } });
-      if (result) { deliverAgentSideEffects(db, freshActor, result, now); return save(db, event, freshActor, { status: result.status, reply: result.reply, ...(result.taskId ? { taskId: result.taskId } : {}) }, result.taskId ? ["t:" + result.taskId] : [], now); }
+      if (result) { deliverAgentSideEffects(db, freshActor, result, now); return save(db, event, freshActor, { status: result.status, reply: result.reply, ...(result.taskId ? { taskId: result.taskId } : {}) }, [...(result.taskId ? ["t:" + result.taskId] : []), ...(result.projectId ? ["p:" + result.projectId] : [])], now); }
     }
     if (plan.kind === "command") {
       const command = commandFrom(plan, state);

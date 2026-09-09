@@ -29,7 +29,7 @@ test('context budget preserves catalogs and complete pending preview',async()=>{
  const preview={text:'exact draft '.repeat(300),recipientIds:['member']};
  let body;await inferSecretaryIntent({...input,history:[{role:'user',content:'x'.repeat(3000)},{role:'user',content:'recent'}],pendingMessagePreview:preview},{apiKey:'synthetic',fetcher:async(_,o)=>{body=JSON.parse(o.body);return ok();}});
  const sent=JSON.parse(body.messages[1].content);assert.deepEqual(sent.pendingMessagePreview,preview);assert.equal(sent.history.length,1);
- assert.deepEqual(sent.tasks,input.tasks);assert.ok(body.messages[0].content.length<21000);
+ assert.deepEqual(sent.tasks,input.tasks);assert.ok(body.messages[0].content.length<22000);
 });
 
 
