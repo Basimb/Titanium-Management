@@ -14,6 +14,10 @@ import type { SecretaryIntent } from "./secretary-intent.ts";
 export type AgentResult = { status: string; reply: string; taskId?: string; projectId?: string; groupNotice?: string | null; notify?: Array<{ userId: string; text: string }> };
 export type AgentContext = {
   db: DatabaseSync; actor: ManagementActor; now: number; inputKind?: string | null; suppressNotices?: boolean;
+  // The admin's own raw WhatsApp text, when available -- see the "decide"
+  // case's use of it below for why this must be the verbatim message and
+  // never the model-produced plan.message.
+  text?: string | null;
   users: Array<{ id: string; name: string; active?: number }>; tasks: Array<{ id: string; title: string; projectId: string; status: string; owner: string | null; dueDate: string | null }>;
   projects: Array<{ id: string; name: string; status: string }>;
   /** Store a pending command for the existing confirmation flow (token returned). */
@@ -99,18 +103,48 @@ export function handleAgentIntent(plan: SecretaryIntent, ctx: AgentContext): Age
       }
       case "decide": {
         if (!can(actor as PermissionActor, "approval.decide")) return { status: "denied", reply: "القرار على الطلبات لباسم فقط." };
-        const hint = clean(plan.message, 200);
         const pending = listApprovals(db, actor, { status: "pending" });
+        if (!pending.length) return { status: "clarify", reply: "ما في طلبات بانتظار قرارك حاليًا." };
+        const decision = plan.action === "approve" ? "approved" : "rejected";
+        const note = clean(plan.fields.reason, 2000) || undefined;
+        // The model's own free-text `message` field for this intent is its
+        // paraphrase of what Basim said, not a guaranteed verbatim copy --
+        // it can drop the exact ordinal word/number he typed ("الاول"),
+        // which made every retry loop back to the same "أكثر من طلب مطابق"
+        // clarify no matter what he said next. ctx.text is the actual raw
+        // message; check it first and only fall back to the model's message.
+        const rawText = clean(ctx.text ?? "", 200);
+        const hint = clean(plan.message, 200);
+        const combined = rawText || hint;
+        // "ارفض الكل"/"اعتمد الكل": decide every pending request in one go.
+        // Basim asked for this directly after hitting the ordinal bug above
+        // on repeat -- when several unrelated requests are pending, forcing
+        // him through them one numbered clarify at a time isn't always what
+        // he wants, and "الكل" was never a recognized word to begin with, so
+        // it silently fell into the same ambiguous-candidates clarify too.
+        if (!voice && /(?:الكل|كلها|كلهم|جميعها|جميعهم)/.test(combined)) {
+          const notify: Array<{ userId: string; text: string }> = [];
+          const groupNotices: string[] = [];
+          const lines: string[] = [];
+          for (const approval of pending) {
+            const result = decideApproval(db, actor, { approvalId: approval.id, decision, note }, { now });
+            notify.push({ userId: result.approval.requestedBy, text: result.notifyRequester }, ...result.notifyExtra);
+            if (result.notifyGroup) groupNotices.push(result.notifyGroup);
+            lines.push(`• ${approvalTypeLabel(result.approval.type)} — ${result.approval.summary} (${result.approval.requestedByName})`);
+          }
+          return { status: "applied", reply: `${decision === "approved" ? "✅ اعتمدت" : "❌ رفضت"} ${pending.length} ${pending.length === 1 ? "طلب" : "طلبات"}:\n${lines.join("\n")}`, groupNotice: groupNotices.length ? groupNotices.join("\n") : null, notify };
+        }
         let target: Approval | null = null;
-        const ordinal = Object.entries(ORDINALS).find(([word]) => hint.includes(word))?.[1];
+        const ordinalFrom = (source: string) => Object.entries(ORDINALS).find(([word]) => source.includes(word))?.[1];
+        const ordinal = ordinalFrom(rawText) ?? ordinalFrom(hint);
         if (ordinal && pending[ordinal - 1]) target = pending[ordinal - 1];
         else {
-          const requester = ctx.users.find(user => hint.includes(user.name))?.name ?? null;
-          const found = findPendingApproval(db, actor, { requesterName: requester, text: hint });
+          const requester = ctx.users.find(user => combined.includes(user.name))?.name ?? null;
+          const found = findPendingApproval(db, actor, { requesterName: requester, text: combined });
           if (found.approval) target = found.approval;
-          else if (found.candidates.length > 1) return { status: "clarify", reply: `في أكثر من طلب مطابق:\n${found.candidates.map((approval, index) => `${index + 1}. ${approvalTypeLabel(approval.type)} — ${approval.summary} (${approval.requestedByName})`).join("\n")}\nقل «اعتمد الأول» أو حدد الطلب.` };
+          else if (found.candidates.length > 1) return { status: "clarify", reply: `في أكثر من طلب مطابق:\n${found.candidates.map((approval, index) => `${index + 1}. ${approvalTypeLabel(approval.type)} — ${approval.summary} (${approval.requestedByName})`).join("\n")}\nقل «اعتمد الأول» أو «ارفض الكل» أو حدد الطلب.` };
         }
-        if (!target) return { status: "clarify", reply: pending.length ? `ما قدرت أحدد الطلب المقصود.\n${formatPendingList(pending)}` : "ما في طلبات بانتظار قرارك حاليًا." };
+        if (!target) return { status: "clarify", reply: `ما قدرت أحدد الطلب المقصود.\n${formatPendingList(pending)}` };
         // Basim may correct a still-pending task-open request in the very
         // message he decides it ("اعتمد بس خلها حمراء ومدتها يومين") --
         // patch the request before deciding so the corrected values are what
@@ -121,8 +155,6 @@ export function handleAgentIntent(plan: SecretaryIntent, ctx: AgentContext): Age
           const priorityLabel = plan.fields.priority === "red" ? "🔴 عاجلة" : plan.fields.priority === "yellow" ? "🟡 متوسطة" : plan.fields.priority === "green" ? "🟢 عادية" : null;
           correctionNote = `${priorityLabel ? ` الأولوية: ${priorityLabel}.` : ""}${plan.fields.dueDate ? ` الموعد: ${plan.fields.dueDate}.` : ""}`;
         }
-        const decision = plan.action === "approve" ? "approved" : "rejected";
-        const note = clean(plan.fields.reason, 2000) || undefined;
         if (voice) {
           const token = ctx.stash({ action: "decide_approval", approvalId: target.id, decision, note });
           return { status: "confirmation", reply: `فهمت من الصوت أنك ${decision === "approved" ? "تعتمد" : "ترفض"}: ${approvalTypeLabel(target.type)} — ${target.summary}${correctionNote ? `\nعدّلت قبل التنفيذ:${correctionNote}` : ""}${note ? `\nالملاحظة: ${note}` : ""}\n\nاكتب «موافق ${token}» للتنفيذ أو «إلغاء».` };

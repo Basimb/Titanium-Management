@@ -311,6 +311,48 @@ test("agent handler: employee extension files a request and notifies owner; owne
   assert.equal(voiceDecide.status, "clarify", "nothing pending after decision");
 });
 
+// Basim reported that "ارفض الاول"/"رفض رقم 1" kept coming back with the exact
+// same "في أكثر من طلب مطابق" list no matter what he typed next, whenever two
+// or more unrelated requests were pending together. Root cause: the ordinal
+// word he actually typed only ever reached handleAgentIntent through the
+// model-generated plan.message field (its own paraphrase of his message),
+// never through his verbatim text -- so a paraphrase that dropped or reworded
+// the ordinal made every retry fail identically. ctx.text now carries the
+// real WhatsApp text and is checked first.
+test("decide resolves an ordinal from the admin's raw text even when the model's own message paraphrase drops it, and \"الكل\" decides every pending request at once", t => {
+  const db = fixture(t);
+  const snapshot = getManagementSnapshot(db, owner);
+  const ctx = text => ({ db, actor: owner, now: T0, text, users: snapshot.users, tasks: snapshot.tasks, projects: snapshot.projects, stash: () => "T" });
+  const base = { intakeMode: null, action: "reject", taskId: null, projectId: null, recipientIds: [], fields: { title: null, name: null, details: null, priority: null, dueDate: null, ownerId: null, reason: null, body: null, remindAt: null } };
+  requestDeadlineExtension(db, khaled, { taskId: "t1", newDueDate: "2026-09-10", reason: "المحكمة" }, { now: T0 });
+  requestTaskOwnership(db, shadi, { taskId: "t2" }, { now: T0 + 1 });
+  assert.equal(listApprovals(db, owner).length, 2);
+  // The model paraphrased away the ordinal entirely -- without ctx.text this
+  // used to fall straight into the ambiguous-candidates clarify.
+  const decided = handleAgentIntent({ ...base, kind: "decide", message: "بدك ترفض الطلب المطلوب" }, ctx("ارفض الاول"));
+  assert.equal(decided.status, "applied", `expected the raw text's ordinal to resolve the target, got: ${decided.reply}`);
+  assert.match(decided.reply, /تمديد/, "must have picked the FIRST pending request (خالد's extension), not شادي's");
+  assert.equal(listApprovals(db, owner, { status: "pending" }).length, 1);
+  // "رفض رقم 1" (a bare digit, not a spelled-out ordinal) must resolve the
+  // same way against the one request still pending.
+  requestDeadlineExtension(db, khaled, { taskId: "t1", newDueDate: "2026-09-12", reason: "تمديد ثاني" }, { now: T0 + 2 });
+  assert.equal(listApprovals(db, owner, { status: "pending" }).length, 2);
+  const byNumber = handleAgentIntent({ ...base, kind: "decide", message: "تم" }, ctx("رفض رقم 1"));
+  assert.equal(byNumber.status, "applied");
+  assert.equal(listApprovals(db, owner, { status: "pending" }).length, 1);
+  // "ارفض الكل": every request still pending gets decided together instead of
+  // repeating the same clarify or requiring one-at-a-time ordinals.
+  requestTaskOwnership(db, shadi, { taskId: "t2" }, { now: T0 + 3 });
+  assert.equal(listApprovals(db, owner, { status: "pending" }).length, 2);
+  const all = handleAgentIntent({ ...base, kind: "decide", action: "reject", message: "خلص" }, ctx("ارفض الكل"));
+  assert.equal(all.status, "applied");
+  assert.match(all.reply, /رفضت 2 طلبات/);
+  assert.equal(listApprovals(db, owner, { status: "pending" }).length, 0);
+  // listApprovals defaults to status:"pending" when no filter is given, so the
+  // full rejected count needs an explicit status filter here.
+  assert.equal(listApprovals(db, owner, { status: "rejected" }).length, 4);
+});
+
 test("project_draft parses task lines, previews for owner, and bundle creation is atomic + audited", t => {
   const db = fixture(t);
   const snapshot = getManagementSnapshot(db, owner);
