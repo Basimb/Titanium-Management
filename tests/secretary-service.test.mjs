@@ -218,6 +218,40 @@ test('manager create task and project use real authorized IDs; delete needs conf
  assert.equal((await f.run(undefined,{...e,text:`موافق ${pending(f.db).token}`})).status,'applied');
  assert.equal((await f.run(command('delete_task',{},'private'),{...e,text:'احذف مهمة شادي'})).status,'confirmation');assert.ok(f.db.prepare("SELECT id FROM tasks WHERE id='private'").get());
 });
+test('Basim can tap موافق/إلغاء instead of typing them, and a stale poll never lands on the wrong proposal',async t=>{
+ const f=fixture(t);const e={senderNumber:'12025550103',text:'ضيف مهمة جديدة لخالد بأولوية متوسطة وبدون موعد'};
+ const proposed=await f.run(command('add_task',{title:'مهمة جديدة',ownerId:'member',priority:'yellow',dueDate:'unscheduled'},null,'p'),e);
+ assert.equal(proposed.status,'confirmation');
+ const token=pending(f.db).token,choices=proposed.choices;
+ assert.equal(choices.id,`CFM${token}`);
+ assert.deepEqual(choices.options.map(o=>o.label),['🟢 موافق','🔴 إلغاء']);
+ assert.equal(choices.options[0].id,`CFM${token}Y`);assert.equal(choices.options[1].id,`CFM${token}N`);
+ assert.ok(choices.expiresAt>f.now);
+ // Tapping "موافق" behaves exactly like typing "موافق <token>".
+ const applied=await f.run(undefined,{...e,choice:{questionId:choices.id,optionId:choices.options[0].id}});
+ assert.equal(applied.status,'applied');
+ assert.ok(f.db.prepare("SELECT id FROM tasks WHERE title='مهمة جديدة'").get());
+ // A "موافق" tap for a proposal that's no longer the live one (superseded)
+ // must not silently confirm whatever is pending now -- same as a stale
+ // typed token, since resolveConfirmChoice only ever produces the exact
+ // text a person typing that token would have sent.
+ const second=await f.run(command('archive_task'),{...e,text:'ارشف اللوحة'});
+ assert.equal(second.status,'confirmation');
+ const staleVote=await f.run(undefined,{...e,choice:{questionId:choices.id,optionId:choices.options[0].id}});
+ assert.equal(staleVote.status,'clarify');
+ assert.equal(f.db.prepare("SELECT archived_at FROM tasks WHERE id='t'").get().archived_at,null);
+ assert.equal(f.db.prepare("SELECT count(*) n FROM secretary_pending").get().n,1);
+ // Tapping "إلغاء" on the live proposal cancels it without archiving.
+ const cancelled=await f.run(undefined,{...e,choice:{questionId:`CFM${pending(f.db).token}`,optionId:`CFM${pending(f.db).token}N`}});
+ assert.equal(cancelled.status,'cancelled');
+ assert.equal(f.db.prepare("SELECT archived_at FROM tasks WHERE id='t'").get().archived_at,null);
+});
+test('confirmation polls never reach employees or group chats -- text still works there',async t=>{
+ const f=fixture(t);
+ const memberConfirm=await f.run(command('comment',{body:'تحديث صوتي'}),{text:'سجل تحديث صوتي',inputKind:'voice'});
+ assert.equal(memberConfirm.status,'confirmation');assert.equal(memberConfirm.choices,undefined);
+ assert.equal((await f.run(undefined,{text:`موافق ${pending(f.db).token}`})).status,'applied');
+});
 test('reused message ID changed body fails closed and cannot expose remapped replies',async t=>{
  const f=fixture(t);const e=f.event();await handleSecretaryEvent(f.db,e,f.config,{infer:async()=>emptySecretaryIntent('summary')});
  assert.equal((await handleSecretaryEvent(f.db,{...e,text:'something else'},f.config,{infer:async()=>{throw Error();}})).status,'denied');

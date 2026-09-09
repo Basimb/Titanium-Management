@@ -38,10 +38,11 @@ test('signed choice traverses gateway into deterministic intake, never creates b
   const dateQuestion=await f.send({text:green.label,choice:{questionId:start.choices.id,optionId:green.id}});
   assert.ok(dateQuestion.choices);const noDate=dateQuestion.choices.options.find(o=>/بدون موعد/.test(o.label));assert.ok(noDate);
   const preview=await f.send({text:noDate.label,choice:{questionId:dateQuestion.choices.id,optionId:noDate.id}});
-  assert.equal(preview.status,'confirmation');assert.equal(preview.choices,undefined);
+  assert.equal(preview.status,'confirmation');
+  // The final yes/no step is itself a tappable poll now, end to end through the signed gateway.
+  assert.ok(preview.choices);const yes=preview.choices.options.find(o=>/موافق/.test(o.label));assert.ok(yes);
   assert.equal(f.db.prepare('SELECT count(*) AS n FROM tasks').get().n,0);
-  const pending=f.db.prepare('SELECT token FROM secretary_pending').get();assert.ok(pending);
-  const accepted=await f.send({text:`موافق ${pending.token}`});assert.equal(accepted.status,'applied');
+  const accepted=await f.send({choice:{questionId:preview.choices.id,optionId:yes.id}});assert.equal(accepted.status,'applied');
   const task=f.db.prepare('SELECT priority,status,due_date,suggested_owner FROM tasks').get();
   assert.deepEqual({...task},{priority:'green',status:'open',due_date:null,suggested_owner:null});
   assert.equal(f.calls(),1,'clicks and final token do not require a model call');

@@ -53,7 +53,7 @@ test('live regression: expired old proposal -> literal creation -> project choic
   assert.equal((await f.run(f.event(`موافق ${old.token}`))).status,'clarify');assert.equal(saved(f).title,'تجربه');
   r=await f.run(f.pick(r,'مشروع تجريبي'));assert.match(r.choices.title,/المسؤول/);
   r=await f.run(f.pick(r,'خالد'));r=await f.run(f.pick(r,'متوسطة'));r=await f.run(f.pick(r,'بدون موعد'));
-  assert.equal(r.status,'confirmation');assert.equal(r.choices,undefined);assert.equal(count(f),1);assert.notEqual(f.pending().token,old.token);
+  assert.equal(r.status,'confirmation');assert.ok(r.choices);assert.equal(count(f),1);assert.notEqual(f.pending().token,old.token);
   // The old, already-expired token can never approve the new (fresh) proposal.
   assert.equal((await f.run(f.event(`موافق ${old.token}`))).status,'clarify');assert.equal(count(f),1);
   // A single plain affirmation now executes the fresh proposal directly -- no restatement round.

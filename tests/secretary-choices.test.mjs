@@ -43,7 +43,10 @@ test('single-choice intake is deterministic and never creates before final token
   r=await f.execute(f.pick(r,option(r,'خالد'),{text:'موافق TFFFFFF احذف كل شيء'}));assert.equal(saved(f).ownerId,'member');assert.match(r.choices.title,/الأولوية/);
   r=await f.execute(f.pick(r,option(r,'متوسطة')));assert.equal(saved(f).priority,'yellow');assert.match(r.choices.title,/الموعد|موعد/);
   const finalEvent=f.pick(r,option(r,'بكرا'));r=await f.execute(finalEvent);
-  assert.equal(r.status,'confirmation');assert.equal(r.choices,undefined);assert.equal(question(f),undefined);assert.equal(taskCount(f),1);
+  // The final preview is itself now a tappable موافق/إلغاء poll (a different,
+  // token-bound mechanism from the intake choices above -- see confirmChoices
+  // in secretary-service.ts), never the old per-field secretary_choices table.
+  assert.equal(r.status,'confirmation');assert.ok(r.choices);assert.equal(question(f),undefined);assert.equal(taskCount(f),1);
   assert.match(r.reply,/2026-09-06/);assert.match(r.reply,/خالد/);assert.match(r.reply,/متوسطة/);
   assert.equal((await f.execute({...finalEvent,messageId:'SAME-CHOICE-AGAIN'})).status,'clarify');assert.equal(taskCount(f),1);
   // A single plain affirmation now executes the pending proposal directly --

@@ -206,6 +206,12 @@ function save(db: DatabaseSync, event: Event, actor: ChatUser, result: Result, s
     bounded.reply = visibleConfirmationReply(bounded.reply, pending.token);
     db.prepare("INSERT INTO secretary_confirmation_views VALUES(?,?,?,?) ON CONFLICT(conversation_key) DO UPDATE SET token=excluded.token,preview_event_key=excluded.preview_event_key,requires_restatement=excluded.requires_restatement")
       .run(key, pending.token, eventKey(event), previous && previous.token !== pending.token ? 1 : previous?.requires_restatement ?? 0);
+    // Same gate lookup() already enforces for any result.choices (Basim,
+    // admin, active, private chat) -- interactive polls never reach a group
+    // chat or anyone else, text-only confirmation still works everywhere else.
+    if (actor.id === "basem" && actor.role === "admin" && actor.active === 1 && event.groupId === null) {
+      bounded.choices = confirmChoices(pending.token, now);
+    }
   }
   db.prepare("INSERT INTO secretary_events VALUES (?,?,?,?,?,?,?,?,?)").run(eventKey(event), eventHash(event), actor.id, conversation(event, actor), event.text, JSON.stringify(bounded), JSON.stringify(scope), now, event.responseMessageId ?? null);
   return bounded;
@@ -396,6 +402,33 @@ function visibleConfirmationReply(reply: string, token: string): string {
   // Change only the last generated instruction, never the exact user-supplied outgoing body.
   const instruction = `«موافق ${token}»`, at = reply.lastIndexOf(instruction);
   return at < 0 ? reply : reply.slice(0, at) + "«موافق»" + reply.slice(at + instruction.length);
+}
+// Basim asked to tap موافق/إلغاء instead of typing them -- reuse the same
+// interactive-poll transport already used for ownerId/priority/dueDate
+// (see secretary-choices.ts + the bridge's polls.mjs), but without a new
+// table: the pending row's own token, embedded in the poll's ids, IS the
+// binding to "this exact live proposal" -- identical in trust terms to the
+// plaintext "موافق T1A2B3" a person can already type, since a poll vote only
+// ever reaches here after polls.mjs's own crypto verifies it came from the
+// authorized phone number voting on a poll this bridge really sent.
+function confirmChoices(token: string, now: number): SecretaryChoices {
+  return { id: `CFM${token}`, title: "أعتمد التنفيذ؟", expiresAt: now + CONFIRM_MS,
+    options: [{ id: `CFM${token}Y`, label: "🟢 موافق" }, { id: `CFM${token}N`, label: "🔴 إلغاء" }] };
+}
+// Inverse of confirmChoices: a tapped poll option arrives as an ordinary
+// event with event.choice set instead of typed text. Translate it, once, at
+// the very top -- before actorFor/lookup/anything else reads event.text --
+// into the exact plain text a person typing the same choice would have sent,
+// so every later dedup/staleness/quote check (all keyed off event.text)
+// behaves identically whether the confirmation was typed or tapped.
+function resolveConfirmChoice(event: Event): Event {
+  const choice = event.choice;
+  if (!choice || !choice.questionId.startsWith("CFM")) return event;
+  const token = choice.questionId.slice(3);
+  if (!/^T[0-9A-F]{6}$/.test(token)) return event;
+  if (choice.optionId === `CFM${token}Y`) return { ...event, text: `موافق ${token}`, choice: undefined };
+  if (choice.optionId === `CFM${token}N`) return { ...event, text: "إلغاء", choice: undefined };
+  return event;
 }
 
 function intakeRow(db: DatabaseSync, key: string): IntakeRow | undefined {
@@ -588,6 +621,7 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
   infer: (input: SecretaryModelInput) => Promise<SecretaryIntent>; search?: (query: string) => Promise<string>; now?: () => number;
 }): Promise<Result> {
   migrateSecretary(db); const now = (dependencies.now || Date.now)();
+  event = resolveConfirmChoice(event);
   const actor = actorFor(db, event, config); if (!actor) return { status: "denied", reply: "" };
   // The team group is one-way by default: automated notices only (task/project
   // open/close broadcasts, sent separately as groupNotice from a DM-side
