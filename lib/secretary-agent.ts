@@ -62,6 +62,22 @@ export function createProjectBundle(db: DatabaseSync, actor: ManagementActor, bu
     groupNotice: bundle.suppressNotices ? null : `📁 مشروع جديد: ${clean(bundle.name)}${lines.length ? `\n${lines.join("\n")}` : ""}` };
 }
 
+/** Execute a confirmed "بدون مشروع" task (owner only) — called from the
+ * confirmation flow. Every task still needs a project row (project_id is
+ * NOT NULL), so this creates a throwaway wrapper project named literally
+ * "بدون مشروع" and marks it is_standalone (Feature: schema + auto-close in
+ * management-actions.ts's "approve" case archives it invisibly once its one
+ * task is done) -- from the user's side this reads as a plain standalone
+ * task, never as "a project was created". Modeled closely on
+ * createProjectBundle above but for exactly one task, and always silent
+ * (no group notice) since there is no real project to announce. */
+export function createStandaloneTask(db: DatabaseSync, actor: ManagementActor, task: ProjectDraftTask & { details?: string }, now: number, context: Record<string, unknown>): AgentResult {
+  const created = executeManagementAction(db, actor, { action: "add_project", name: "بدون مشروع" }, { now, source: "whatsapp_secretary", auditContext: context });
+  db.prepare("UPDATE projects SET is_standalone=1 WHERE id=?").run(created.entityId);
+  const added = executeManagementAction(db, actor, { action: "add_task", projectId: created.entityId, title: task.title, details: task.details || "", priority: task.priority, dueDate: task.dueDate, ownerId: task.ownerId }, { now: now + 1, source: "whatsapp_secretary", auditContext: context });
+  return { status: "applied", taskId: added.entityId, projectId: created.entityId, reply: `✅ أضفت مهمة: ${clean(task.title)} (بدون مشروع).`, groupNotice: null };
+}
+
 /** Execute a confirmed decision (owner, voice path) — called from the confirmation flow. */
 export function applyDecision(db: DatabaseSync, actor: ManagementActor, input: { approvalId: string; decision: "approved" | "rejected"; note?: string }, now: number): AgentResult {
   const decision = decideApproval(db, actor, input, { now });

@@ -28,7 +28,13 @@ export type ManagementCommand = Expected & (
 
 export type ManagementProject = { id: string; name: string; status: string; createdBy: string; createdAt: number;
   updatedAt: number; rejectionReason: string | null; rejectedBy: string | null; rejectedAt: number | null;
-  archivedAt: number | null; archivedBy: string | null };
+  archivedAt: number | null; archivedBy: string | null;
+  // Auto-generated invisible wrapper project for a "بدون مشروع" task (see
+  // secretary-agent.ts's createStandaloneTask); false for every ordinary
+  // project. Every project auto-archives once its last open task closes
+  // (see the "approve" case below) -- this flag only picks the message
+  // wording (standalone vs. a real project), never whether it auto-closes.
+  isStandalone: boolean };
 export type ManagementTask = { id: string; projectId: string; title: string; details: string; priority: string; status: string;
   owner: string | null; suggestedOwner: string | null; startedAt: number | null; dueDate: string | null;
   completedAt: number | null; rejectionReason: string | null; createdAt: number; updatedAt: number | null;
@@ -44,7 +50,7 @@ export class ManagementActionError extends Error {
   constructor(status: number, code: string, message: string) { super(message); this.name = "ManagementActionError"; this.status = status; this.code = code; }
 }
 const fail = (status: number, code: string, message: string): never => { throw new ManagementActionError(status, code, message); };
-const PROJECT_SELECT = "SELECT id,name,status,created_by AS createdBy,created_at AS createdAt,COALESCE(updated_at,created_at) AS updatedAt,rejection_reason AS rejectionReason,rejected_by AS rejectedBy,rejected_at AS rejectedAt,archived_at AS archivedAt,archived_by AS archivedBy FROM projects";
+const PROJECT_SELECT = "SELECT id,name,status,created_by AS createdBy,created_at AS createdAt,COALESCE(updated_at,created_at) AS updatedAt,rejection_reason AS rejectionReason,rejected_by AS rejectedBy,rejected_at AS rejectedAt,archived_at AS archivedAt,archived_by AS archivedBy,is_standalone AS isStandalone FROM projects";
 const TASK_SELECT = "SELECT id,project_id AS projectId,title,details,priority,status,owner,suggested_owner AS suggestedOwner,started_at AS startedAt,due_date AS dueDate,completed_at AS completedAt,rejection_reason AS rejectionReason,created_at AS createdAt,updated_at AS updatedAt,archived_at AS archivedAt,archived_by AS archivedBy,watcher,expected_at AS expectedAt,blocker,last_update_at AS lastUpdateAt FROM tasks";
 const EXPECTED_KEYS = ["expectedUpdatedAt", "expectedStatus", "expectedProjectId", "expectedProjectUpdatedAt", "expectedProjectStatus", "expectedTargetProjectUpdatedAt"];
 export const ACTION_KEYS: Record<ManagementCommand["action"], readonly string[]> = {
@@ -96,7 +102,7 @@ export function migrateManagementActions(sqlite: DatabaseSync): void {
   atomic(sqlite, true, () => {
     const columns = new Set(sqlite.prepare("PRAGMA table_info(projects)").all().map(row => String(row.name)));
     if (!columns.has("id")) return fail(503, "schema_unavailable", "بيانات المشاريع غير جاهزة");
-    for (const [column, type] of [["updated_at", "INTEGER"], ["archived_at", "INTEGER"], ["archived_by", "TEXT"]]) {
+    for (const [column, type] of [["updated_at", "INTEGER"], ["archived_at", "INTEGER"], ["archived_by", "TEXT"], ["is_standalone", "INTEGER DEFAULT 0 NOT NULL"]]) {
       if (!columns.has(column)) sqlite.exec(`ALTER TABLE projects ADD COLUMN ${column} ${type}`);
     }
   });
@@ -128,7 +134,7 @@ export function getManagementSnapshot(sqlite: DatabaseSync, claimed: ManagementA
     const tasks = (sqlite.prepare(`${TASK_SELECT} ORDER BY created_at,id`).all() as ManagementTask[]).filter(task => canViewManagementTask(actor, task));
     const taskIds = new Set(tasks.map(task => task.id));
     const projectIds = new Set(tasks.map(task => task.projectId));
-    const projects = (sqlite.prepare(`${PROJECT_SELECT} ORDER BY created_at,id`).all() as ManagementProject[])
+    const projects = (sqlite.prepare(`${PROJECT_SELECT} ORDER BY created_at,id`).all() as unknown as ManagementProject[])
       .filter(project => manager || projectIds.has(project.id))
       .map(project => ({ ...project, status: project.archivedAt === null ? project.status : "archived" }));
     const comments = sqlite.prepare("SELECT id,task_id AS taskId,author,body,created_at AS createdAt FROM comments ORDER BY created_at DESC,id DESC")
@@ -414,6 +420,26 @@ export function executeManagementAction(sqlite: DatabaseSync, claimed: Managemen
         updateRow(sqlite, "tasks", task.id, changes);
         // The actor may intentionally release a legacy task and lose visibility after this authorized mutation.
         next = sqlite.prepare(`${TASK_SELECT} WHERE id=?`).get(task.id) as ManagementTask;
+        if (command.action === "approve") {
+          // A later "reopen" can un-complete a task, so this can never be
+          // cached -- it is always recomputed live, right here, at the
+          // moment of THIS approve. Same "any open task left?" condition
+          // requestProjectClose (approvals.ts) already shows Basim before he
+          // decides a manual close request.
+          const openLeft = Number((sqlite.prepare("SELECT count(*) AS n FROM tasks WHERE project_id=? AND archived_at IS NULL AND status!='completed'").get(project.id) as { n: number }).n);
+          if (openLeft === 0 && project.archivedAt === null) {
+            // Basim's explicit instruction: when a project's last open task
+            // closes, the WHOLE project archives automatically -- for every
+            // project, not only the invisible "بدون مشروع" wrapper ones. No "ask
+            // Basim first" step at all (an earlier draft of this gated real
+            // projects behind an agent_outbox nudge; Basim corrected that
+            // mid-implementation to fully automatic for all projects).
+            updateRow(sqlite, "projects", project.id, { updated_at: Math.max(at, project.updatedAt + 1), archived_at: at, archived_by: actor.name });
+            sqlite.prepare("INSERT INTO audit_logs (actor_user_id,actor_name,action,entity_type,entity_id,details,created_at) VALUES (?,?,?,?,?,?,?)")
+              .run(actor.id, actor.name, "archive", "project", project.id, JSON.stringify({ summary: project.isStandalone ? `أرشف تلقائيًا المشروع المؤقت: ${project.name}` : `أرشف تلقائيًا (خلصت كل مهامه): ${project.name}`, source: "auto_close" }), at);
+            message += project.isStandalone ? " (وأُغلق تلقائيًا المشروع المؤقت المرتبط فيها)" : ` (وأُغلق تلقائيًا مشروع «${project.name}» لأنه ما بقي فيه مهام مفتوحة)`;
+          }
+        }
       }
       bumpProject(project);
       if (!notification && ["claim", "submit", "approve", "archive"].includes(auditAction)) notification = { action: auditAction, title: task.title, actor: actor.name };

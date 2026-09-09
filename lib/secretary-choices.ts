@@ -49,7 +49,14 @@ export function secretaryChoiceOptions(field: SecretaryChoiceField, catalog: {
 }): Array<{ label: string; value: string | null }> {
   const names = (items: Array<{ id: string; name: string }>) => items.map(item => ({ value: item.id,
     label: items.filter(other => other.name === item.name).length > 1 ? `${clean(item.name, 65)} (${item.id.slice(-12)})` : item.name }));
-  if (field === "projectId") return [...names(catalog.projects).slice(0, 11), ...(catalog.projects.length > 11 ? [{ label: "اكتب اسم مشروع آخر", value: null }] : [])];
+  if (field === "projectId") {
+    // "بدون مشروع" is always offered, alongside the real project list and the
+    // free-text escape hatch -- reserve its slot the same way the escape
+    // hatch's own slot is reserved, so the 12-option cap is never exceeded.
+    const limit = catalog.projects.length > 11 ? 10 : 11;
+    return [...names(catalog.projects).slice(0, limit), { label: "بدون مشروع", value: "no_project" },
+      ...(catalog.projects.length > limit ? [{ label: "اكتب اسم مشروع آخر", value: null }] : [])];
+  }
   if (field === "ownerId") return [...names(catalog.users).slice(0, catalog.users.length > 11 ? 10 : 11),
     { label: "بدون مسؤول حاليًا", value: "unassigned" }, ...(catalog.users.length > 11 ? [{ label: "اكتب اسم موظف آخر", value: null }] : [])];
   if (field === "priority") return [{ label: "🔴 قصوى", value: "red" }, { label: "🟡 متوسطة", value: "yellow" }, { label: "🟢 عادية", value: "green" }];

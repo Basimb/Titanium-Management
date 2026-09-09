@@ -6,7 +6,7 @@ import type { TeamChatConfig, TeamChatEnvelope } from "./team-chat-gateway.ts";
 import { directTaskCreationIntent, emptySecretaryIntent, validateSecretaryIntent, PROJECT_NAME_QUESTION, type SecretaryIntent, type SecretaryModelInput } from "./secretary-intent.ts";
 import { priorityTaskQuery, type PriorityTaskQuery } from "./secretary-priority-query.ts";
 import { AGENT_KINDS } from "./secretary-intent.ts";
-import { applyDecision, createProjectBundle, describeProjectBundle, handleAgentIntent, type AgentResult, type ProjectDraftTask } from "./secretary-agent.ts";
+import { applyDecision, createProjectBundle, createStandaloneTask, describeProjectBundle, handleAgentIntent, type AgentResult, type ProjectDraftTask } from "./secretary-agent.ts";
 import { listApprovals, requestProjectCreate, requestTaskCreate } from "./approvals.ts";
 import { activeRules } from "./rules.ts";
 import { searchKnowledge, formatKnowledgeHits } from "./knowledge.ts";
@@ -30,7 +30,12 @@ type HistoryRow = { original_text: string; result_json: string; scope_json: stri
 // resolved into a real project (created together with the task) once the
 // rest of the draft is complete. Mutually exclusive with projectId in
 // practice: availableDraft clears it the moment a real projectId resolves.
-type TaskDraft = { projectId: string | null; newProjectName: string | null; title: string | null; details: string | null; priority: "red" | "yellow" | "green" | null; ownerId: string | null; dueDate: string | null };
+// noProject is the third, explicit "بدون مشروع" answer to that same question
+// -- present (true) only when chosen, absent otherwise (never a literal
+// false) so a persisted draft with no project answer yet still serializes
+// identically to before this field existed. Mutually exclusive with both
+// projectId and newProjectName -- see availableDraft.
+type TaskDraft = { projectId: string | null; newProjectName: string | null; noProject?: true; title: string | null; details: string | null; priority: "red" | "yellow" | "green" | null; ownerId: string | null; dueDate: string | null };
 type IntakeRow = { draft_json: string; last_event_key: string; expires_at: number };
 const ORIGIN = "https://www.management.titanium-pharmacy.com";
 const CONFIRM_MS = 10 * 60_000;
@@ -449,21 +454,26 @@ function availableDraft(draft: TaskDraft, state: Snapshot): TaskDraft {
   const validDate = date === "unscheduled" || (typeof date === "string" && /^\d{4}-\d{2}-\d{2}$/.test(date)
     && Number.isFinite(Date.parse(`${date}T00:00:00Z`)) && new Date(`${date}T00:00:00Z`).toISOString().slice(0, 10) === date);
   const hasProject = state.projects.some(project => project.id === draft.projectId && project.status === "active" && !project.archivedAt);
+  // projectId/newProjectName/noProject are mutually exclusive answers to the
+  // same "which project" question -- a resolved real project always wins.
+  const noProject = !hasProject && draft.noProject === true;
   return { projectId: hasProject ? draft.projectId : null,
     // A pending new-project name only matters while no real project has
     // resolved yet -- once one has (e.g. a later turn matched an existing
     // project instead), drop it so a duplicate project is never created
     // alongside the real one.
-    newProjectName: hasProject ? null : (draft.newProjectName?.trim().slice(0, 240) || null),
+    newProjectName: hasProject || noProject ? null : (draft.newProjectName?.trim().slice(0, 240) || null),
+    ...(noProject ? { noProject: true as const } : {}),
     title: draft.title?.trim() || null, details: draft.details?.trim() || null,
     priority: draft.priority && ["red", "yellow", "green"].includes(draft.priority) ? draft.priority : null,
     ownerId: draft.ownerId === "unassigned" || state.users.some(user => user.id === draft.ownerId && user.active === 1) ? draft.ownerId : null,
     dueDate: validDate ? date : null };
 }
 function intakeQuestion(draft: TaskDraft, state: Snapshot): string | null {
-  // A named-but-unknown project (newProjectName) counts as answered -- it will
-  // be created together with the task once the rest of the draft is done.
-  if (!draft.projectId && !draft.newProjectName) return `بأي مشروع بدك أضيف المهمة؟ لو مشروع جديد، اذكر اسمه وبفتحه إلك.${state.projects.some(project => project.status === "active") ? ` المشاريع النشطة: ${state.projects.filter(project => project.status === "active").slice(0, 8).map(project => clean(project.name, 90)).join("، ")}.` : ""}`;
+  // A named-but-unknown project (newProjectName) or an explicit "بدون مشروع"
+  // both count as answered -- the former is created together with the task,
+  // the latter skips a project entirely (see taskIntake's noProject branch).
+  if (!draft.projectId && !draft.newProjectName && !draft.noProject) return `بأي مشروع بدك أضيف المهمة؟ لو مشروع جديد، اذكر اسمه وبفتحه إلك. تقدر كمان تقول «بدون مشروع».${state.projects.some(project => project.status === "active") ? ` المشاريع النشطة: ${state.projects.filter(project => project.status === "active").slice(0, 8).map(project => clean(project.name, 90)).join("، ")}.` : ""}`;
   if (!draft.title) return "شو المهمة أو الشغل المطلوب بالضبط؟";
   if (!draft.ownerId) return "مين بدك يمسك المهمة؟ اذكر الموظف، أو قل «بدون مسؤول حاليًا».";
   if (!draft.priority) return "شو أولويتها: 🔴 قصوى، 🟡 متوسطة، ولا 🟢 عادية؟ هاي أولوية الشغل، مش حالة تنفيذه.";
@@ -475,7 +485,7 @@ function choiceCatalogHash(state: Snapshot) {
     users: state.users.map(user => ({ id: user.id, name: user.name, active: user.active, role: user.role })) });
 }
 function missingChoiceField(draft: TaskDraft): SecretaryChoiceField | null {
-  if (!draft.projectId && !draft.newProjectName) return "projectId";
+  if (!draft.projectId && !draft.newProjectName && !draft.noProject) return "projectId";
   if (!draft.title) return null;
   if (!draft.ownerId) return "ownerId";
   if (!draft.priority) return "priority";
@@ -514,11 +524,32 @@ function taskIntake(db: DatabaseSync, event: Event, actor: ChatUser, state: Snap
     clearSecretaryChoices(db, key);
     return save(db, event, actor, { status: "clarify", reply: "ما في مسودة مهمة حالية نكمل عليها. احكيلي المهمة الجديدة المطلوبة من البداية." }, [], now);
   }
-  const proposed: TaskDraft = { projectId: plan.projectId, newProjectName: plan.fields.name, title: plan.fields.title, details: plan.fields.details,
-    priority: plan.fields.priority, ownerId: plan.fields.ownerId, dueDate: plan.fields.dueDate };
+  // "no_project" is a projectId sentinel (mirrors ownerId's "unassigned" and
+  // dueDate's "unscheduled") the planner emits for an explicit "بدون مشروع"
+  // request -- see validateSecretaryIntent/the PROJECT WHILE OPENING A TASK
+  // prompt in secretary-intent.ts. It never reaches availableDraft as a
+  // literal projectId; translate it to the internal noProject flag here.
+  const noProjectChoice = plan.projectId === "no_project";
+  const proposed: TaskDraft = { projectId: noProjectChoice ? null : plan.projectId, newProjectName: plan.fields.name,
+    ...(noProjectChoice ? { noProject: true as const } : {}),
+    title: plan.fields.title, details: plan.fields.details, priority: plan.fields.priority, ownerId: plan.fields.ownerId, dueDate: plan.fields.dueDate };
   if (plan.intakeMode === "continue" && existingDraft) {
     for (const field of Object.keys(proposed) as Array<keyof TaskDraft>) {
       if (proposed[field] === null) Object.assign(proposed, { [field]: existingDraft[field] });
+    }
+    if (noProjectChoice) {
+      // The generic restore-from-existingDraft loop above has no idea
+      // proposed.projectId was deliberately nulled by THIS turn's sentinel
+      // (it looks like any other unanswered field) and would otherwise
+      // resurrect an older real project/newProjectName answer over it.
+      // An explicit "بدون مشروع" this turn always wins.
+      proposed.projectId = null; proposed.newProjectName = null;
+    } else if (!proposed.noProject && proposed.projectId === null && !proposed.newProjectName && existingDraft.noProject) {
+      // noProject is a present-or-absent sentinel, not part of the
+      // null-means-unanswered convention above, so it never gets picked up
+      // by that generic loop -- carry it over explicitly, but only when this
+      // turn didn't just answer the project question a different way.
+      proposed.noProject = true;
     }
   }
   // A brand-new task-open request (not a continuation) that doesn't name any
@@ -526,14 +557,24 @@ function taskIntake(db: DatabaseSync, event: Event, actor: ChatUser, state: Snap
   // filed/created under in this same conversation, if that was recent -- see
   // rememberLastProject. This is what lets "افتح مهمة كمان: ..." right after
   // opening one keep going without repeating the project name; naming a
-  // different project explicitly always overrides it.
-  if (plan.intakeMode === "start" && proposed.projectId === null && !proposed.newProjectName) {
+  // different project explicitly always overrides it. An explicit "بدون
+  // مشروع" this same turn must never be silently overridden by that memory.
+  if (plan.intakeMode === "start" && proposed.projectId === null && !proposed.newProjectName && !proposed.noProject) {
     const recent = recentProject(db, key, now);
     if (recent) proposed.projectId = recent.id;
   }
   // An employee always opens a task for himself -- there is no one else to
   // assign it to from this flow -- so the owner question never applies to him.
   if (!isAdmin && proposed.ownerId === null) proposed.ownerId = actor.id;
+  // "بدون مشروع" creates a real (if invisible) standalone project behind the
+  // scenes -- kept an owner-only capability for now, like every other direct
+  // creation shortcut. The tappable choice never even reaches a non-admin
+  // (see intakeChoices), so the only way here is free text the planner
+  // mapped to the sentinel anyway; decline clearly instead of silently
+  // dropping the answer or filing a request under a made-up project.
+  if (!isAdmin && proposed.noProject) {
+    return save(db, event, actor, { status: "clarify", reply: "فتح مهمة بدون مشروع متاح لباسم فقط حاليًا. اذكر اسم مشروع موجود، أو اسم مشروع جديد وبفتحه مع المهمة." }, [], now);
+  }
   const draft = availableDraft(proposed, state);
   clearSecretaryChoices(db, key);
   // Collecting a new proposal never reuses an older task/send confirmation.
@@ -574,6 +615,17 @@ function taskIntake(db: DatabaseSync, event: Event, actor: ChatUser, state: Snap
       if (!(error instanceof ManagementActionError)) throw error;
       return save(db, event, actor, { status: "clarify", reply: error.message }, scope, now);
     }
+  }
+  if (draft.noProject) {
+    const token = "T" + randomBytes(3).toString("hex").toUpperCase();
+    const command = { action: "create_standalone_task", title: draft.title, ...(draft.details ? { details: draft.details } : {}),
+      ownerId: draft.ownerId === "unassigned" ? null : draft.ownerId, priority: draft.priority,
+      dueDate: draft.dueDate === "unscheduled" ? null : draft.dueDate };
+    const reply = `للتأكيد قبل إنشاء المهمة:\nالمشروع: بدون مشروع\nالمهمة: ${draft.title}${draft.details ? `\nالمطلوب: ${draft.details}` : ""}\nالمسؤول: ${owner ? clean(owner.name, 200) : "بدون مسؤول حاليًا"}\nالأولوية: ${PRIORITIES[draft.priority!].icon} ${PRIORITIES[draft.priority!].label}\nالموعد: ${draft.dueDate === "unscheduled" ? "بدون موعد" : draft.dueDate}\nالحالة عند الإنشاء: مفتوحة بانتظار الاستلام.\n\nلم أنشئ المهمة بعد. اكتب «موافق ${token}» أو رد مباشرة بالموافقة على هذه المعاينة؛ وللتراجع اكتب «إلغاء». التأكيد صالح 10 دقائق.`;
+    if (reply.length > 3700) return save(db, event, actor, { status: "clarify", reply: "تفاصيل المهمة طويلة للمعاينة الكاملة. اختصر التفاصيل حتى أعرضها كلها قبل التأكيد." }, scope, now);
+    db.prepare("INSERT INTO secretary_pending VALUES(?,?,?,?,?,?,?)").run(key, token, JSON.stringify(command), fingerprint(state), event.text, event.messageId, now + CONFIRM_MS);
+    log(db, actor, event, "secretary_proposal", { summary: "عرض إنشاء مهمة بدون مشروع", proposedCommand: command, confirmationRequired: true }, now);
+    return save(db, event, actor, { status: "confirmation", reply }, scope, now);
   }
   if (draft.newProjectName) {
     const token = "T" + randomBytes(3).toString("hex").toUpperCase();
@@ -863,10 +915,12 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
       if (command.action === "schedule_reminder") return reminder(db, event, freshActor, state, command.taskId, command.dueAt, now);
       if (command.action === "close_direct") return closeDirect(db, event, freshActor, state, String(command.taskId), now, { originalText: live.original_text, sourceMessageId: live.source_message_id, confirmationRequired: true, confirmedBy: freshActor.id, confirmationMessageId: event.messageId });
       if (command.action === "claim_multi") return claimMultiple(db, event, freshActor, state, Array.isArray(command.taskIds) ? command.taskIds.map(String) : [], now, { originalText: live.original_text, sourceMessageId: live.source_message_id, confirmationRequired: true, confirmedBy: freshActor.id, confirmationMessageId: event.messageId });
-      if (command.action === "create_project_bundle" || command.action === "decide_approval") {
+      if (command.action === "create_project_bundle" || command.action === "decide_approval" || command.action === "create_standalone_task") {
         try {
           const result = command.action === "create_project_bundle"
             ? createProjectBundle(db, freshActor, { name: String(command.name), goal: String(command.goal ?? ""), tasks: Array.isArray(command.tasks) ? command.tasks : [], suppressNotices: command.suppressNotices === true }, now, { originalText: live.original_text, sourceMessageId: live.source_message_id, confirmationRequired: true, confirmedBy: freshActor.id, confirmationMessageId: event.messageId, senderNumber: event.senderNumber, origin: "whatsapp" })
+            : command.action === "create_standalone_task"
+            ? createStandaloneTask(db, freshActor, { title: String(command.title), details: typeof command.details === "string" ? command.details : "", ownerId: typeof command.ownerId === "string" ? command.ownerId : null, priority: command.priority as "red" | "yellow" | "green", dueDate: typeof command.dueDate === "string" ? command.dueDate : null }, now, { originalText: live.original_text, sourceMessageId: live.source_message_id, confirmationRequired: true, confirmedBy: freshActor.id, confirmationMessageId: event.messageId, senderNumber: event.senderNumber, origin: "whatsapp" })
             : applyDecision(db, freshActor, { approvalId: String(command.approvalId), decision: command.decision === "approved" ? "approved" : "rejected", note: typeof command.note === "string" ? command.note : undefined }, now);
           deliverAgentSideEffects(db, freshActor, result, now);
           if (command.action === "create_project_bundle" && result.projectId) rememberLastProject(db, key, result.projectId, String(command.name), now);
