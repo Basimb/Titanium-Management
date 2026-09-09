@@ -297,12 +297,22 @@ function readReply(plan: SecretaryIntent, actor: ChatUser, state: Snapshot, now:
     if (plan.projectId) { const project = state.projects.find(p => p.id === plan.projectId); if (project) { const tasks = state.tasks.filter(t => t.projectId === project.id); return { result: { status: "summary", reply: `🔵 *${clean(project.name)}* — ${LABELS[project.status] || clean(project.status)}\n${tasks.length} مهام متاحة إلك، ${tasks.filter(t => t.status === "completed").length} معتمدة.\n\n${tasks.slice(0, 6).map(t => secretaryTaskCard(t, state, now)).join("\n\n")}` }, scope: ["p:" + project.id, ...tasks.map(t => "t:" + t.id)] }; } }
     return { result: { status: "clarify", reply: "أي مهمة أو مشروع بدك أشرح لك؟" }, scope: [] };
   }
-  const tasks = state.tasks.filter(t => !t.archivedAt);
+  // "مهام خالد" names one person -- report used to always answer with every
+  // task from everyone regardless, which is exactly the "sends me everything,
+  // not just his tasks" complaint. ownerId (resolved by the model against the
+  // users list, same as task_transfer_request/correction) narrows the same
+  // report shape down to one person's own tasks instead of a second kind.
+  const reportOwner = plan.kind === "report" && plan.fields.ownerId ? state.users.find(u => u.id === plan.fields.ownerId) : null;
+  const tasks = state.tasks.filter(t => !t.archivedAt && (!reportOwner || (t.owner || t.suggestedOwner) === reportOwner.name));
   const today = new Date(now + 3 * 3600_000).toISOString().slice(0, 10);
   const overdue = tasks.filter(t => t.status !== "completed" && t.dueDate && t.dueDate < today);
   const pending = tasks.filter(t => t.status === "approval");
-  const header = plan.kind === "report" ? `📋 *ملخص الإدارة*\nالمشاريع: ${state.projects.length}\nمعتمدة: ${tasks.filter(t => t.status === "completed").length}\nقيد التنفيذ: ${tasks.filter(t => t.status === "progress").length}\nبانتظار باسم: ${pending.length}\nمتأخرة بموعد مسجل: ${overdue.length}\nبدون موعد: ${tasks.filter(t => !t.dueDate && t.status !== "completed").length}\n🔴 قصوى: ${tasks.filter(t => t.priority === "red").length} • 🟡 متوسطة: ${tasks.filter(t => t.priority === "yellow").length} • 🟢 عادية: ${tasks.filter(t => t.priority === "green").length}\n` : `${greeting}المهام المتاحة إلك: ${tasks.length}\n`;
-  const ordered = orderedTasks(state, now);
+  const header = plan.kind === "report" ? `📋 *${reportOwner ? `ملخص مهام ${clean(reportOwner.name, 60)}` : "ملخص الإدارة"}*\nالمشاريع: ${reportOwner ? new Set(tasks.map(t => t.projectId)).size : state.projects.length}\nمعتمدة: ${tasks.filter(t => t.status === "completed").length}\nقيد التنفيذ: ${tasks.filter(t => t.status === "progress").length}\nبانتظار باسم: ${pending.length}\nمتأخرة بموعد مسجل: ${overdue.length}\nبدون موعد: ${tasks.filter(t => !t.dueDate && t.status !== "completed").length}\n🔴 قصوى: ${tasks.filter(t => t.priority === "red").length} • 🟡 متوسطة: ${tasks.filter(t => t.priority === "yellow").length} • 🟢 عادية: ${tasks.filter(t => t.priority === "green").length}\n` : `${greeting}المهام المتاحة إلك: ${tasks.length}\n`;
+  // orderedTasks always re-derives its own list from the FULL state.tasks --
+  // it knows nothing about reportOwner -- so without this filter the report
+  // header would say "ملخص مهام خالد" while the grouped listing below it
+  // still dumped every task from everyone, exactly the bug being fixed here.
+  const ordered = orderedTasks(state, now).filter(t => !reportOwner || (t.owner || t.suggestedOwner) === reportOwner.name);
   if (plan.kind === "summary") {
     const list = numberedTaskList(ordered, state, now);
     const reply = `${header.trimEnd()}${list ? `\n${list}` : "\nما في مهام متاحة إلك حاليًا."}\n\nتم عرض جميع المهام (${ordered.length}).\nاختار رقم المهمة كما هو مكتوب، مثل: «رقم 12».`;
