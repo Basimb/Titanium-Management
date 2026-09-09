@@ -711,4 +711,28 @@ test('owner announce_team previews the exact text then posts to the shared group
  await f.run(undefined,{...admin,text:`موافق ${token}`});
  assert.equal(outbox(f.db).filter(r=>r.toUser==='group').length,1);
 });
+// Basim reported that asking for "a guide on how to use task commands" got a
+// generic static "help" blurb that never mentioned the actual commands, and
+// then repeated verbatim after "مش هيك قصدي"/"غلط جوابك" -- looking broken.
+// The fixed reply must actually answer that ask for an employee (fold in the
+// same command legend used elsewhere) while Basim, who never gets the
+// legend, keeps a reply suited to what he alone can do -- and neither reply
+// keeps the old false "I'll re-review your question" promise it never kept.
+test('help reply answers employees with the actual task-command legend, and drops the unfulfilled review promise',async t=>{
+ const f=fixture(t);
+ const member=await f.run(emptySecretaryIntent('help'),{text:'اسسلي دليل لطريقة الاستخدام للموظف علشان يفهم كيفية التعامل معك بأوامر المهام'}); // default sender is خالد (member)
+ assert.equal(member.status,'summary');
+ assert.match(member.reply,/تذكير بأوامر المهام/);
+ assert.match(member.reply,/تحويل المهمة/);
+ assert.match(member.reply,/انهاء المهمة/);
+ assert.match(member.reply,/اضافة ملاحظة/);
+ assert.match(member.reply,/اضافة مهمة/);
+ assert.match(member.reply,/استلمت/);
+ assert.doesNotMatch(member.reply,/جوابك غلط/);
+ const admin=await f.run(emptySecretaryIntent('help'),{senderNumber:'12025550103',text:'كيف بتشتغل معي؟'});
+ assert.equal(admin.status,'summary');
+ assert.doesNotMatch(admin.reply,/تذكير بأوامر المهام/,'Basim never gets the employee-facing legend, in help replies either');
+ assert.doesNotMatch(admin.reply,/جوابك غلط/);
+ assert.match(admin.reply,/management\.titanium-pharmacy\.com/);
+});
 

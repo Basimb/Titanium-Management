@@ -313,7 +313,20 @@ function priorityReadReply(query: Extract<PriorityTaskQuery, { kind: "query" }>,
 }
 function readReply(plan: SecretaryIntent, actor: ChatUser, state: Snapshot, now: number): { result: Result; scope: string[] } {
   const greeting = `أهلًا يا ${clean(actor.name, 60)}، `;
-  if (plan.kind === "help") return { result: { status: "summary", reply: `${greeting}${SECRETARY_IDENTITY}\nاحكيلي بطريقتك: شو مهامي؟ اشرح المهمة، سجل تحديث، أو افتح مشروعًا (لباسم). وإذا قلت «جوابك غلط» براجع السؤال وجوابي على ضوء المعلومات المتاحة، وبستوضح أي نقص.\nالدخول للموقع برمز خاص على واتسابك المسجّل:\n${ORIGIN}/` }, scope: [] };
+  if (plan.kind === "help") {
+    // Used to be one fixed blurb for everyone that never mentioned the actual
+    // task commands and falsely claimed it would "review the question" on
+    // "جوابك غلط" feedback (it never did) -- an employee asking for a task-
+    // command guide got the same generic text every time, including on
+    // repeat, which read as a stuck/broken bot. Now it actually answers that
+    // ask by folding in TASK_COMMANDS_LEGEND for employees, and drops the
+    // unfulfilled "I'll re-review" promise for everyone.
+    const isBasem = actor.id === "basem" && actor.role === "admin";
+    const body = isBasem
+      ? "احكيلي بطريقتك: شو مهامي؟ اشرح مهمة جديدة، سجل تحديث، افتح مشروعًا، أو اعتمد/ارفض طلب معلّق. اسألني عن أي مهمة أو مشروع بالاسم وبجاوبك."
+      : `احكيلي بطريقتك: شو مهامي؟ سجل تحديث على مهمة قيد التنفيذ، أو اسألني عن أي مهمة بالاسم.\n${TASK_COMMANDS_LEGEND}\nولو عندك مهمة معروضة عليك وبعدك ما استلمتها: اكتب «استلمت» لبدء التنفيذ.`;
+    return { result: { status: "summary", reply: `${greeting}${SECRETARY_IDENTITY}\n${body}\nالدخول للموقع برمز خاص على واتسابك المسجّل:\n${ORIGIN}/` }, scope: [] };
+  }
   if (plan.kind === "projects") return { result: { status: "summary", reply: greeting + "\n\n*المشاريع المتاحة إلك*\n\n" + (state.projects.length ? state.projects.slice(0, 16).map(p => `🔵 *${clean(p.name, 100)}* — ${LABELS[p.status] || clean(p.status)}`).join("\n\n") : "ما في مشاريع متاحة إلك حاليًا.") }, scope: state.projects.map(p => "p:" + p.id) };
   if (plan.kind === "details") {
     const task = state.tasks.find(t => t.id === plan.taskId);
