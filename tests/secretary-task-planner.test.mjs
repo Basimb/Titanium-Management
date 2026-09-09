@@ -249,6 +249,26 @@ test('a comment/reject command with no body/reason is clarified instead of silen
   assert.equal(rejected.action, 'reject'); assert.equal(rejected.fields.reason, 'ناقص التوقيع');
 });
 
+test('a comment/reject narrated into fields.details instead of body/reason recovers the text instead of re-clarifying forever', () => {
+  // Live WhatsApp run (2026-09-09): "ضيف ملاحظة على مهمة X نصها: ..." kept
+  // getting the exact same "شو نص الملاحظة؟" clarify back no matter how the
+  // note text was phrased -- across three different phrasings. The model was
+  // putting the note text in fields.details (the far more common free-text
+  // field elsewhere) instead of fields.body; ACTION_KEYS for "comment" only
+  // forwards "comment" (mapped from body), so plain details silently
+  // vanished and the guard above saw an empty body every single time. Same
+  // shape for reject/reject_project with fields.reason.
+  const withDetails = validateSecretaryIntent(command('comment', { body: null, details: 'وصل التوقيع' }), context('سجل ملاحظة على اللوحة'));
+  assert.equal(withDetails.kind, 'command'); assert.equal(withDetails.action, 'comment');
+  assert.equal(withDetails.fields.body, 'وصل التوقيع'); assert.equal(withDetails.fields.details, null);
+  const rejectWithDetails = validateSecretaryIntent(command('reject', { reason: null, details: 'ناقص التوقيع' }), context('ارفض اللوحة'));
+  assert.equal(rejectWithDetails.action, 'reject'); assert.equal(rejectWithDetails.fields.reason, 'ناقص التوقيع');
+  assert.equal(rejectWithDetails.fields.details, null);
+  // An explicit body still wins over an incidental details value.
+  const bothSet = validateSecretaryIntent(command('comment', { body: 'التعليق الصحيح', details: 'نص آخر' }), context('سجل ملاحظة على اللوحة'));
+  assert.equal(bothSet.fields.body, 'التعليق الصحيح');
+});
+
 test('ordinary progress actions cannot carry an invented or implicit priority change', () => {
   for (const action of ['claim', 'comment', 'submit', 'approve', 'reject']) {
     expectClarify(command(action, { priority: 'yellow' }), context('حدّث اللوحة التجريبية'));

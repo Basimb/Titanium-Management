@@ -398,7 +398,19 @@ export function validateSecretaryIntent(value: unknown, input: SecretaryModelInp
   // fail downstream with a raw "التعليق مطلوب" error only once approved --
   // exactly the "confirmed, then errors" case Basim ran into. Guard both
   // here, the same way the other actions above enforce their essential field.
+  // The model sometimes narrates the note text into fields.details instead of
+  // fields.body for a "comment" action (both are optional in the shared
+  // command schema, and "details" is the far more common field elsewhere).
+  // ACTION_KEYS for "comment" only forwards "comment" (mapped from body), so
+  // a stray details value would otherwise be silently dropped downstream and
+  // the guard below would keep re-asking even though the user already
+  // answered. Recover it here before checking.
+  if (plan.action === "comment" && !plan.fields.body?.trim() && plan.fields.details?.trim())
+    plan = { ...plan, fields: { ...plan.fields, body: plan.fields.details, details: null } };
   if (plan.action === "comment" && !plan.fields.body?.trim()) return emptySecretaryIntent("clarify", "شو نص الملاحظة أو التحديث بالضبط يلي بدك تضيفه على المهمة؟");
+  // Same model quirk as the comment guard above, applied to the reason field.
+  if ((plan.action === "reject" || plan.action === "reject_project") && !plan.fields.reason?.trim() && plan.fields.details?.trim())
+    plan = { ...plan, fields: { ...plan.fields, reason: plan.fields.details, details: null } };
   if ((plan.action === "reject" || plan.action === "reject_project") && !plan.fields.reason?.trim()) return emptySecretaryIntent("clarify", "شو سبب الرفض بالضبط؟");
   if (plan.kind === "search" && (!plan.message?.trim() || /\d{6,}|@/.test(plan.message))) return emptySecretaryIntent("clarify", "شو المعلومة العامة التي تريد البحث عنها، بدون بيانات خاصة؟");
   if (review && plan.kind === "search") {
