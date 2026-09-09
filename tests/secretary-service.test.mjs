@@ -197,6 +197,18 @@ test('member completion waits for actor-bound confirmation; then only approval',
  const confirmed=await f.run(undefined,{text:`موافق ${token}`});assert.equal(confirmed.status,'applied');assert.equal(f.db.prepare("SELECT status FROM tasks WHERE id='t'").get().status,'approval');assert.equal(f.db.prepare("SELECT completed_at FROM tasks WHERE id='t'").get().completed_at,null);
  const audit=JSON.parse(f.db.prepare("SELECT details FROM audit_logs WHERE action='submit'").get().details);assert.equal(audit.auditContext.confirmedBy,'member');assert.equal(audit.auditContext.originalText,'خلصت اللوحة بالكامل');
 });
+test('an employee finishing/claiming/commenting on a task gets the standalone command legend; an admin doing the same never does',async t=>{
+ const f=fixture(t);
+ await f.run(command('submit'),{text:'خلصت اللوحة بالكامل'});
+ const token=pending(f.db).token;
+ await f.run(undefined,{text:`موافق ${token}`});
+ const legend=outbox(f.db).filter(r=>r.toUser==='member'&&/تذكير بأوامر المهام/.test(r.text));
+ assert.equal(legend.length,1,'the employee gets exactly one legend message after finishing their task');
+ assert.match(legend[0].text,/تحويل المهمة/);assert.match(legend[0].text,/انهاء المهمة/);assert.match(legend[0].text,/اضافة ملاحظة/);assert.match(legend[0].text,/اضافة مهمة/);
+ const admin={senderNumber:'12025550103'};
+ await f.run(command('comment',{body:'تحديث بسيط'}),{...admin,text:'علّق: تحديث بسيط'});
+ assert.equal(outbox(f.db).filter(r=>r.toUser==='basem').length,0,'Basim never gets the employee-facing legend for his own actions');
+});
 test('cancellation and expired confirmation never mutate',async t=>{
  const f=fixture(t);await f.run(command('submit'),{text:'خلصت اللوحة'});assert.equal((await f.run(undefined,{text:'إلغاء'})).status,'cancelled');assert.equal(pending(f.db),undefined);
  await f.run(command('submit'),{text:'خلصت اللوحة'});const token=pending(f.db).token;f.tick(600001);assert.equal((await f.run(undefined,{text:`موافق ${token}`})).status,'stale');assert.equal(f.db.prepare("SELECT status FROM tasks WHERE id='t'").get().status,'progress');
@@ -610,9 +622,21 @@ test('admin adding a task directly for someone else broadcasts to the group and 
  const group=rows.find(r=>r.toUser==='group');
  assert.ok(group,'a new task must broadcast to the group');assert.match(group.text,/🆕/);assert.match(group.text,/مشروع تجريبي/);assert.match(group.text,/شادي/);
  assert.ok(rows.some(r=>r.toUser==='other'),'the assigned owner must get a private heads-up');
+ assert.ok(rows.some(r=>r.toUser==='other'&&/تذكير بأوامر المهام/.test(r.text)),'the newly assigned employee also gets the standalone command legend');
  assert.ok(!rows.some(r=>r.toUser==='basem'));
 });
-test('a member claiming their own open task broadcasts to the group but never self-notifies',async t=>{
+test('an employee proposing a new task files it for Basim and gets the command legend, never Basim',async t=>{
+ const f=fixture(t);
+ const plan=taskDraftPlan({title:'مهمة يقترحها موظف',priority:'yellow',dueDate:'unscheduled'});
+ const result=await f.run(plan,{text:'بدي أفتح مهمة جديدة بمشروع تجريبي'}); // default sender is خالد (member)
+ assert.equal(result.status,'applied');
+ assert.match(result.reply,/رفعت طلبك لباسم/);
+ const rows=outbox(f.db);
+ assert.ok(rows.some(r=>r.toUser==='basem'),'Basim gets the actual request to decide on');
+ assert.ok(rows.some(r=>r.toUser==='member'&&/تذكير بأوامر المهام/.test(r.text)),'the employee who filed it gets the command legend as its own message');
+ assert.ok(!rows.some(r=>r.toUser==='basem'&&/تذكير بأوامر المهام/.test(r.text)),'Basim never gets the employee-facing legend');
+});
+test('a member claiming their own open task broadcasts to the group, gets the command legend, but never a self-notice',async t=>{
  const f=fixture(t);
  f.db.prepare("INSERT INTO tasks(id,project_id,title,details,priority,status,owner,suggested_owner,created_at,updated_at) VALUES('open1','p','مهمة مفتوحة','','yellow','open',NULL,'خالد',1,1)").run();
  const result=await f.run(command('claim',{},'open1'),{text:'بستلم هاي المهمة'}); // default sender is خالد (member)
@@ -620,7 +644,9 @@ test('a member claiming their own open task broadcasts to the group but never se
  const rows=outbox(f.db);
  const group=rows.find(r=>r.toUser==='group');
  assert.ok(group,'claiming must broadcast to the group');assert.match(group.text,/👋/);assert.match(group.text,/خالد/);
- assert.ok(!rows.some(r=>r.toUser==='member'),'a member claiming for himself is never privately notified about his own claim');
+ const toMember=rows.filter(r=>r.toUser==='member');
+ assert.ok(!toMember.some(r=>/تحديث على مهمتك/.test(r.text)),'a member claiming for himself is never privately notified about his own claim');
+ assert.ok(toMember.some(r=>/تذكير بأوامر المهام/.test(r.text)),'an employee acting on a task still gets the standalone command legend');
 });
 // executeManagementAction only blocks a non-manager from claiming a task
 // suggested to someone else -- an admin/manager can claim ANY open task,
@@ -636,9 +662,10 @@ test('an admin claiming a task suggested to someone else privately warns that co
  const rows=outbox(f.db);
  const group=rows.find(r=>r.toUser==='group');
  assert.ok(group,'claiming must still broadcast to the group');assert.match(group.text,/👋/);assert.match(group.text,/باسم/);
- const toColleague=rows.find(r=>r.toUser==='member');
+ const toColleague=rows.find(r=>r.toUser==='member'&&/استلم مهمة/.test(r.text));
  assert.ok(toColleague,'خالد must be privately warned his suggested task was taken by someone else');
  assert.match(toColleague.text,/استلم مهمة/);
+ assert.ok(rows.some(r=>r.toUser==='member'&&/تذكير بأوامر المهام/.test(r.text)),'خالد also gets the standalone command legend alongside the warning');
  assert.ok(!rows.some(r=>r.toUser==='basem'),'the admin never notifies himself about his own action');
 });
 test('closeDirect on a never-claimed task broadcasts one final approval notice, and privately notifies a non-admin owner it closes on behalf of',async t=>{

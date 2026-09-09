@@ -43,6 +43,19 @@ const HISTORY_MS = 24 * 60 * 60_000;
 const HISTORY_CHARS = 6000;
 const INTAKE_MS = 30 * 60_000;
 const SENSITIVE = new Set(["edit_project", "approve_project", "reject_project", "restore_project", "archive_project", "delete_project", "edit_task", "cancel_claim", "submit", "approve", "reject", "reopen", "reassign", "move_task", "archive_task", "restore_task", "delete_task"]);
+// Basim's "شرح الأوامر" footer: a short standalone reminder of the four
+// WhatsApp commands an EMPLOYEE (never Basim -- he doesn't need this) can
+// type about a task, sent as a SEPARATE follow-up message right after any
+// task-related message reaches that employee. See notifyTaskLegend below.
+const TASK_COMMANDS_LEGEND = "🧭 تذكير بأوامر المهام:\n• لتحويل المهمة: اكتب «تحويل المهمة»\n• لاعتماد إنهاء المهمة: اكتب «انهاء المهمة»\n• لإضافة ملاحظة: اكتب «اضافة ملاحظة» مع رقم المهمة\n• لإضافة مهمة جديدة: اكتب «اضافة مهمة»";
+/** Queues the command legend as its own WhatsApp message (never in the same
+ * bubble as the task message itself) for a real employee recipient only --
+ * never for Basim and never for the group. Call this right alongside every
+ * task-related message/notice an employee receives, per Basim's request. */
+function notifyTaskLegend(db: DatabaseSync, toUser: string, now: number) {
+  if (toUser === "basem" || toUser === "group") return;
+  enqueueAgentMessage(db, { toUser, text: TASK_COMMANDS_LEGEND }, now);
+}
 const LABELS: Record<string, string> = { open: "بانتظار الاستلام", progress: "قيد التنفيذ", approval: "بانتظار اعتماد باسم", completed: "معتمدة", active: "نشط", pending: "بانتظار الموافقة", rejected: "مرفوض" };
 const ACTION_LABELS: Record<string, string> = { add_project: "إنشاء مشروع", edit_project: "تعديل المشروع", approve_project: "اعتماد المشروع", reject_project: "رفض المشروع", restore_project: "إعادة فتح المشروع", archive_project: "أرشفة المشروع", delete_project: "حذف المشروع نهائيًا", add_task: "إنشاء مهمة", edit_task: "تعديل المهمة", claim: "استلام المهمة", cancel_claim: "إرجاع المهمة", comment: "إضافة تعليق", submit: "إرسال المهمة لاعتماد باسم", approve: "اعتماد إنجاز المهمة", reject: "رفض الإنجاز", reopen: "إعادة فتح المهمة", reassign: "تغيير المسؤول", move_task: "نقل المهمة", archive_task: "أرشفة المهمة", restore_task: "استعادة المهمة", delete_task: "حذف المهمة نهائيًا" };
 const clean = (value: unknown, max = 200) => String(value ?? "").replace(/[\x00-\x1f\u202a-\u202e\u2066-\u2069]/g, " ").slice(0, max);
@@ -601,6 +614,7 @@ function taskIntake(db: DatabaseSync, event: Event, actor: ChatUser, state: Snap
       if (draft.newProjectName) {
         const request = requestProjectCreate(db, actor, { name: draft.newProjectName, goal: draft.details || undefined, tasks: [projectTask] }, { now });
         enqueueAgentMessage(db, { toUser: "basem", text: request.ownerMessage }, now);
+        notifyTaskLegend(db, actor.id, now + 1);
         log(db, actor, event, "secretary_proposal", { summary: "رفع طلب فتح مشروع مع مهمته لباسم", approvalId: request.approval.id, confirmationRequired: false }, now);
         return save(db, event, actor, { status: "applied", reply: `📨 رفعت طلبك لباسم: ${request.approval.summary}\nبخبرك أول ما يقرر.` }, scope, now);
       }
@@ -609,6 +623,7 @@ function taskIntake(db: DatabaseSync, event: Event, actor: ChatUser, state: Snap
         ownerId: draft.ownerId === "unassigned" ? null : draft.ownerId }, { now });
       rememberLastProject(db, key, draft.projectId!, project?.name ?? draft.projectId!, now);
       enqueueAgentMessage(db, { toUser: "basem", text: request.ownerMessage }, now);
+      notifyTaskLegend(db, actor.id, now + 1);
       log(db, actor, event, "secretary_proposal", { summary: "رفع طلب فتح مهمة لباسم", approvalId: request.approval.id, confirmationRequired: false }, now);
       return save(db, event, actor, { status: "applied", reply: `📨 رفعت طلبك لباسم: ${request.approval.summary}\nبخبرك أول ما يقرر.${chainHint}` }, scope, now);
     } catch (error) {
@@ -1161,7 +1176,7 @@ function dispatchManagementNotice(db: DatabaseSync, actor: ChatUser, state: Snap
     : taskId
       ? (() => { const ownerName = state.tasks.find(t => t.id === taskId)?.owner ?? null; return ownerName ? state.users.find(u => u.name === ownerName)?.id ?? null : null; })()
       : null;
-  if (targetId && targetId !== actor.id) enqueueAgentMessage(db, { toUser: targetId, text: `📌 تحديث على مهمتك:\n${notice}` }, now);
+  if (targetId && targetId !== actor.id) { enqueueAgentMessage(db, { toUser: targetId, text: `📌 تحديث على مهمتك:\n${notice}` }, now); notifyTaskLegend(db, targetId, now + 1); }
 }
 // On-demand "remind everyone now" broadcast (Basim asking directly, not the
 // nightly agent-followups nudge cadence): groups every open, non-archived,
@@ -1225,6 +1240,11 @@ function perform(db: DatabaseSync, event: Event, actor: ChatUser, state: Snapsho
     }
     dispatchManagementNotice(db, actor, state, result, { projectId: typeof command.projectId === "string" ? command.projectId : null, ownerId: typeof command.ownerId === "string" ? command.ownerId : null }, now);
     const scope = [...(taskId && state.tasks.some(t => t.id === taskId) && command.action !== "delete_task" ? ["t:" + taskId] : []), ...(typeof command.projectId === "string" && command.action !== "delete_project" ? ["p:" + command.projectId] : [])];
+    // Basim's command legend, right after any task action an EMPLOYEE (never
+    // Basim himself) just did directly through chat -- claim/cancel_claim/
+    // comment/submit are the only actions a non-admin ever reaches perform()
+    // with (see the plan.kind==="command" gate above).
+    notifyTaskLegend(db, actor.id, now);
     // File blobs from confirmed deletions remain recoverable on disk; DB links are removed atomically.
     return save(db, event, actor, { status: "applied", reply: `✅ ${result.message}`, ...(taskId ? { taskId } : {}) }, scope, now);
   } catch (error) {
@@ -1287,6 +1307,7 @@ function claimMultiple(db: DatabaseSync, event: Event, actor: ChatUser, state: S
   const scope = taskIds.filter(id => state.tasks.some(t => t.id === id)).map(id => "t:" + id);
   const reply = [done.length ? `✅ استلمت ${taskCountPhrase(done.length)}:\n${done.map(title => `• ${clean(title)}`).join("\n")}` : null,
     failed.length ? `تعذّر استلام:\n${failed.map(f => `• ${clean(f.title)}: ${f.reason}`).join("\n")}` : null].filter(Boolean).join("\n\n");
+  if (done.length) notifyTaskLegend(db, actor.id, now);
   return save(db, event, actor, { status: done.length ? "applied" : "clarify", reply: reply || "ما قدرت أستلم ولا مهمة." }, scope, now);
 }
 function safeApprovals(db: DatabaseSync, actor: ChatUser) {
@@ -1300,7 +1321,7 @@ function safeKnowledge(db: DatabaseSync, actor: ChatUser, query: string) {
 }
 /** Private notifications and group notices produced by agent actions go to the durable queue; the bridge delivers them. */
 function deliverAgentSideEffects(db: DatabaseSync, actor: ChatUser, result: AgentResult, now: number) {
-  for (const item of result.notify ?? []) if (item.userId !== actor.id) enqueueAgentMessage(db, { toUser: item.userId, text: item.text }, now);
+  for (const item of result.notify ?? []) if (item.userId !== actor.id) { enqueueAgentMessage(db, { toUser: item.userId, text: item.text }, now); notifyTaskLegend(db, item.userId, now + 1); }
   if (result.groupNotice) enqueueAgentMessage(db, { toUser: "group", text: result.groupNotice }, now);
 }
 
