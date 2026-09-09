@@ -387,6 +387,19 @@ export function validateSecretaryIntent(value: unknown, input: SecretaryModelInp
   // "مين الموظف المسجّل الذي تريد تعيينه؟" check every kind shares), so report
   // needs no separate guard here -- only a valid, recognized id ever reaches readReply.
   if (plan.kind === "command" && !["edit_task", "add_task"].includes(String(plan.action)) && plan.fields.priority !== null) return emptySecretaryIntent("clarify", "تحديث التنفيذ لا يغيّر الأولوية. أي إجراء تقصد على المهمة؟");
+  // The "command" tool covers every admin action (edit_task, comment, reject,
+  // ...) through ONE shared schema where fields.body/reason are marked
+  // "optional", because different actions need different subsets required --
+  // unlike the single-purpose tools above (message_team, rule, ...) that can
+  // mark their one essential field required in their own schema. That means
+  // the model can emit action:"comment" (or reject/reject_project) with the
+  // text field left null, which used to sail straight through to a
+  // confirmation preview silently missing the "التعليق:"/"السبب:" line, then
+  // fail downstream with a raw "التعليق مطلوب" error only once approved --
+  // exactly the "confirmed, then errors" case Basim ran into. Guard both
+  // here, the same way the other actions above enforce their essential field.
+  if (plan.action === "comment" && !plan.fields.body?.trim()) return emptySecretaryIntent("clarify", "شو نص الملاحظة أو التحديث بالضبط يلي بدك تضيفه على المهمة؟");
+  if ((plan.action === "reject" || plan.action === "reject_project") && !plan.fields.reason?.trim()) return emptySecretaryIntent("clarify", "شو سبب الرفض بالضبط؟");
   if (plan.kind === "search" && (!plan.message?.trim() || /\d{6,}|@/.test(plan.message))) return emptySecretaryIntent("clarify", "شو المعلومة العامة التي تريد البحث عنها، بدون بيانات خاصة؟");
   if (review && plan.kind === "search") {
     const query = normalizedArabic(plan.message || "");

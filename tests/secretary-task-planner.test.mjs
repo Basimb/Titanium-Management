@@ -228,6 +228,27 @@ test('design-color comments are preserved without being treated as priority comm
   }
 });
 
+test('a comment/reject command with no body/reason is clarified instead of silently confirming and failing later', () => {
+  // Basim approved a voice-note "إضافة ملاحظة" whose confirmation preview
+  // showed the task name but no "التعليق:" line at all -- the model had set
+  // action:"comment" with fields.body left null (the shared "command" tool
+  // schema marks body merely optional, since other actions need it absent).
+  // Approving that preview only failed downstream with a raw "التعليق مطلوب"
+  // management-actions.ts error, after he'd already said "موافق". This must
+  // be caught here instead, before any confirmation preview is ever shown.
+  expectClarify(command('comment'), context('سجل ملاحظة على اللوحة'));
+  expectClarify(command('comment', { body: '   ' }), context('سجل ملاحظة على اللوحة'));
+  const ok = validateSecretaryIntent(command('comment', { body: 'وصل التوقيع' }), context('سجل ملاحظة على اللوحة'));
+  assert.equal(ok.kind, 'command'); assert.equal(ok.fields.body, 'وصل التوقيع');
+  // Same structural gap for reject/reject_project: management-actions.ts
+  // requires a reason to actually reject, so a plan missing fields.reason
+  // must clarify here too rather than reach that same failure late.
+  expectClarify(command('reject'), context('ارفض اللوحة'));
+  expectClarify(command('reject_project'), context('ارفض مشروع تجريبي'));
+  const rejected = validateSecretaryIntent(command('reject', { reason: 'ناقص التوقيع' }), context('ارفض اللوحة'));
+  assert.equal(rejected.action, 'reject'); assert.equal(rejected.fields.reason, 'ناقص التوقيع');
+});
+
 test('ordinary progress actions cannot carry an invented or implicit priority change', () => {
   for (const action of ['claim', 'comment', 'submit', 'approve', 'reject']) {
     expectClarify(command(action, { priority: 'yellow' }), context('حدّث اللوحة التجريبية'));
