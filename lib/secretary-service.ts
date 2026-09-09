@@ -1059,10 +1059,18 @@ function dispatchManagementNotice(db: DatabaseSync, actor: ChatUser, state: Snap
   // userId straight from the command that was just executed. Every other
   // notifying action (submit/approve/reject/archive/comment/blocker) leaves
   // an EXISTING owner unchanged; tasks.owner stores that owner as a NAME,
-  // never a userId, so resolve it back through state.users. "claim" always
-  // makes the actor himself the owner, so it never needs a lookup here.
+  // never a userId, so resolve it back through state.users. "claim" usually
+  // makes the actor himself the owner (his own suggested task), which needs
+  // no heads-up -- but a manager can also claim a task that was suggested to
+  // someone ELSE (executeManagementAction only blocks this for non-managers),
+  // silently taking it away from that colleague with no notice at all unless
+  // caught here. `state` still holds the PRE-claim suggestedOwner (it was
+  // read before this action executed), so that colleague can be resolved and
+  // notified the same way reassign's new owner already is.
   const targetId = result.notification.action === "create" || result.notification.action === "reassign" ? context.ownerId ?? null
-    : taskId && result.notification.action !== "claim"
+    : result.notification.action === "claim"
+      ? (() => { const suggested = taskId ? state.tasks.find(t => t.id === taskId)?.suggestedOwner ?? null : null; return suggested && suggested !== actor.name ? state.users.find(u => u.name === suggested)?.id ?? null : null; })()
+    : taskId
       ? (() => { const ownerName = state.tasks.find(t => t.id === taskId)?.owner ?? null; return ownerName ? state.users.find(u => u.name === ownerName)?.id ?? null : null; })()
       : null;
   if (targetId && targetId !== actor.id) enqueueAgentMessage(db, { toUser: targetId, text: `📌 تحديث على مهمتك:\n${notice}` }, now);

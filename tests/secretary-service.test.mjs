@@ -588,6 +588,25 @@ test('a member claiming their own open task broadcasts to the group but never se
  assert.ok(group,'claiming must broadcast to the group');assert.match(group.text,/👋/);assert.match(group.text,/خالد/);
  assert.ok(!rows.some(r=>r.toUser==='member'),'a member claiming for himself is never privately notified about his own claim');
 });
+// executeManagementAction only blocks a non-manager from claiming a task
+// suggested to someone else -- an admin/manager can claim ANY open task,
+// which used to silently take it away from the person it was suggested to
+// with zero notice. dispatchManagementNotice now resolves that colleague
+// from the PRE-claim snapshot (state still holds the old suggestedOwner)
+// and privately warns them, on top of the existing group broadcast.
+test('an admin claiming a task suggested to someone else privately warns that colleague, not just the group',async t=>{
+ const f=fixture(t); const admin={senderNumber:'12025550103'};
+ f.db.prepare("INSERT INTO tasks(id,project_id,title,details,priority,status,owner,suggested_owner,created_at,updated_at) VALUES('open3','p','مهمة مقترحة لخالد','','yellow','open',NULL,'خالد',1,1)").run();
+ const result=await f.run(command('claim',{},'open3'),{...admin,text:'بدي استلم مسؤولية هاي المهمة'});
+ assert.equal(result.status,'applied');
+ const rows=outbox(f.db);
+ const group=rows.find(r=>r.toUser==='group');
+ assert.ok(group,'claiming must still broadcast to the group');assert.match(group.text,/👋/);assert.match(group.text,/باسم/);
+ const toColleague=rows.find(r=>r.toUser==='member');
+ assert.ok(toColleague,'خالد must be privately warned his suggested task was taken by someone else');
+ assert.match(toColleague.text,/استلم مهمة/);
+ assert.ok(!rows.some(r=>r.toUser==='basem'),'the admin never notifies himself about his own action');
+});
 test('closeDirect on a never-claimed task broadcasts one final approval notice, and privately notifies a non-admin owner it closes on behalf of',async t=>{
  const f=fixture(t); const admin={senderNumber:'12025550103'};
  // Basim closing a task he owns himself (claims it along the way): only the group hears about it, never a self-notify.
