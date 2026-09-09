@@ -124,7 +124,10 @@ test('feedback transport retries reuse the same reply ID and never rerun the tas
   await f.deliver();
   const sendReply = async (jid, text, id, _body, result) => {
     sends.push({ jid, text, id, result });
-    if (sends.length < 3) throw Error('SYNTHETIC_PRIVATE_ERROR');
+    // Tagged neverSent: this test is about retry-safety (same ID, backend never
+    // rerun), not about which failures qualify for retry -- that is covered in
+    // bridge.test.mjs.
+    if (sends.length < 3) throw Object.assign(Error('SYNTHETIC_PRIVATE_ERROR'), { neverSent: true });
   };
   for (let i = 0; i < 3; i++) {
     await f.deliver({ sendReply, fetcher: async () => assert.fail('feedback must not rerun command') });

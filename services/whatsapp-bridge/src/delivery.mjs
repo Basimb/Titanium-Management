@@ -105,9 +105,20 @@ export async function deliverOne(store, row, config, { fetcher = fetch, sendRepl
       // original chat and a persisted outgoing ID; never route from response text.
       await sendReply(row.chat_jid, boundedPlainText(row.reply), row.reply_id, body, JSON.parse(row.result || '{}'));
       store.done(row.id);
-    } catch {
-      if (row.reply_attempts + 1 >= 3) store.fail(row.id, 'reply_retry_exhausted');
-      else store.retry(row.id, 'reply', now() + 5000 * 2 ** row.reply_attempts, 'reply_send_failed');
+    } catch (error) {
+      // A thrown sendReply does not prove WhatsApp never got the message: the
+      // underlying send call can also error or time out *after* the server
+      // already relayed it, and replaying it here would resend the identical
+      // text under the identical message ID -- WhatsApp shows that as a second,
+      // separate bubble rather than deduping it (this is what produced visible
+      // duplicate replies). Only retry a failure sendReply proved happened
+      // before any network send (tagged neverSent); anything else is ambiguous
+      // and must be given up on rather than replayed.
+      if (error?.neverSent && row.reply_attempts + 1 < 3) {
+        store.retry(row.id, 'reply', now() + 5000 * 2 ** row.reply_attempts, 'reply_send_failed');
+      } else {
+        store.fail(row.id, error?.neverSent ? 'reply_retry_exhausted' : 'reply_send_ambiguous');
+      }
     }
   }
 }

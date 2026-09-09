@@ -311,7 +311,7 @@ test('successful response is durable, never changes recipient and replies reuse 
   const row = f.restart().next(now);
   assert.equal(row.state, 'reply');
   const calls = [];
-  const sendReply = async (...args) => { calls.push(args); if (calls.length === 1) throw new Error('disconnected'); };
+  const sendReply = async (...args) => { calls.push(args); if (calls.length === 1) throw Object.assign(new Error('disconnected'), { neverSent: true }); };
   await deliverOne(f.store, row, config, { now: () => now, sendReply });
   await deliverOne(f.store, f.store.next(now + 60_000), config, { now: () => now + 60_000, sendReply });
   assert.equal(calls.length, 2);
@@ -319,6 +319,45 @@ test('successful response is durable, never changes recipient and replies reuse 
   assert.equal(calls[0][2], calls[1][2]);
   assert.equal(f.store.next(now + 100_000), undefined);
   assert.equal(JSON.parse(row.result).recipient, undefined);
+});
+
+test('a reply send proved never to have reached the network (neverSent) is retried with the identical text and ID', async t => {
+  const f = fixture(t);
+  const initial = enqueue(f.store);
+  await deliverOne(f.store, initial, config, { now: () => now, fetcher: async () => new Response(JSON.stringify({
+    status: 'applied', reply: 'تم تسجيل التحديث',
+  }), { status: 200 }) });
+  const calls = [];
+  const sendReply = async (...args) => { calls.push(args); throw Object.assign(new Error('not_connected'), { neverSent: true }); };
+  let row = f.store.next(now);
+  let clock = now;
+  for (let attempt = 0; attempt < 3; attempt++) { await deliverOne(f.store, row, config, { now: () => clock, sendReply }); clock += 60_000; row = f.store.next(clock); }
+  // Exhausted after exactly 3 attempts, never resent past that, but every
+  // attempt reused the exact same text and message ID as the original.
+  assert.equal(calls.length, 3);
+  for (const call of calls) { assert.equal(call[1], 'تم تسجيل التحديث'); assert.equal(call[2], initial.reply_id); }
+  assert.equal(f.store.db.prepare('SELECT state,error_code FROM inbox').get().state, 'failed');
+  assert.equal(f.store.db.prepare('SELECT error_code FROM inbox').get().error_code, 'reply_retry_exhausted');
+});
+
+test('an ambiguous reply-send failure (not proven to have missed WhatsApp) is never replayed, closing the duplicate-bubble bug', async t => {
+  const f = fixture(t);
+  const initial = enqueue(f.store);
+  await deliverOne(f.store, initial, config, { now: () => now, fetcher: async () => new Response(JSON.stringify({
+    status: 'applied', reply: 'تم تسجيل التحديث',
+  }), { status: 200 }) });
+  const calls = [];
+  // Simulates Baileys' sendMessage() timing out on the delivery ack after the
+  // text already reached WhatsApp's servers -- the exact scenario that used to
+  // resend the identical guide text as a second, separate bubble.
+  const sendReply = async (...args) => { calls.push(args); throw new Error('ack_timeout'); };
+  const row = f.store.next(now);
+  await deliverOne(f.store, row, config, { now: () => now, sendReply });
+  assert.equal(calls.length, 1, 'must give up after the first ambiguous attempt, not resend');
+  assert.equal(f.store.next(now + 1_000_000), undefined, 'nothing left queued to retry');
+  const final = f.store.db.prepare('SELECT state,error_code FROM inbox').get();
+  assert.equal(final.state, 'failed');
+  assert.equal(final.error_code, 'reply_send_ambiguous');
 });
 
 test('empty backend reply completes silently', async t => {

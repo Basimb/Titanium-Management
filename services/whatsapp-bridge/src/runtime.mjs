@@ -68,9 +68,13 @@ export function createBridgeRuntime({ config, store, auth, makeWASocket, jidNorm
   }
 
   async function sendGroup(jid, text, messageId, signal) {
-    if (signal?.aborted) throw new Error('group_send_cancelled');
+    // These two checks are resolved before any socket.sendMessage call is made,
+    // so a throw here is provably pre-network -- safe for a caller to retry.
+    if (signal?.aborted) throw Object.assign(new Error('group_send_cancelled'), { neverSent: true });
     const check = await inspectGroup(jid);
-    if (!check.allowed || signal?.aborted) throw new Error('group_privacy_blocked');
+    if (!check.allowed || signal?.aborted) throw Object.assign(new Error('group_privacy_blocked'), { neverSent: true });
+    // Past this point the send may have reached WhatsApp even if the call below
+    // throws (e.g. an ack timeout) -- that failure is deliberately left untagged.
     try { await socket.sendMessage(jid, { text: boundedPlainText(text), linkPreview: null }, { messageId }); }
     finally { groupCache.delete(jid); }
   }
@@ -289,13 +293,16 @@ export function createBridgeRuntime({ config, store, auth, makeWASocket, jidNorm
         (body.groupId === null || (await inspectGroup(body.groupId)).allowed),
       onPrivacyBlocked: privacyRefusal,
       sendReply: async (jid, text, messageId, body, result) => {
-        if (!ready || stopped) throw new Error('not_connected');
-        if (!await isActiveNumber(body.senderNumber)) throw new Error('sender_disabled');
+        // Both checks below run before any send is attempted -- provably safe to retry.
+        if (!ready || stopped) throw Object.assign(new Error('not_connected'), { neverSent: true });
+        if (!await isActiveNumber(body.senderNumber)) throw Object.assign(new Error('sender_disabled'), { neverSent: true });
         if (config.allowedGroups.has(jid)) {
           await sendGroup(jid, text, messageId);
           return;
         }
         const current = socket;
+        // Left untagged: a throw here can follow a send that actually reached
+        // WhatsApp (e.g. an ack timeout), so it must not be treated as safe to replay.
         await current.sendMessage(jid, { text, linkPreview: null }, { messageId });
         if (polls && body.groupId === null && result?.choices) {
           // The text is the durable fallback. A poll failure must not retry this
