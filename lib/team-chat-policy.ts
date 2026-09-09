@@ -45,7 +45,7 @@ export function resolveChatUser(
  * -------------------------------------------------------------------------- */
 export type GroupEvent = "project_new" | "task_new" | "delay" | "reassign" | "approval_request" | "blocker" | "milestone" | "project_closed";
 export const GROUP_EVENT_ALLOWLIST: ReadonlySet<GroupEvent> = new Set<GroupEvent>(["project_new", "task_new", "delay", "reassign", "approval_request", "blocker", "milestone", "project_closed"]);
-export const GROUP_DAILY_BUDGET = 100;
+export const GROUP_DAILY_BUDGET = 1000;
 const ACTION_TO_GROUP_EVENT: Record<string, GroupEvent> = { create: "task_new", reassign: "reassign", blocker: "blocker", approve: "milestone", archive_project: "project_closed" };
 
 /** Map an audited action to a group event, or null when it should stay private. */
