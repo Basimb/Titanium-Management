@@ -107,6 +107,59 @@ test('a note from a previous, already-finished work cycle does not satisfy the r
   assert.equal(tapped.status, 'clarify');
   assert.equal(f.db.prepare('SELECT status FROM tasks WHERE id=?').get(PROGRESS).status, 'progress');
 });
+// A FINISH tap never went through requestTaskClose (lib/approvals.ts), so it
+// never created a formal approvals row -- before this, dispatchManagementNotice
+// sent Basim only a plain-text FYI about the submit with no way at all to act
+// on it. taskCloseDecisionPoll/parseTaskCloseDecisionPollChoice close that gap
+// with a parallel, approvals-table-free 🟢/🔴 poll keyed by the task itself.
+test('a FINISH tap that succeeds sends Basim a real 🟢/🔴 decision poll, not just a plain-text FYI', async t => {
+  const f = fixture(t);
+  f.db.prepare("INSERT INTO comments VALUES(1,?,?,?,?)").run(PROGRESS, 'خالد', 'سلّمت اللوحة للفريق الفني اليوم', f.now - 1000);
+  await f.run(undefined, tap(`TSKQ${PROGRESS}`, `TSK${PROGRESS}FINISH`), async () => { throw Error('a FINISH tap must resolve directly, never ask the model'); });
+  const toBasim = f.db.prepare("SELECT text, choices_json AS choicesJson FROM agent_outbox WHERE to_user='basem' ORDER BY id DESC LIMIT 1").get();
+  assert.match(toBasim.text, /بانتظار اعتماد باسم/);
+  assert.ok(toBasim.choicesJson, 'Basim must get a tappable poll, not just an FYI, for a submit with no approvals row behind it');
+  const choices = JSON.parse(toBasim.choicesJson);
+  assert.equal(choices.id, `TCLQ${PROGRESS}`);
+  assert.deepEqual(choices.options.map(o => o.id), [`TCL${PROGRESS}Y`, `TCL${PROGRESS}N`]);
+});
+test('a plain "claim" notice to Basim never carries the task-close decision poll -- only "submit" does', async t => {
+  const f = fixture(t);
+  await f.run(undefined, tap(`TSKQ${OPEN}`, `TSK${OPEN}CLAIM`), async () => { throw Error('must not ask the model'); });
+  const toBasim = f.db.prepare("SELECT choices_json AS choicesJson FROM agent_outbox WHERE to_user='basem' ORDER BY id DESC LIMIT 1").get();
+  assert.equal(toBasim.choicesJson, null);
+});
+test('Basim tapping 🟢 on the task-close decision poll resolves the approval directly, never asking the model, and completes the task', async t => {
+  const f = fixture(t); const admin = { senderNumber: '12025550103' };
+  f.db.prepare("UPDATE tasks SET status='approval' WHERE id=?").run(PROGRESS);
+  const tapped = await f.run(undefined, { ...admin, ...tap(`TCLQ${PROGRESS}`, `TCL${PROGRESS}Y`) },
+    async () => { throw Error('a 🟢 tap must resolve directly, never ask the model'); });
+  assert.equal(tapped.status, 'applied');
+  const task = f.db.prepare('SELECT status,completed_at AS completedAt FROM tasks WHERE id=?').get(PROGRESS);
+  assert.equal(task.status, 'completed');
+  assert.ok(task.completedAt);
+  assert.ok(f.db.prepare("SELECT 1 FROM agent_outbox WHERE to_user='group' AND text LIKE '%اعتُمد إنجاز%'").get(), 'must broadcast the same way any other approval does');
+  assert.ok(f.db.prepare("SELECT 1 FROM agent_outbox WHERE to_user='member'").get(), 'خالد (the owner) must get a private heads-up that his submit was approved');
+});
+test('Basim tapping 🔴 on the task-close decision poll cannot resolve on the tap alone (reject needs a reason) -- it is rewritten to the sentence he would have typed, using the task\'s live title', async t => {
+  const f = fixture(t); const admin = { senderNumber: '12025550103' };
+  f.db.prepare("UPDATE tasks SET status='approval', title=? WHERE id=?").run('لوحة معدّلة', PROGRESS);
+  let seenText; const r = await f.run(undefined, { ...admin, ...tap(`TCLQ${PROGRESS}`, `TCL${PROGRESS}N`) },
+    async input => { seenText = input.text; return emptySecretaryIntent('clarify', 'شو سبب الرفض بالضبط؟'); });
+  assert.equal(seenText, 'بدي أرفض إنجاز مهمة «لوحة معدّلة»');
+  assert.equal(r.status, 'clarify');
+  assert.equal(f.db.prepare('SELECT status FROM tasks WHERE id=?').get(PROGRESS).status, 'approval', 'nothing must change before a reason is actually given');
+});
+test('a task-close decision tap (🟢 or 🔴) for a task removed since the poll was sent is denied cleanly instead of throwing', async t => {
+  const f = fixture(t); const admin = { senderNumber: '12025550103' };
+  f.db.prepare('DELETE FROM tasks WHERE id=?').run(PROGRESS);
+  const approved = await f.run(undefined, { ...admin, ...tap(`TCLQ${PROGRESS}`, `TCL${PROGRESS}Y`) }, async () => { throw Error('must not ask the model'); });
+  assert.equal(approved.status, 'clarify');
+  // 🔴's rewrite-to-text also degrades gracefully with no live task to name --
+  // same fallback as resolveTaskActionTextChoice's own NOTE/TRANSFER/EXTEND.
+  let seen; await f.run(undefined, { text: '🔴 رفض', ...admin, ...tap(`TCLQ${PROGRESS}`, `TCL${PROGRESS}N`) }, async input => { seen = input.text; return emptySecretaryIntent('chat', 'تمام'); });
+  assert.equal(seen, '🔴 رفض');
+});
 test('a stale CLAIM tap (task already claimed by someone else since the poll was sent) fails cleanly instead of throwing', async t => {
   const f = fixture(t);
   f.db.prepare("UPDATE tasks SET status='progress', owner='شادي' WHERE id=?").run(OPEN);

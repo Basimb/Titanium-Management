@@ -507,6 +507,45 @@ function parseApprovalPollChoice(event: Event): { approvalId: string; decision: 
   if (choice.optionId === `APR${approvalId}N`) return { approvalId, decision: "rejected" };
   return null;
 }
+// Basim's own tap-based decision on a task submitted for his approval OUTSIDE
+// the formal approvals table -- specifically a FINISH tap (see the
+// taskActionPollChoice "submit" branch below) or any other "submit" that
+// reaches dispatchManagementNotice without ever going through requestTaskClose
+// (lib/approvals.ts), which already attaches its own approvalDecisionPoll and
+// so never needs this one. Mirrors approvalDecisionPoll/parseApprovalPollChoice's
+// exact shape (same 🟢/🔴 labels, same one-hour poll lifetime) but keyed by
+// taskId instead of an approval id, since no approval row exists to key off
+// of on this path.
+function taskCloseDecisionPoll(taskId: string, at: number): SecretaryChoices {
+  return { id: `TCLQ${taskId}`, title: "قرارك على إنجاز المهمة؟", expiresAt: at + 60 * 60_000,
+    options: [{ id: `TCL${taskId}Y`, label: "🟢 اعتماد" }, { id: `TCL${taskId}N`, label: "🔴 رفض" }] };
+}
+function parseTaskCloseDecisionPollChoice(event: Event): { taskId: string; decision: "approved" | "rejected" } | null {
+  const choice = event.choice;
+  if (!choice || !choice.questionId.startsWith("TCLQ")) return null;
+  const taskId = choice.questionId.slice(4);
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(taskId)) return null;
+  const prefix = `TCL${taskId}`;
+  if (choice.optionId === `${prefix}Y`) return { taskId, decision: "approved" };
+  if (choice.optionId === `${prefix}N`) return { taskId, decision: "rejected" };
+  return null;
+}
+// Inverse of taskCloseDecisionPoll's 🔴 option. Unlike 🟢 (approve, resolved
+// deterministically below -- "approve" needs no extra input, exactly like
+// CLAIM/FINISH), a rejection needs the reason executeManagementAction's own
+// "reject" case requires (management-actions.ts's required(command.reason,...)),
+// which a tap can't carry. Same rewrite-to-text convention as
+// resolveTaskActionTextChoice's NOTE/TRANSFER/EDIT/EXTEND below: the normal
+// model-driven pipeline resolves the task from its current title and, per
+// secretary-intent.ts's existing "no reason yet" clarify, asks Basim for the
+// reason before anything executes.
+function resolveTaskCloseDecisionRejectChoice(db: DatabaseSync, event: Event): Event {
+  const parsed = parseTaskCloseDecisionPollChoice(event);
+  if (!parsed || parsed.decision !== "rejected") return event;
+  const task = db.prepare("SELECT title FROM tasks WHERE id=?").get(parsed.taskId) as { title: string } | undefined;
+  if (!task) return { ...event, choice: undefined };
+  return { ...event, text: `بدي أرفض إنجاز مهمة «${clean(task.title, 150)}»`, choice: undefined };
+}
 // Basim's "nobody should have to type" ask extended to every employee, not
 // just himself: a task's own detail view and the private notice when a task
 // lands on someone both attach a poll of the actions that actually apply
@@ -835,6 +874,7 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
   migrateSecretary(db); const now = (dependencies.now || Date.now)();
   event = resolveConfirmChoice(event);
   event = resolveTaskActionTextChoice(db, event);
+  event = resolveTaskCloseDecisionRejectChoice(db, event);
   const actor = actorFor(db, event, config); if (!actor) return { status: "denied", reply: "" };
   // The team group is one-way by default: automated notices only (task/project
   // open/close broadcasts, sent separately as groupNotice from a DM-side
@@ -872,6 +912,34 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
         const result = applyDecision(db, fresh, { approvalId: approvalPollChoice.approvalId, decision: approvalPollChoice.decision }, now);
         deliverAgentSideEffects(db, fresh, result, now);
         return save(db, event, fresh, { status: result.status, reply: result.reply }, [], now);
+      } catch (error) {
+        if (!(error instanceof ManagementActionError)) throw error;
+        return save(db, event, fresh, { status: "clarify", reply: error.message }, [], now);
+      }
+    });
+  }
+  // The 🟢 half of taskCloseDecisionPoll (Basim deciding on a FINISH-tap
+  // submit that never went through the formal approvals table) -- resolves
+  // directly for the same reason parseApprovalPollChoice's own 🟢/🔴 does:
+  // the option id already carries the exact task, nothing to look up against
+  // a model, no live state that could have gone stale. 🔴 never reaches here
+  // -- it was already rewritten to text above (resolveTaskCloseDecisionRejectChoice),
+  // since executeManagementAction's "reject" requires a reason a tap can't carry.
+  const taskCloseDecisionChoice = parseTaskCloseDecisionPollChoice(event);
+  if (taskCloseDecisionChoice && taskCloseDecisionChoice.decision === "approved"
+      && actor.id === "basem" && actor.role === "admin" && event.groupId === null && !event.replyToMessageId) {
+    return transaction(db, () => {
+      const fresh = actorFor(db, event, config);
+      if (!config.enabled || !fresh || JSON.stringify(fresh) !== JSON.stringify(actor)) return { status: "denied", reply: "" };
+      const duplicate = lookup(db, event, fresh, stateFor(db, fresh)); if (duplicate) return duplicate;
+      const state = stateFor(db, fresh);
+      const task = state.tasks.find(t => t.id === taskCloseDecisionChoice.taskId);
+      if (!task) return save(db, event, fresh, { status: "clarify", reply: "هاي المهمة ما عادت متاحة." }, [], now);
+      try {
+        const result = executeManagementAction(db, fresh, { action: "approve", taskId: task.id } as ManagementCommand,
+          { now, source: "whatsapp_secretary", auditContext: { originalText: event.text, sourceMessageId: event.messageId, confirmationRequired: false } });
+        dispatchManagementNotice(db, fresh, state, result, { projectId: task.projectId }, now);
+        return save(db, event, fresh, { status: "applied", reply: `✅ ${result.message}`, taskId: task.id }, ["t:" + task.id], now);
       } catch (error) {
         if (!(error instanceof ManagementActionError)) throw error;
         return save(db, event, fresh, { status: "clarify", reply: error.message }, [], now);
@@ -1440,7 +1508,16 @@ function dispatchManagementNotice(db: DatabaseSync, actor: ChatUser, state: Snap
   // should reach Basim directly, not only the group broadcast. Skipped when
   // he is the one who just acted (no self-notice) or already the private
   // target above (he already got the richer version with the action poll).
-  if (actor.id !== "basem" && targetId !== "basem") enqueueAgentMessage(db, { toUser: "basem", text: notice }, now);
+  // A "submit" specifically needs his actual DECISION, not just an FYI --
+  // requestTaskClose's text-typed close flow already attaches a real
+  // approvalDecisionPoll via its own approvals-table row, but a submit that
+  // reaches here (a FINISH tap above all) never created one, so without this
+  // he'd have no tap-based way to approve/reject it at all. taskCloseDecisionPoll
+  // is the parallel, approvals-table-free equivalent for exactly this case.
+  if (actor.id !== "basem" && targetId !== "basem") {
+    const choices = result.notification.action === "submit" && taskId ? taskCloseDecisionPoll(taskId, now) : undefined;
+    enqueueAgentMessage(db, { toUser: "basem", text: notice, ...(choices ? { choices } : {}) }, now);
+  }
 }
 // On-demand "remind everyone now" broadcast (Basim asking directly, not the
 // nightly agent-followups nudge cadence): groups every open, non-archived,
