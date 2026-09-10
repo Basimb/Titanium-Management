@@ -210,16 +210,39 @@ test('the standalone command legend carries a tappable poll of its own four comm
   assert.deepEqual(choices.options.map(o => o.id), ['LGDTRANSFER', 'LGDFINISH', 'LGDNOTE', 'LGDADD']);
   assert.equal(choices.expiresAt - f.now, 60 * 60_000, 'a WhatsApp poll cannot outlive a 1-hour expiry');
 });
-test('tapping a legend poll option rewrites the tap into the exact bare command a person would type, generic to any task', async t => {
+// Basim hit this for real: he tapped the legend's generic "انهاء المهمة" on
+// a message about a brand-new, still-unclaimed task, and the model quietly
+// resolved it to a COMPLETELY DIFFERENT task خالد already had in progress
+// and raised THAT one for Basim's approval -- because the old rewrite sent
+// the model the bare word with no task named at all, and the model picked
+// one on its own instead of asking. The fix: never had the model choose
+// among the actor's own tasks -- resolve deterministically here, and only
+// when there is truly one possible task to mean.
+test('LGDADD always rewrites outright -- a brand-new task touches no existing record, so no ambiguity is possible', async t => {
   const f = fixture(t);
-  let seenTransfer; await f.run(undefined, tap('LGDQ', 'LGDTRANSFER'), async input => { seenTransfer = input.text; return emptySecretaryIntent('clarify', 'أي مهمة؟'); });
-  assert.equal(seenTransfer, 'تحويل المهمة');
-  let seenFinish; await f.run(undefined, tap('LGDQ', 'LGDFINISH'), async input => { seenFinish = input.text; return emptySecretaryIntent('clarify', 'أي مهمة؟'); });
-  assert.equal(seenFinish, 'انهاء المهمة');
-  let seenNote; await f.run(undefined, tap('LGDQ', 'LGDNOTE'), async input => { seenNote = input.text; return emptySecretaryIntent('clarify', 'أي مهمة؟'); });
-  assert.equal(seenNote, 'اضافة ملاحظة');
   let seenAdd; await f.run(undefined, tap('LGDQ', 'LGDADD'), async input => { seenAdd = input.text; return emptySecretaryIntent('clarify', 'أي مشروع؟'); });
   assert.equal(seenAdd, 'اضافة مهمة');
+});
+test('LGDFINISH/LGDNOTE resolve to the actor\'s one eligible (in-progress, owned) task by name, never the bare word', async t => {
+  const f = fixture(t); // خالد owns exactly one in-progress task here: PROGRESS ("لوحة")
+  let seenFinish; await f.run(undefined, tap('LGDQ', 'LGDFINISH'), async input => { seenFinish = input.text; return emptySecretaryIntent('clarify', 'شو صار؟'); });
+  assert.equal(seenFinish, 'خلصت مهمة «لوحة»');
+  let seenNote; await f.run(undefined, tap('LGDQ', 'LGDNOTE'), async input => { seenNote = input.text; return emptySecretaryIntent('clarify', 'شو الملاحظة؟'); });
+  assert.equal(seenNote, 'بدي أضيف ملاحظة على مهمة «لوحة»');
+});
+test('LGDTRANSFER asks which task, without ever invoking the model, when the actor has more than one eligible task', async t => {
+  const f = fixture(t); // خالد has BOTH the open-suggested task and the in-progress one -- transfer applies to either
+  const r = await f.run(undefined, tap('LGDQ', 'LGDTRANSFER'), async () => { throw Error('must not ask the model to pick among several tasks'); });
+  assert.equal(r.status, 'clarify');
+  assert.match(r.reply, /أكثر من مهمة/);
+  assert.match(r.reply, /مهمة مقترحة/); assert.match(r.reply, /لوحة/);
+});
+test('LGDFINISH/LGDNOTE/LGDTRANSFER say so plainly, without ever invoking the model, when the actor has no eligible task at all', async t => {
+  const f = fixture(t); const noTasks = { senderNumber: '12025550102' }; // شادي owns nothing in this fixture
+  const finish = await f.run(undefined, { ...noTasks, ...tap('LGDQ', 'LGDFINISH') }, async () => { throw Error('must not ask the model'); });
+  assert.equal(finish.status, 'clarify'); assert.match(finish.reply, /ما عندك مهمة قيد التنفيذ حاليًا لإنهائها/);
+  const transfer = await f.run(undefined, { ...noTasks, ...tap('LGDQ', 'LGDTRANSFER') }, async () => { throw Error('must not ask the model'); });
+  assert.match(transfer.reply, /ما عندك مهمة مفتوحة أو قيد التنفيذ حاليًا لتحويلها/);
 });
 test('a task newly reassigned through chat privately notifies the new owner with a CLAIM/TRANSFER poll of their own', async t => {
   const f = fixture(t); const admin = { senderNumber: '12025550103' };

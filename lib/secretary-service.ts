@@ -64,18 +64,47 @@ function taskCommandsLegendPoll(now: number): SecretaryChoices {
     { id: "LGDTRANSFER", label: "🔄 تحويل المهمة" }, { id: "LGDFINISH", label: "✅ انهاء المهمة" },
     { id: "LGDNOTE", label: "📝 اضافة ملاحظة" }, { id: "LGDADD", label: "🆕 اضافة مهمة" }] };
 }
-// Inverse of taskCommandsLegendPoll: a tapped option arrives as an ordinary
-// event with event.choice set. This poll carries no task/actor-specific
-// state in its option ids (unlike CFM/TSKQ/TCLQ above), so unlike those it
-// never needs a live DB/state check here -- rewriting to the literal command
-// text is always valid, and the normal pipeline resolves it exactly as it
-// would for someone typing the same word.
-function resolveTaskCommandsLegendChoice(event: Event): Event {
+// Candidate tasks for one of the legend's FINISH/TRANSFER/NOTE options,
+// using the exact same eligibility taskActionPoll already applies for a
+// task-bound tap -- this poll just isn't bound to one task, so this counts
+// candidates itself instead of trusting a task id encoded in the option.
+function legendCandidates(state: Snapshot, actorName: string, optionId: string): Task[] {
+  return state.tasks.filter(task => !task.archivedAt && (optionId === "LGDTRANSFER"
+    ? (task.status === "open" || task.status === "progress") && (task.owner || task.suggestedOwner) === actorName
+    : task.status === "progress" && task.owner === actorName));
+}
+const LEGEND_NO_TASK: Record<string, string> = {
+  LGDFINISH: "ما عندك مهمة قيد التنفيذ حاليًا لإنهائها.",
+  LGDNOTE: "ما عندك مهمة قيد التنفيذ حاليًا لإضافة ملاحظة عليها.",
+  LGDTRANSFER: "ما عندك مهمة مفتوحة أو قيد التنفيذ حاليًا لتحويلها.",
+};
+const LEGEND_MANY_TASK = "عندك أكثر من مهمة تنطبق، أي وحدة بالضبط؟";
+function legendRewriteText(optionId: string, title: string): string {
+  return optionId === "LGDFINISH" ? `خلصت مهمة «${title}»`
+    : optionId === "LGDNOTE" ? `بدي أضيف ملاحظة على مهمة «${title}»`
+    : `بدي أحول مهمة «${title}» لحدا غيري`;
+}
+// Inverse of taskCommandsLegendPoll. LGDADD is always safe to rewrite
+// outright -- a brand-new task touches no existing record. FINISH/TRANSFER/
+// NOTE need an existing task identified first: unlike taskActionPoll's own
+// taps (bound to the one task the poll was sent about), this poll carries no
+// task id, so naively rewriting to the bare command let the model quietly
+// guess among the actor's OTHER tasks instead of asking -- exactly what
+// happened to Basim: a FINISH tap on a brand-new, still-unclaimed task
+// resolved instead to a completely different task he already had in
+// progress. Resolve deterministically here only when exactly one of the
+// actor's own tasks could apply to that action; otherwise leave event.choice
+// set so the dedicated branch in handleSecretaryEvent asks by name instead
+// of ever letting the model guess.
+function resolveTaskCommandsLegendChoice(db: DatabaseSync, event: Event, config: TeamChatConfig): Event {
   const choice = event.choice;
   if (!choice || choice.questionId !== "LGDQ") return event;
-  const TEXT: Record<string, string> = { LGDTRANSFER: "تحويل المهمة", LGDFINISH: "انهاء المهمة", LGDNOTE: "اضافة ملاحظة", LGDADD: "اضافة مهمة" };
-  const text = TEXT[choice.optionId];
-  return text ? { ...event, text, choice: undefined } : event;
+  if (choice.optionId === "LGDADD") return { ...event, text: "اضافة مهمة", choice: undefined };
+  if (!["LGDFINISH", "LGDTRANSFER", "LGDNOTE"].includes(choice.optionId)) return event;
+  const actor = actorFor(db, event, config);
+  if (!actor) return { ...event, choice: undefined };
+  const candidates = legendCandidates(stateFor(db, actor), actor.name, choice.optionId);
+  return candidates.length === 1 ? { ...event, text: legendRewriteText(choice.optionId, candidates[0].title), choice: undefined } : event;
 }
 /** Queues the command legend as its own WhatsApp message (never in the same
  * bubble as the task message itself) for a real employee recipient only --
@@ -919,7 +948,7 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
 }): Promise<Result> {
   migrateSecretary(db); const now = (dependencies.now || Date.now)();
   event = resolveConfirmChoice(event);
-  event = resolveTaskCommandsLegendChoice(event);
+  event = resolveTaskCommandsLegendChoice(db, event, config);
   event = resolveTaskActionTextChoice(db, event);
   event = resolveTaskCloseDecisionRejectChoice(db, event);
   const actor = actorFor(db, event, config); if (!actor) return { status: "denied", reply: "" };
@@ -1038,6 +1067,24 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
         if (!(error instanceof ManagementActionError)) throw error;
         return save(db, event, fresh, { status: "clarify", reply: error.message }, [], now);
       }
+    });
+  }
+  // The ambiguous/no-match half of the legend's FINISH/TRANSFER/NOTE taps --
+  // resolveTaskCommandsLegendChoice above already rewrote a single unambiguous
+  // candidate into the normal named-task sentence before this point; reaching
+  // here means event.choice is still the untouched LGDQ tap (zero or several
+  // candidate tasks), so ask by name instead of ever letting the model guess
+  // one on its own.
+  const legendChoice = event.choice && event.choice.questionId === "LGDQ" && ["LGDFINISH", "LGDTRANSFER", "LGDNOTE"].includes(event.choice.optionId) ? event.choice : null;
+  if (legendChoice && actor.active === 1 && event.groupId === null && !event.replyToMessageId) {
+    return transaction(db, () => {
+      const fresh = actorFor(db, event, config);
+      if (!config.enabled || !fresh || JSON.stringify(fresh) !== JSON.stringify(actor)) return { status: "denied", reply: "" };
+      const duplicate = lookup(db, event, fresh, stateFor(db, fresh)); if (duplicate) return duplicate;
+      const candidates = legendCandidates(stateFor(db, fresh), fresh.name, legendChoice.optionId);
+      const reply = candidates.length === 0 ? LEGEND_NO_TASK[legendChoice.optionId]
+        : `${LEGEND_MANY_TASK}\n${candidates.map(t => `• ${clean(t.title, 150)}`).join("\n")}`;
+      return save(db, event, fresh, { status: "clarify", reply }, [], now);
     });
   }
   const pending = db.prepare("SELECT * FROM secretary_pending WHERE conversation_key=?").get(key) as Pending | undefined;
