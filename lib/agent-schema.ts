@@ -16,6 +16,12 @@ export function migrateAgentSchema(sqlite: DatabaseSync): void {
   try {
     addColumns("users", [["phone", "TEXT"], ["department", "TEXT"]]);
     addColumns("tasks", [["watcher", "TEXT"], ["expected_at", "TEXT"], ["blocker", "TEXT"], ["last_update_at", "INTEGER"]]);
+    // A proactive approval notification's tappable poll (see approvalDecisionPoll
+    // in approvals.ts) rides along in the outbox next to its text -- an already
+    // existing production database needs this column added explicitly since its
+    // agent_outbox table predates the feature; a fresh one gets it directly in
+    // the CREATE TABLE below.
+    addColumns("agent_outbox", [["choices_json", "TEXT"]]);
     sqlite.exec(`
       CREATE TABLE IF NOT EXISTS approvals (
         id TEXT PRIMARY KEY NOT NULL,
@@ -87,6 +93,7 @@ export function migrateAgentSchema(sqlite: DatabaseSync): void {
         id TEXT PRIMARY KEY NOT NULL,
         to_user TEXT NOT NULL,             -- user id or 'group'
         text TEXT NOT NULL,
+        choices_json TEXT,                 -- JSON SecretaryChoices, e.g. an approval-decision poll
         state TEXT DEFAULT 'pending' NOT NULL, -- pending | sending | sent | failed
         created_at INTEGER NOT NULL,
         sent_at INTEGER

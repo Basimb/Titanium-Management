@@ -83,6 +83,27 @@ test("member cannot edit deadlines directly; extension request goes to owner and
   assert.ok(db.prepare("SELECT COUNT(*) AS n FROM audit_logs WHERE action IN ('request_approval','approve_request')").get().n >= 2);
 });
 
+// Basim's complaint: proactive approval requests (deadline extension, task
+// close, ownership, transfer, project close/create, task create) only ever
+// arrived as a plain-text "اعتمد"/"ارفض" instruction with nothing to tap.
+// Every request* function now also returns a real tappable poll whose own
+// option ids embed the approval id -- see approvalDecisionPoll -- so a tap
+// resolves deterministically, and WhatsApp itself refuses a poll that
+// outlives an hour, so expiresAt must never exceed that.
+test("every proactive approval request attaches a tappable poll keyed to its own approval id, capped at a 1-hour expiry", t => {
+  const db = fixture(t);
+  const extension = requestDeadlineExtension(db, khaled, { taskId: "t1", newDueDate: "2026-09-07", reason: "تأخر المحامي" }, { now: T0 });
+  assert.equal(extension.choices.id, `APR${extension.approval.id}`);
+  assert.deepEqual(extension.choices.options.map(option => option.id), [`APR${extension.approval.id}Y`, `APR${extension.approval.id}N`]);
+  assert.equal(extension.choices.expiresAt, T0 + 60 * 60_000);
+  const ownership = requestTaskOwnership(db, khaled, { taskId: "t2" }, { now: T0 + 1 });
+  assert.equal(ownership.choices.id, `APR${ownership.approval.id}`);
+  assert.equal(ownership.choices.expiresAt, T0 + 1 + 60 * 60_000);
+  const close = requestTaskClose(db, khaled, { taskId: "t1", result: "خلص" }, { now: T0 + 2 });
+  assert.equal(close.choices.id, `APR${close.approval.id}`);
+  assert.notEqual(close.choices.id, ownership.choices.id, "each approval gets its own poll id, never a shared one");
+});
+
 test("employee ownership request waits for Basim and assigns only after approval", t => {
   const db = fixture(t);
   const { approval, ownerMessage } = requestTaskOwnership(db, khaled, { taskId: "t2", reason: "أقدر أتابع الأوراق" }, { now: T0 });

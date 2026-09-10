@@ -12,7 +12,7 @@ import { can, isOwner, type PermissionActor } from "./permissions.ts";
 import type { SecretaryIntent } from "./secretary-intent.ts";
 import { createSecretaryChoices, type SecretaryChoices } from "./secretary-choices.ts";
 
-export type AgentResult = { status: string; reply: string; taskId?: string; projectId?: string; groupNotice?: string | null; notify?: Array<{ userId: string; text: string }>; choices?: SecretaryChoices };
+export type AgentResult = { status: string; reply: string; taskId?: string; projectId?: string; groupNotice?: string | null; notify?: Array<{ userId: string; text: string; choices?: SecretaryChoices }>; choices?: SecretaryChoices };
 export type AgentContext = {
   db: DatabaseSync; actor: ManagementActor; now: number; inputKind?: string | null; suppressNotices?: boolean;
   // The admin's own raw WhatsApp text, when available -- see the "decide"
@@ -213,7 +213,7 @@ export function handleAgentIntent(plan: SecretaryIntent, ctx: AgentContext): Age
           return { status: "confirmation", reply: `تعديل موعد «${clean(task.title)}» إلى ${plan.fields.dueDate}.${statedReason ? `\nالملاحظة: ${statedReason}` : ""}\nاكتب «موافق ${token}» للتنفيذ.`, taskId: task.id };
         }
         const request = requestDeadlineExtension(db, actor, { taskId: task.id, newDueDate: String(plan.fields.dueDate), reason }, { now });
-        return { status: "applied", reply: `📨 رفعت طلب التمديد لباسم: ${request.approval.summary}\nالسبب: ${reason}\nبخبرك أول ما يقرر.`, taskId: task.id, notify: [{ userId: "basem", text: request.ownerMessage }], groupNotice: null };
+        return { status: "applied", reply: `📨 رفعت طلب التمديد لباسم: ${request.approval.summary}\nالسبب: ${reason}\nبخبرك أول ما يقرر.`, taskId: task.id, notify: [{ userId: "basem", text: request.ownerMessage, choices: request.choices }], groupNotice: null };
       }
       case "close_request": {
         const task = ctx.tasks.find(candidate => candidate.id === plan.taskId);
@@ -233,13 +233,13 @@ export function handleAgentIntent(plan: SecretaryIntent, ctx: AgentContext): Age
           return { status: "confirmation", reply: `اعتماد إغلاق «${clean(task.title)}».\nاكتب «موافق ${token}» للتنفيذ.`, taskId: task.id };
         }
         const request = requestTaskClose(db, actor, { taskId: task.id, result }, { now });
-        return { status: "applied", reply: `✅ سجّلت النتيجة ورفعت «${clean(task.title)}» لاعتماد باسم. بخبرك بقراره.`, taskId: task.id, notify: [{ userId: "basem", text: request.ownerMessage }], groupNotice: `📤 ${actor.name} أنهى «${clean(task.title)}» وبانتظار اعتماد باسم` };
+        return { status: "applied", reply: `✅ سجّلت النتيجة ورفعت «${clean(task.title)}» لاعتماد باسم. بخبرك بقراره.`, taskId: task.id, notify: [{ userId: "basem", text: request.ownerMessage, choices: request.choices }], groupNotice: `📤 ${actor.name} أنهى «${clean(task.title)}» وبانتظار اعتماد باسم` };
       }
       case "ownership_request": {
         if (owner) return { status: "clarify", reply: "أنت تقدر تعيّن المسؤول مباشرة. اذكر المهمة واسم الموظف." };
         if (!plan.taskId) return { status: "clarify", reply: "أي مهمة بدك تستلم مسؤوليتها؟" };
         const request = requestTaskOwnership(db, actor, { taskId: plan.taskId, reason: clean(plan.fields.reason, 1000) }, { now });
-        return { status: "applied", reply: `📨 رفعت طلبك لباسم: ${request.approval.summary}. ما تغير المسؤول قبل موافقته.`, taskId: plan.taskId, notify: [{ userId: "basem", text: request.ownerMessage }], groupNotice: null };
+        return { status: "applied", reply: `📨 رفعت طلبك لباسم: ${request.approval.summary}. ما تغير المسؤول قبل موافقته.`, taskId: plan.taskId, notify: [{ userId: "basem", text: request.ownerMessage, choices: request.choices }], groupNotice: null };
       }
       case "task_transfer_request": {
         if (owner) return { status: "clarify", reply: "أنت تقدر تعيد تعيين المهمة مباشرة. اذكر المهمة واسم الموظف الجديد." };
@@ -249,14 +249,14 @@ export function handleAgentIntent(plan: SecretaryIntent, ctx: AgentContext): Age
         const reply = suggestedOwnerId
           ? `📨 رفعت طلب التحويل لباسم: ${request.approval.summary}. ما تغير المسؤول قبل موافقته.`
           : `📨 رفعت لباسم إنها مش مسؤوليتك. ما تغير شي قبل قراره.`;
-        return { status: "applied", reply, taskId: plan.taskId, notify: [{ userId: "basem", text: request.ownerMessage }], groupNotice: null };
+        return { status: "applied", reply, taskId: plan.taskId, notify: [{ userId: "basem", text: request.ownerMessage, choices: request.choices }], groupNotice: null };
       }
       case "project_close_request": {
         if (owner) return { status: "clarify", reply: "أنت تقدر تغلق المشروع مباشرة. اذكر اسمه." };
         if (!plan.projectId) return { status: "clarify", reply: "أي مشروع بدك تغلق؟" };
         const project = ctx.projects.find(candidate => candidate.id === plan.projectId);
         const request = requestProjectClose(db, actor, { projectId: plan.projectId, reason: clean(plan.fields.reason, 1000) }, { now });
-        return { status: "applied", reply: `📨 رفعت طلب إغلاق مشروع «${clean(project?.name ?? "")}» لباسم. بخبرك بقراره.`, projectId: plan.projectId, notify: [{ userId: "basem", text: request.ownerMessage }], groupNotice: null };
+        return { status: "applied", reply: `📨 رفعت طلب إغلاق مشروع «${clean(project?.name ?? "")}» لباسم. بخبرك بقراره.`, projectId: plan.projectId, notify: [{ userId: "basem", text: request.ownerMessage, choices: request.choices }], groupNotice: null };
       }
       case "rule": {
         if (!owner) return { status: "denied", reply: "القواعد الدائمة يعتمدها باسم." };
@@ -321,7 +321,7 @@ export function handleAgentIntent(plan: SecretaryIntent, ctx: AgentContext): Age
           return { status: "confirmation", reply: `${voice ? "فهمت من الصوت:\n" : ""}${preview}${warnings ? `\n${warnings}` : ""}${ctx.suppressNotices ? "\nبدون إرسال إشعارات للفريق." : ""}${taskNote}\n\nأعتمد إنشاء المشروع؟ اكتب «موافق ${token}» أو صحّح أي بند.` };
         }
         const request = requestProjectCreate(db, actor, { name, goal, tasks: parsed.tasks }, { now });
-        return { status: "applied", reply: `📨 رفعت اقتراح المشروع «${name}» لباسم للاعتماد.${taskNote}`, notify: [{ userId: "basem", text: request.ownerMessage }], groupNotice: null };
+        return { status: "applied", reply: `📨 رفعت اقتراح المشروع «${name}» لباسم للاعتماد.${taskNote}`, notify: [{ userId: "basem", text: request.ownerMessage, choices: request.choices }], groupNotice: null };
       }
       default: return null;
     }

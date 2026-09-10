@@ -445,6 +445,25 @@ function resolveConfirmChoice(event: Event): Event {
   if (choice.optionId === `CFM${token}N`) return { ...event, text: "إلغاء", choice: undefined };
   return event;
 }
+// Inverse of approvalDecisionPoll (approvals.ts): a proactive approval
+// notification's poll -- filed from an employee's own conversation, arriving
+// in Basim's chat outside any live turn of his -- is tapped as an ordinary
+// event with event.choice set. Unlike confirmChoices/CFM above (bound to one
+// conversation's single pending proposal) or the live "approvalDecision"
+// secretary_choices slot handled further below (bound to a conversationKey
+// and a specific catalog snapshot), this poll's own option ids carry the
+// approval id directly, so a tap resolves deterministically with nothing to
+// match against and no live state that could have gone stale -- exactly what
+// a poll arriving well after, and independently of, any turn of Basim's needs.
+function parseApprovalPollChoice(event: Event): { approvalId: string; decision: "approved" | "rejected" } | null {
+  const choice = event.choice;
+  if (!choice || !choice.questionId.startsWith("APR")) return null;
+  const approvalId = choice.questionId.slice(3);
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(approvalId)) return null;
+  if (choice.optionId === `APR${approvalId}Y`) return { approvalId, decision: "approved" };
+  if (choice.optionId === `APR${approvalId}N`) return { approvalId, decision: "rejected" };
+  return null;
+}
 
 function intakeRow(db: DatabaseSync, key: string): IntakeRow | undefined {
   return db.prepare("SELECT draft_json,last_event_key,expires_at FROM secretary_task_intake WHERE conversation_key=?").get(key) as IntakeRow | undefined;
@@ -624,7 +643,7 @@ function taskIntake(db: DatabaseSync, event: Event, actor: ChatUser, state: Snap
     try {
       if (draft.newProjectName) {
         const request = requestProjectCreate(db, actor, { name: draft.newProjectName, goal: draft.details || undefined, tasks: [projectTask] }, { now });
-        enqueueAgentMessage(db, { toUser: "basem", text: request.ownerMessage }, now);
+        enqueueAgentMessage(db, { toUser: "basem", text: request.ownerMessage, choices: request.choices }, now);
         notifyTaskLegend(db, actor.id, now + 1);
         log(db, actor, event, "secretary_proposal", { summary: "رفع طلب فتح مشروع مع مهمته لباسم", approvalId: request.approval.id, confirmationRequired: false }, now);
         return save(db, event, actor, { status: "applied", reply: `📨 رفعت طلبك لباسم: ${request.approval.summary}\nبخبرك أول ما يقرر.` }, scope, now);
@@ -633,7 +652,7 @@ function taskIntake(db: DatabaseSync, event: Event, actor: ChatUser, state: Snap
         priority: draft.priority!, dueDate: draft.dueDate === "unscheduled" ? null : draft.dueDate,
         ownerId: draft.ownerId === "unassigned" ? null : draft.ownerId }, { now });
       rememberLastProject(db, key, draft.projectId!, project?.name ?? draft.projectId!, now);
-      enqueueAgentMessage(db, { toUser: "basem", text: request.ownerMessage }, now);
+      enqueueAgentMessage(db, { toUser: "basem", text: request.ownerMessage, choices: request.choices }, now);
       notifyTaskLegend(db, actor.id, now + 1);
       log(db, actor, event, "secretary_proposal", { summary: "رفع طلب فتح مهمة لباسم", approvalId: request.approval.id, confirmationRequired: false }, now);
       return save(db, event, actor, { status: "applied", reply: `📨 رفعت طلبك لباسم: ${request.approval.summary}\nبخبرك أول ما يقرر.${chainHint}` }, scope, now);
@@ -723,6 +742,24 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
       return save(db, event, fresh, { status: "applied", reply: profileCommand.body === null
         ? `حذفت «${profileCommand.topic}» من ذاكرتك الشخصية.`
         : `حفظت في ذاكرتك الشخصية: ${profileCommand.topic} — ${profileCommand.body}\nتقدر تعدّل نفس الموضوع أو تقول «انس عني: ${profileCommand.topic}».` }, [], now);
+    });
+  }
+  // A proactive approval notification's poll tap -- see parseApprovalPollChoice
+  // above for why this resolves directly instead of going through the model.
+  const approvalPollChoice = parseApprovalPollChoice(event);
+  if (approvalPollChoice && actor.id === "basem" && actor.role === "admin" && event.groupId === null && !event.replyToMessageId) {
+    return transaction(db, () => {
+      const fresh = actorFor(db, event, config);
+      if (!config.enabled || !fresh || JSON.stringify(fresh) !== JSON.stringify(actor)) return { status: "denied", reply: "" };
+      const duplicate = lookup(db, event, fresh, stateFor(db, fresh)); if (duplicate) return duplicate;
+      try {
+        const result = applyDecision(db, fresh, { approvalId: approvalPollChoice.approvalId, decision: approvalPollChoice.decision }, now);
+        deliverAgentSideEffects(db, fresh, result, now);
+        return save(db, event, fresh, { status: result.status, reply: result.reply }, [], now);
+      } catch (error) {
+        if (!(error instanceof ManagementActionError)) throw error;
+        return save(db, event, fresh, { status: "clarify", reply: error.message }, [], now);
+      }
     });
   }
   const pending = db.prepare("SELECT * FROM secretary_pending WHERE conversation_key=?").get(key) as Pending | undefined;
@@ -1359,7 +1396,7 @@ function safeKnowledge(db: DatabaseSync, actor: ChatUser, query: string) {
 }
 /** Private notifications and group notices produced by agent actions go to the durable queue; the bridge delivers them. */
 function deliverAgentSideEffects(db: DatabaseSync, actor: ChatUser, result: AgentResult, now: number) {
-  for (const item of result.notify ?? []) if (item.userId !== actor.id) { enqueueAgentMessage(db, { toUser: item.userId, text: item.text }, now); notifyTaskLegend(db, item.userId, now + 1); }
+  for (const item of result.notify ?? []) if (item.userId !== actor.id) { enqueueAgentMessage(db, { toUser: item.userId, text: item.text, choices: item.choices }, now); notifyTaskLegend(db, item.userId, now + 1); }
   if (result.groupNotice) enqueueAgentMessage(db, { toUser: "group", text: result.groupNotice }, now);
 }
 

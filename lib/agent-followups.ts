@@ -10,9 +10,10 @@ import type { DatabaseSync } from "node:sqlite";
 import { formatPendingList, staleApprovals, markNudged } from "./approvals.ts";
 import { getManagementSnapshot, migrateManagementActions, type ManagementActor, type ManagementTask } from "./management-actions.ts";
 import { GROUP_EVENT_ALLOWLIST, groupBudgetRemaining } from "./team-chat-policy.ts";
+import type { SecretaryChoices } from "./secretary-choices.ts";
 
 export type FollowupConfig = { enabled: boolean; contacts: Array<{ userId: string; number: string }>; groupId?: string | null; workStartHour?: number; workEndHour?: number; timezoneOffsetMinutes?: number; publicUrl?: string };
-type Planned = { id: string; kind: "overdue_task" | "silent_task" | "stale_approval" | "daily_digest" | "auto_reminder_morning" | "auto_reminder_evening" | "unclaimed_task"; targetUser: string; entityId: string | null; to: string; text: string };
+type Planned = { id: string; kind: "overdue_task" | "silent_task" | "stale_approval" | "daily_digest" | "auto_reminder_morning" | "auto_reminder_evening" | "unclaimed_task"; targetUser: string; entityId: string | null; to: string; text: string; choices?: SecretaryChoices };
 const DAY = 24 * 60 * 60_000, SILENT_AFTER = 3 * DAY, STALE_APPROVAL_AFTER = 2 * DAY, HOUR = 60 * 60_000;
 const newMessageId = () => "3EB0" + randomBytes(18).toString("hex").toUpperCase();
 const clean = (value: string) => value.replace(/[\x00-\x1f\u202a-\u202e\u2066-\u2069]/g, " ").slice(0, 200);
@@ -151,25 +152,36 @@ export function planFollowups(db: DatabaseSync, config: FollowupConfig, at: numb
   return plans;
 }
 
-/** Queue a system notification (to a user id or 'group'); the bridge job delivers it. */
-export function enqueueAgentMessage(db: DatabaseSync, input: { toUser: string; text: string }, at: number): string {
+/** Queue a system notification (to a user id or 'group'); the bridge job delivers it.
+ * choices, when given, is a real tappable WhatsApp poll to attach alongside the
+ * text (see approvalDecisionPoll in approvals.ts) -- 'group' targets ignore it,
+ * same as the interactive sendReply path (WhatsApp polls don't work in groups). */
+export function enqueueAgentMessage(db: DatabaseSync, input: { toUser: string; text: string; choices?: SecretaryChoices }, at: number): string {
   migrateManagementActions(db);
   const id = randomBytes(8).toString("hex");
-  db.prepare("INSERT INTO agent_outbox (id,to_user,text,state,created_at) VALUES (?,?,?,'pending',?)").run(id, input.toUser, input.text.slice(0, 3800), at);
+  db.prepare("INSERT INTO agent_outbox (id,to_user,text,choices_json,state,created_at) VALUES (?,?,?,?,'pending',?)")
+    .run(id, input.toUser, input.text.slice(0, 3800), input.toUser !== "group" && input.choices ? JSON.stringify(input.choices) : null, at);
   return id;
 }
 
 function nextQueued(db: DatabaseSync, config: FollowupConfig, at: number): Planned | null {
   db.prepare("UPDATE agent_outbox SET state='failed' WHERE state='sending' AND created_at<=?").run(at - 5 * 60_000);
-  const row = db.prepare("SELECT id,to_user AS toUser,text FROM agent_outbox WHERE state='pending' AND created_at>=? ORDER BY created_at LIMIT 1").get(at - DAY) as { id: string; toUser: string; text: string } | undefined;
+  const row = db.prepare("SELECT id,to_user AS toUser,text,choices_json AS choicesJson FROM agent_outbox WHERE state='pending' AND created_at>=? ORDER BY created_at LIMIT 1").get(at - DAY) as { id: string; toUser: string; text: string; choicesJson: string | null } | undefined;
   if (!row) { db.prepare("UPDATE agent_outbox SET state='failed' WHERE state='pending' AND created_at<?").run(at - DAY); return null; }
+  // A poll expires at most an hour after it was built (approvalDecisionPoll/
+  // confirmChoices) -- past that WhatsApp itself would reject it, so drop it
+  // here rather than let the bridge attempt and fail; the plain text (which
+  // already carries the same choice in words, see APPROVAL_CHOICE_HINT) still
+  // goes out normally either way.
+  let choices: SecretaryChoices | undefined;
+  if (row.choicesJson) { try { const parsed = JSON.parse(row.choicesJson) as SecretaryChoices; if (parsed && parsed.expiresAt > at) choices = parsed; } catch { /* ignore malformed choices */ } }
   if (row.toUser === "group") {
     if (!config.groupId || groupBudgetRemaining(db, at) <= 0) { db.prepare("UPDATE agent_outbox SET state='failed' WHERE id=?").run(row.id); return null; }
     return { id: row.id, kind: "daily_digest", targetUser: "group", entityId: null, to: config.groupId, text: row.text };
   }
   const number = config.contacts.find(contact => contact.userId === row.toUser)?.number.replace(/\D/g, "").replace(/^00/, "");
   if (!number) { db.prepare("UPDATE agent_outbox SET state='failed' WHERE id=?").run(row.id); return null; }
-  return { id: row.id, kind: "overdue_task", targetUser: row.toUser, entityId: null, to: `${number}@s.whatsapp.net`, text: row.text };
+  return { id: row.id, kind: "overdue_task", targetUser: row.toUser, entityId: null, to: `${number}@s.whatsapp.net`, text: row.text, ...(choices ? { choices } : {}) };
 }
 
 export function createFollowupJobs({ db, config, now = Date.now }: { db: DatabaseSync; config: FollowupConfig | (() => FollowupConfig); now?: () => number }) {
@@ -177,7 +189,7 @@ export function createFollowupJobs({ db, config, now = Date.now }: { db: Databas
   let running = false;
   const current = () => typeof config === "function" ? config() : config;
   return {
-    async deliverNext(send: (message: { to: string; text: string; messageId: string; signal: AbortSignal }) => Promise<unknown>) {
+    async deliverNext(send: (message: { to: string; text: string; messageId: string; signal: AbortSignal; choices?: SecretaryChoices }) => Promise<unknown>) {
       if (running || !current().enabled) return { status: "idle" as const };
       running = true;
       try {
@@ -190,7 +202,7 @@ export function createFollowupJobs({ db, config, now = Date.now }: { db: Databas
         db.prepare("INSERT OR REPLACE INTO agent_followups (id,kind,target_user,entity_id,sent_at,response) VALUES (?,?,?,?,?,'sending')").run(plan.id, queued ? "queued" : plan.kind, plan.targetUser, plan.entityId, at);
         const controller = new AbortController(); let timeout: ReturnType<typeof setTimeout> | undefined;
         try {
-          await Promise.race([send({ to: plan.to, text: plan.text, messageId: newMessageId(), signal: controller.signal }),
+          await Promise.race([send({ to: plan.to, text: plan.text, messageId: newMessageId(), signal: controller.signal, ...(plan.choices ? { choices: plan.choices } : {}) }),
             new Promise<never>((_, reject) => { timeout = setTimeout(() => { controller.abort(); reject(new Error("delivery_uncertain")); }, 15_000); })]);
           db.prepare("UPDATE agent_followups SET response='sent' WHERE id=?").run(plan.id);
           if (queued) db.prepare("UPDATE agent_outbox SET state='sent',sent_at=? WHERE id=?").run(at, plan.id);

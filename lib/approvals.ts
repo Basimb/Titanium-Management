@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 import { executeManagementAction, getManagementSnapshot, ManagementActionError, migrateManagementActions, resolveManagementActor, type ManagementActor, type ManagementResult, type ManagementTask } from "./management-actions.ts";
 import { can, isOwner, type PermissionActor } from "./permissions.ts";
+import type { SecretaryChoices } from "./secretary-choices.ts";
 
 export type ApprovalType = "deadline_extension" | "task_close" | "task_ownership" | "task_transfer" | "task_create" | "project_create" | "project_close" | "rule" | "policy";
 export type ApprovalStatus = "pending" | "approved" | "rejected" | "expired";
@@ -23,6 +24,20 @@ export const APPROVAL_TTL_MS = 14 * 24 * 60 * 60_000;
 // several at once via formatPendingList/the ambiguous-candidates clarify
 // above, "how do I answer this" always looks and reads the same way.
 const APPROVAL_CHOICE_HINT = "\n\n🟢 اعتماد: اكتب «اعتمد»\n🔴 رفض: اكتب «ارفض»";
+// Mirrors the same 🟢/🔴 choice APPROVAL_CHOICE_HINT spells out in words as a
+// real tappable WhatsApp poll, so a proactive approval notification -- filed
+// from an employee's own conversation, landing in Basim's chat outside any
+// live turn of his -- can be answered with one tap instead of typing "اعتمد"/
+// "ارفض". The poll's own option ids carry the approval id, so a tap resolves
+// deterministically (see parseApprovalPollChoice in secretary-service.ts)
+// with no ambiguity step even when several requests are pending at once.
+// WhatsApp polls expire after at most an hour; APPROVAL_CHOICE_HINT's text
+// instructions in the same message keep working after that, or if the poll
+// is missed/dismissed.
+function approvalDecisionPoll(approval: Approval, at: number): SecretaryChoices {
+  return { id: `APR${approval.id}`, title: "قرارك على الطلب؟", expiresAt: at + 60 * 60_000,
+    options: [{ id: `APR${approval.id}Y`, label: "🟢 اعتماد" }, { id: `APR${approval.id}N`, label: "🔴 رفض" }] };
+}
 
 function hydrate(row: Record<string, unknown>): Approval {
   let payload: Record<string, unknown> = {};
@@ -88,7 +103,7 @@ function activeProject(db: DatabaseSync, projectId: string): { id: string; name:
 }
 
 /** Employee asks for more time. Nothing changes on the task until the owner decides. */
-export function requestDeadlineExtension(db: DatabaseSync, claimed: ManagementActor, input: { taskId: string; newDueDate: string; reason: string }, options: { now?: number } = {}): { approval: Approval; ownerMessage: string } {
+export function requestDeadlineExtension(db: DatabaseSync, claimed: ManagementActor, input: { taskId: string; newDueDate: string; reason: string }, options: { now?: number } = {}): { approval: Approval; ownerMessage: string; choices: SecretaryChoices } {
   migrateManagementActions(db);
   const actor = resolveManagementActor(db, claimed);
   const task = visibleTask(db, actor, input.taskId);
@@ -98,13 +113,14 @@ export function requestDeadlineExtension(db: DatabaseSync, claimed: ManagementAc
   if (task.dueDate && newDueDate <= task.dueDate) return fail(400, "not_extension", "الموعد المقترح يجب أن يكون بعد الموعد الحالي");
   const reason = text(input.reason, "سبب التمديد", 1000);
   const summary = `تمديد «${task.title}» من ${task.dueDate ?? "بدون موعد"} إلى ${newDueDate}`;
-  const approval = insert(db, actor, { type: "deadline_extension", entityType: "task", entityId: task.id, summary, payload: { oldDueDate: task.dueDate, newDueDate, reason, taskTitle: task.title, expectedUpdatedAt: task.updatedAt } }, now(options));
+  const at = now(options);
+  const approval = insert(db, actor, { type: "deadline_extension", entityType: "task", entityId: task.id, summary, payload: { oldDueDate: task.dueDate, newDueDate, reason, taskTitle: task.title, expectedUpdatedAt: task.updatedAt } }, at);
   const ownerMessage = `${actor.name} طلب تمديد مهمة «${task.title}»\nالموعد السابق: ${task.dueDate ?? "غير محدد"}\nالموعد المقترح: ${newDueDate}\nالسبب: ${reason}${APPROVAL_CHOICE_HINT}`;
-  return { approval, ownerMessage };
+  return { approval, ownerMessage, choices: approvalDecisionPoll(approval, at) };
 }
 
 /** Employee says the work is done. Task moves to approval (existing submit) and a durable request is filed. */
-export function requestTaskClose(db: DatabaseSync, claimed: ManagementActor, input: { taskId: string; result: string }, options: { now?: number } = {}): { approval: Approval; ownerMessage: string; effect: ManagementResult } {
+export function requestTaskClose(db: DatabaseSync, claimed: ManagementActor, input: { taskId: string; result: string }, options: { now?: number } = {}): { approval: Approval; ownerMessage: string; effect: ManagementResult; choices: SecretaryChoices } {
   migrateManagementActions(db);
   const actor = resolveManagementActor(db, claimed);
   const task = visibleTask(db, actor, input.taskId);
@@ -115,11 +131,11 @@ export function requestTaskClose(db: DatabaseSync, claimed: ManagementActor, inp
   const summary = `إغلاق «${task.title}»`;
   const approval = insert(db, actor, { type: "task_close", entityType: "task", entityId: task.id, summary, payload: { result, taskTitle: task.title } }, at);
   const ownerMessage = `${actor.name} يقول إن مهمة «${task.title}» انتهت.\nالنتيجة: ${result}${APPROVAL_CHOICE_HINT}\n(لو رفضت، اذكر السبب)`;
-  return { approval, ownerMessage, effect: effect ?? { ok: true, action: "submit", entityType: "task", entityId: task.id, message: "المهمة بانتظار الاعتماد", deletedObjectKeys: [] } };
+  return { approval, ownerMessage, effect: effect ?? { ok: true, action: "submit", entityType: "task", entityId: task.id, message: "المهمة بانتظار الاعتماد", deletedObjectKeys: [] }, choices: approvalDecisionPoll(approval, at) };
 }
 
 /** Employee requests responsibility for an active task; assignment changes only after Basim approves. */
-export function requestTaskOwnership(db: DatabaseSync, claimed: ManagementActor, input: { taskId: string; reason?: string }, options: { now?: number } = {}): { approval: Approval; ownerMessage: string } {
+export function requestTaskOwnership(db: DatabaseSync, claimed: ManagementActor, input: { taskId: string; reason?: string }, options: { now?: number } = {}): { approval: Approval; ownerMessage: string; choices: SecretaryChoices } {
   migrateManagementActions(db);
   const actor = resolveManagementActor(db, claimed);
   if (isOwner(actor as PermissionActor)) return fail(400, "employee_only", "طلب مسؤولية المهمة مخصص للموظفين");
@@ -129,14 +145,15 @@ export function requestTaskOwnership(db: DatabaseSync, claimed: ManagementActor,
   if (task.owner === actor.name || task.suggestedOwner === actor.name) return fail(409, "already_assigned", "المهمة معيّنة لك؛ قل «استلم المهمة» لبدء التنفيذ");
   const reason = text(input.reason, "سبب الطلب", 1000, true);
   const summary = `${actor.name} يطلب مسؤولية «${task.title}»`;
-  const approval = insert(db, actor, { type: "task_ownership", entityType: "task", entityId: task.id, summary, payload: { taskTitle: task.title, requestedOwnerId: actor.id, requestedOwnerName: actor.name, previousOwner: task.owner, previousSuggestedOwner: task.suggestedOwner, expectedUpdatedAt: task.updatedAt, reason } }, now(options));
-  return { approval, ownerMessage: `${summary}${task.owner || task.suggestedOwner ? `\nالمسؤول الحالي: ${task.owner || task.suggestedOwner}` : "\nالمهمة غير معيّنة حاليًا"}${reason ? `\nالسبب: ${reason}` : ""}${APPROVAL_CHOICE_HINT}` };
+  const at = now(options);
+  const approval = insert(db, actor, { type: "task_ownership", entityType: "task", entityId: task.id, summary, payload: { taskTitle: task.title, requestedOwnerId: actor.id, requestedOwnerName: actor.name, previousOwner: task.owner, previousSuggestedOwner: task.suggestedOwner, expectedUpdatedAt: task.updatedAt, reason } }, at);
+  return { approval, ownerMessage: `${summary}${task.owner || task.suggestedOwner ? `\nالمسؤول الحالي: ${task.owner || task.suggestedOwner}` : "\nالمهمة غير معيّنة حاليًا"}${reason ? `\nالسبب: ${reason}` : ""}${APPROVAL_CHOICE_HINT}`, choices: approvalDecisionPoll(approval, at) };
 }
 
 /** Employee holding a task hands it to a named colleague, or declines it outright
  * (no colleague named -- "مش مسؤوليتي"). Nothing changes on the task until Basim
  * decides; a decline with no suggested colleague simply clears the assignment. */
-export function requestTaskTransfer(db: DatabaseSync, claimed: ManagementActor, input: { taskId: string; suggestedOwnerId?: string | null; reason?: string }, options: { now?: number } = {}): { approval: Approval; ownerMessage: string } {
+export function requestTaskTransfer(db: DatabaseSync, claimed: ManagementActor, input: { taskId: string; suggestedOwnerId?: string | null; reason?: string }, options: { now?: number } = {}): { approval: Approval; ownerMessage: string; choices: SecretaryChoices } {
   migrateManagementActions(db);
   const actor = resolveManagementActor(db, claimed);
   if (isOwner(actor as PermissionActor)) return fail(400, "employee_only", "أنت تقدر تعيد تعيين المهمة مباشرة");
@@ -152,17 +169,18 @@ export function requestTaskTransfer(db: DatabaseSync, claimed: ManagementActor, 
   if (suggestedOwnerId === actor.id) return fail(400, "self_transfer", "هاي مهمتك أصلًا؛ اذكر اسم الزميل الذي تريد تحويلها له");
   const reason = text(input.reason, "سبب التحويل", 1000, true);
   const summary = suggestedOwnerName ? `تحويل «${task.title}» من ${actor.name} إلى ${suggestedOwnerName}` : `${actor.name} يعتذر عن «${task.title}» (مش مسؤوليته)`;
+  const at = now(options);
   const approval = insert(db, actor, { type: "task_transfer", entityType: "task", entityId: task.id,
-    summary, payload: { taskTitle: task.title, fromOwnerId: actor.id, fromOwnerName: actor.name, suggestedOwnerId, suggestedOwnerName, reason, expectedUpdatedAt: task.updatedAt } }, now(options));
+    summary, payload: { taskTitle: task.title, fromOwnerId: actor.id, fromOwnerName: actor.name, suggestedOwnerId, suggestedOwnerName, reason, expectedUpdatedAt: task.updatedAt } }, at);
   const ownerMessage = suggestedOwnerName
     ? `${actor.name} بده يحوّل مهمة «${task.title}» إلى ${suggestedOwnerName}${reason ? `\nالسبب: ${reason}` : ""}${APPROVAL_CHOICE_HINT}`
     : `${actor.name} يقول إن مهمة «${task.title}» مش مسؤوليته${reason ? `\nالسبب: ${reason}` : ""}\nاعتماد الطلب بيشيلها عنه بانتظار تعيين مسؤول جديد.${APPROVAL_CHOICE_HINT}`;
-  return { approval, ownerMessage };
+  return { approval, ownerMessage, choices: approvalDecisionPoll(approval, at) };
 }
 
 /** Manager (or employee) asks to close/archive a whole project. Nothing changes
  * until Basim decides -- see project.archive moving to OWNER_ONLY in permissions.ts. */
-export function requestProjectClose(db: DatabaseSync, claimed: ManagementActor, input: { projectId: string; reason?: string }, options: { now?: number } = {}): { approval: Approval; ownerMessage: string } {
+export function requestProjectClose(db: DatabaseSync, claimed: ManagementActor, input: { projectId: string; reason?: string }, options: { now?: number } = {}): { approval: Approval; ownerMessage: string; choices: SecretaryChoices } {
   migrateManagementActions(db);
   const actor = resolveManagementActor(db, claimed);
   if (isOwner(actor as PermissionActor)) return fail(400, "employee_only", "أنت تقدر تغلق المشروع مباشرة");
@@ -175,30 +193,32 @@ export function requestProjectClose(db: DatabaseSync, claimed: ManagementActor, 
   // needs to know what's still open before approving blind.
   const openTasks = (db.prepare("SELECT count(*) AS n FROM tasks WHERE project_id=? AND archived_at IS NULL AND status!='completed'").get(project.id) as { n: number }).n;
   const summary = `إغلاق مشروع «${project.name}»`;
-  const approval = insert(db, actor, { type: "project_close", entityType: "project", entityId: project.id, summary, payload: { projectName: project.name, reason, openTasks } }, now(options));
+  const at = now(options);
+  const approval = insert(db, actor, { type: "project_close", entityType: "project", entityId: project.id, summary, payload: { projectName: project.name, reason, openTasks } }, at);
   const ownerMessage = `${actor.name} يطلب إغلاق مشروع «${project.name}»${reason ? `\nالسبب: ${reason}` : ""}${openTasks ? `\n⚠️ لسا فيه ${taskCountPhrase(openTasks)} مفتوحة بالمشروع.` : "\nكل مهام المشروع منتهية."}${APPROVAL_CHOICE_HINT}`;
-  return { approval, ownerMessage };
+  return { approval, ownerMessage, choices: approvalDecisionPoll(approval, at) };
 }
 
 /** Manager/employee proposes a project. Created as pending and filed as a request. */
-export function requestProjectCreate(db: DatabaseSync, claimed: ManagementActor, input: { name: string; goal?: string; tasks?: Array<{ title: string; ownerId?: string | null; priority?: "red" | "yellow" | "green"; dueDate?: string | null }> }, options: { now?: number } = {}): { approval: Approval; ownerMessage: string } {
+export function requestProjectCreate(db: DatabaseSync, claimed: ManagementActor, input: { name: string; goal?: string; tasks?: Array<{ title: string; ownerId?: string | null; priority?: "red" | "yellow" | "green"; dueDate?: string | null }> }, options: { now?: number } = {}): { approval: Approval; ownerMessage: string; choices: SecretaryChoices } {
   migrateManagementActions(db);
   const actor = resolveManagementActor(db, claimed);
   const name = text(input.name, "اسم المشروع", 240);
   const goal = text(input.goal, "الهدف", 2000, true);
   const tasks = (input.tasks ?? []).slice(0, 40).map(task => ({ title: text(task.title, "اسم المهمة", 240), ownerId: task.ownerId ?? null, priority: task.priority ?? "yellow", dueDate: task.dueDate ?? null }));
   const summary = `فتح مشروع «${name}»${tasks.length ? ` مع ${taskCountPhrase(tasks.length)}` : ""}`;
-  const approval = insert(db, actor, { type: "project_create", entityType: "project", entityId: null, summary, payload: { name, goal, tasks } }, now(options));
+  const at = now(options);
+  const approval = insert(db, actor, { type: "project_create", entityType: "project", entityId: null, summary, payload: { name, goal, tasks } }, at);
   const lines = tasks.map((task, index) => `${index + 1}. ${task.title}${task.ownerId ? ` — ${task.ownerId}` : ""} — ${task.priority}${task.dueDate ? ` — ${task.dueDate}` : ""}`);
   const ownerMessage = `${actor.name} يقترح فتح مشروع «${name}»${goal ? `\nالهدف: ${goal}` : ""}${lines.length ? `\nالمهام:\n${lines.join("\n")}` : ""}${APPROVAL_CHOICE_HINT}`;
-  return { approval, ownerMessage };
+  return { approval, ownerMessage, choices: approvalDecisionPoll(approval, at) };
 }
 
 /** Employee (or a manager, who may also create tasks directly -- see can(actor,"task.create"))
  * proposes a single task. Filed as pending; nothing exists until Basim decides.
  * Basim may correct priority/dueDate in the same message he decides -- see
  * patchTaskCreateApproval, applied by the "decide" agent case before deciding. */
-export function requestTaskCreate(db: DatabaseSync, claimed: ManagementActor, input: { projectId: string; title: string; details?: string; priority: "red" | "yellow" | "green"; dueDate: string | null; ownerId?: string | null }, options: { now?: number } = {}): { approval: Approval; ownerMessage: string } {
+export function requestTaskCreate(db: DatabaseSync, claimed: ManagementActor, input: { projectId: string; title: string; details?: string; priority: "red" | "yellow" | "green"; dueDate: string | null; ownerId?: string | null }, options: { now?: number } = {}): { approval: Approval; ownerMessage: string; choices: SecretaryChoices } {
   migrateManagementActions(db);
   const actor = resolveManagementActor(db, claimed);
   const snapshot = getManagementSnapshot(db, actor);
@@ -214,10 +234,11 @@ export function requestTaskCreate(db: DatabaseSync, claimed: ManagementActor, in
   // task still needs a real projectId under the hood (payload.projectName is
   // kept only for internal bookkeeping, never rendered to him).
   const summary = `فتح مهمة «${title}»`;
+  const at = now(options);
   const approval = insert(db, actor, { type: "task_create", entityType: "task", entityId: null, summary,
-    payload: { projectId: project.id, projectName: project.name, title, details, priority: input.priority, dueDate, ownerId, ownerName } }, now(options));
+    payload: { projectId: project.id, projectName: project.name, title, details, priority: input.priority, dueDate, ownerId, ownerName } }, at);
   const ownerMessage = `${actor.name} يقترح فتح مهمة «${title}»${details ? `\nالتفاصيل: ${details}` : ""}\nالمسؤول: ${ownerName}\nالأولوية: ${PRIORITY_ARABIC[input.priority]}\nالموعد: ${dueDate ?? "بدون موعد"}${APPROVAL_CHOICE_HINT}\n(تقدر كمان تصحح قبل ما توافق، مثلاً: «اعتمد بس خلها حمراء ومدتها يومين»)`;
-  return { approval, ownerMessage };
+  return { approval, ownerMessage, choices: approvalDecisionPoll(approval, at) };
 }
 
 /** Basim corrects priority/dueDate on a still-pending task_create request, normally

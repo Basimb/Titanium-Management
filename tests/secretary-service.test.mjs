@@ -655,6 +655,31 @@ test('an employee proposing a new task files it for Basim and gets the command l
  assert.ok(rows.some(r=>r.toUser==='member'&&/تذكير بأوامر المهام/.test(r.text)),'the employee who filed it gets the command legend as its own message');
  assert.ok(!rows.some(r=>r.toUser==='basem'&&/تذكير بأوامر المهام/.test(r.text)),'Basim never gets the employee-facing legend');
 });
+// Basim's complaint (a screenshot of a plain-text task-close approval prompt):
+// "give me tappable options like everything else already has". A proactive
+// approval notification now carries a real WhatsApp poll (choices_json on its
+// agent_outbox row) whose option ids embed the approval id, so tapping it
+// resolves that exact approval directly -- see parseApprovalPollChoice in
+// secretary-service.ts -- without ever invoking the model, even though
+// several other requests could be pending at the same time.
+test('a proactive task-close approval notification carries a tappable poll, and tapping it decides the request without asking the model',async t=>{
+ const f=fixture(t);
+ const result=await f.run(closeRequest('t','خلصت التنفيذ'),{text:'خلصت اللوحة'}); // default sender is خالد (member)
+ assert.equal(result.status,'applied');
+ const row=f.db.prepare("SELECT choices_json AS choicesJson FROM agent_outbox WHERE to_user='basem'").get();
+ assert.ok(row&&row.choicesJson,'the proactive notification to Basim must carry a poll');
+ const choices=JSON.parse(row.choicesJson);
+ const approvalId=f.db.prepare("SELECT id FROM approvals WHERE type='task_close' AND status='pending'").get().id;
+ assert.equal(choices.id,`APR${approvalId}`);
+ assert.deepEqual(choices.options.map(o=>o.id),[`APR${approvalId}Y`,`APR${approvalId}N`]);
+ assert.equal(choices.expiresAt-f.now,60*60_000,'a WhatsApp poll cannot outlive a 1-hour expiry');
+ const admin={senderNumber:'12025550103'};
+ const tapped=await f.run(undefined,{...admin,choice:{questionId:choices.id,optionId:`APR${approvalId}Y`}},
+   async()=>{throw Error('a poll tap must resolve the approval directly, never ask the model');});
+ assert.equal(tapped.status,'applied');
+ assert.equal(f.db.prepare('SELECT status FROM approvals WHERE id=?').get(approvalId).status,'approved');
+ assert.equal(f.db.prepare("SELECT status FROM tasks WHERE id='t'").get().status,'completed');
+});
 test('a member claiming their own open task broadcasts to the group, gets the command legend, but never a self-notice',async t=>{
  const f=fixture(t);
  f.db.prepare("INSERT INTO tasks(id,project_id,title,details,priority,status,owner,suggested_owner,created_at,updated_at) VALUES('open1','p','مهمة مفتوحة','','yellow','open',NULL,'خالد',1,1)").run();

@@ -227,7 +227,7 @@ export function createBridgeRuntime({ config, store, auth, makeWASocket, jidNorm
     });
   }
 
-  async function sendScheduled({ to, text, messageId, signal }, privateOnly = false) {
+  async function sendScheduled({ to, text, messageId, signal, choices }, privateOnly = false) {
     const current = socket;
     if (!ready || stopped || !signal || signal.aborted || typeof messageId !== 'string' ||
       !/^[a-zA-Z0-9_-]{1,200}$/.test(messageId)) throw new Error('secretary_delivery_unavailable');
@@ -255,7 +255,26 @@ export function createBridgeRuntime({ config, store, auth, makeWASocket, jidNorm
       const active = await isActiveNumber(number);
       if (!active || !ready || stopped || current !== socket || signal.aborted ||
         number === config.botNumber || !config.allowedNumbers.has(number)) throw new Error('secretary_recipient_unavailable');
-      return current.sendMessage(`${number}@s.whatsapp.net`, { text: reply, linkPreview: null }, { messageId });
+      await current.sendMessage(`${number}@s.whatsapp.net`, { text: reply, linkPreview: null }, { messageId });
+      // Same best-effort poll attachment as the interactive sendReply path
+      // below (drainInbox) -- the text just sent is the durable fallback, so
+      // a poll failure here must never retry the successful send or fail
+      // this background delivery job.
+      if (polls && choices) {
+        try {
+          const pollResult = await polls.sendQuestion({ choices, chatJid: `${number}@s.whatsapp.net`, senderNumber: number }, {
+            identity: { normalizeJid: jidNormalizedUser, lookupPhoneForLid: value => current.signalRepository.lidMapping.getPNForLID(value) },
+            creatorJids: [current.user?.id || auth.state.creds.me?.id, auth.state.creds.me?.lid].filter(Boolean),
+            authorize: async sender => ready && !stopped && current === socket && config.tasksEnabled !== false
+              && await isActiveNumber(sender) && ready && !stopped && current === socket,
+            relay: (to, content, options, signal) => {
+              if (signal.aborted || !ready || stopped || current !== socket) throw new Error('poll_unavailable');
+              return current.relayMessage(to, content, options);
+            },
+          });
+          if (pollResult.status === 'uncertain') output.info('Titanium choices: uncertain; text fallback retained.');
+        } catch { output.info('Titanium choices: unavailable; text fallback retained.'); }
+      }
     }, signal);
   }
 
