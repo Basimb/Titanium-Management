@@ -13,8 +13,8 @@ import { GROUP_EVENT_ALLOWLIST, groupBudgetRemaining } from "./team-chat-policy.
 import type { SecretaryChoices } from "./secretary-choices.ts";
 
 export type FollowupConfig = { enabled: boolean; contacts: Array<{ userId: string; number: string }>; groupId?: string | null; workStartHour?: number; workEndHour?: number; timezoneOffsetMinutes?: number; publicUrl?: string };
-type Planned = { id: string; kind: "overdue_task" | "silent_task" | "stale_approval" | "daily_digest" | "auto_reminder_morning" | "auto_reminder_evening" | "unclaimed_task"; targetUser: string; entityId: string | null; to: string; text: string; choices?: SecretaryChoices };
-const DAY = 24 * 60 * 60_000, SILENT_AFTER = 3 * DAY, STALE_APPROVAL_AFTER = 2 * DAY, HOUR = 60 * 60_000;
+type Planned = { id: string; kind: "overdue_task" | "silent_task" | "stale_approval" | "daily_digest" | "auto_reminder_morning" | "auto_reminder_evening" | "unclaimed_task" | "stale_unclaimed"; targetUser: string; entityId: string | null; to: string; text: string; choices?: SecretaryChoices };
+const DAY = 24 * 60 * 60_000, SILENT_AFTER = 3 * DAY, STALE_APPROVAL_AFTER = 2 * DAY, STALE_UNCLAIMED_AFTER = DAY, HOUR = 60 * 60_000;
 const newMessageId = () => "3EB0" + randomBytes(18).toString("hex").toUpperCase();
 const clean = (value: string) => value.replace(/[\x00-\x1f\u202a-\u202e\u2066-\u2069]/g, " ").slice(0, 200);
 // Small per-file duplicates of secretary-service.ts's PRIORITIES/LABELS and
@@ -185,6 +185,26 @@ export function planFollowups(db: DatabaseSync, config: FollowupConfig, at: numb
   if (ownerNumber && !alreadySent(db, "stale_approval", owner.id, null, at - DAY)) {
     const stale = staleApprovals(db, at, STALE_APPROVAL_AFTER);
     if (stale.length) plans.push({ id: randomBytes(8).toString("hex"), kind: "stale_approval", targetUser: owner.id, entityId: null, to: `${ownerNumber}@s.whatsapp.net`, text: `يا باسم، هذه الطلبات معلّقة من أكثر من يومين:\n${formatPendingList(stale)}` });
+  }
+  // Basim's follow-up: the hourly unclaimed_task nudge above only reaches the
+  // EMPLOYEE it's suggested to -- he gets no heads-up at all that a task is
+  // sitting unclaimed. One private digest a day (never hourly like the
+  // employee's own nudge, so it doesn't spam him), listing anything still
+  // open/unclaimed a full day after it last changed (updatedAt covers both a
+  // fresh add_task and a later reassign -- either way, that's the same
+  // moment the employee's own hourly nudge started counting from too).
+  // Recomputed fresh from the live snapshot every time, same as the
+  // overdue-tasks group digest below, so no separate per-task
+  // nudged-tracking table is needed.
+  if (ownerNumber && !alreadySent(db, "stale_unclaimed", owner.id, null, at - DAY)) {
+    const staleUnclaimed = snapshot.tasks.filter(task => !task.archivedAt && task.status === "open" && !task.owner && task.suggestedOwner
+      && (task.updatedAt ?? 0) < at - STALE_UNCLAIMED_AFTER
+      && snapshot.projects.find(candidate => candidate.id === task.projectId)?.status === "active");
+    if (staleUnclaimed.length) {
+      const lines = staleUnclaimed.map(task => `• ${clean(task.title)} — المقترحة لـ: ${clean(task.suggestedOwner!)}`);
+      plans.push({ id: randomBytes(8).toString("hex"), kind: "stale_unclaimed", targetUser: owner.id, entityId: null, to: `${ownerNumber}@s.whatsapp.net`,
+        text: `يا باسم، هذه المهام لسا ما استلمها حدا من أكثر من يوم:\n${lines.join("\n")}` });
+    }
   }
   if (config.groupId && overdueTasks.length && !alreadySent(db, "daily_digest", "group", null, at - DAY) && groupBudgetRemaining(db, at) > 0 && GROUP_EVENT_ALLOWLIST.has("delay")) {
     const lines = overdueTasks.slice(0, 12).map(task => `• ${clean(task.title)} — ${task.owner} — ${task.dueDate}`);

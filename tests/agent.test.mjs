@@ -562,6 +562,48 @@ test("unclaimed task nudge stops as soon as the task is claimed", t => {
   assert.equal(planFollowups(db, config, at + 60 * 60_000 + 1000).filter(plan => plan.kind === "unclaimed_task").length, 0, "claimed tasks never nudge again");
 });
 
+// Basim's complaint: the hourly unclaimed_task nudge above only ever reaches
+// the employee it's suggested to -- he gets no warning at all that a task is
+// sitting unclaimed. This is his own once-a-day digest, separate from that
+// per-employee nudge.
+test("Basim gets a once-daily private digest of tasks still unclaimed after a day, separate from the employee's own hourly nudge", t => {
+  const db = fixture(t);
+  const config = { enabled: true, contacts: [{ userId: "basem", number: "966500000000" }, { userId: "shadi", number: "962780000000" }], groupId: "123@g.us" };
+  const day1 = Date.UTC(2026, 8, 10, 7, 0); // 10:00 Amman
+  const day2 = day1 + 24 * 60 * 60_000;
+
+  db.exec(`INSERT INTO tasks (id,project_id,title,status,owner,suggested_owner,due_date,created_at,updated_at)
+    VALUES ('fresh','p','مهمة جديدة','open',NULL,'شادي',NULL,${day1},${day1})`);
+  assert.equal(planFollowups(db, config, day1).filter(plan => plan.kind === "stale_unclaimed").length, 0,
+    "a task suggested moments ago doesn't bother Basim yet -- give the employee's own nudge a day to work first");
+
+  db.exec(`INSERT INTO tasks (id,project_id,title,status,owner,suggested_owner,due_date,created_at,updated_at)
+    VALUES ('stale1','p','تجديد ترخيص الصيدلية','open',NULL,'شادي',NULL,100,100),
+           ('stale2','p','مراجعة عقد الموزع','open',NULL,'خالد',NULL,100,100),
+           ('claimed','p','مهمة مستلمة','progress','خالد',NULL,NULL,100,100),
+           ('nobody','p','مهمة بلا مقترح','open',NULL,NULL,NULL,100,100),
+           ('done','p','مهمة خلصت','completed','شادي',NULL,NULL,100,100),
+           ('gone','p','مهمة مؤرشفة','open',NULL,'شادي',NULL,100,100)`);
+  db.exec("UPDATE tasks SET archived_at=100,archived_by='باسم' WHERE id='gone'");
+
+  const plans = planFollowups(db, config, day2).filter(plan => plan.kind === "stale_unclaimed");
+  assert.equal(plans.length, 1, "one private digest to Basim, not one message per task");
+  assert.equal(plans[0].targetUser, "basem");
+  assert.equal(plans[0].to, "966500000000@s.whatsapp.net");
+  assert.match(plans[0].text, /تجديد ترخيص الصيدلية/);
+  assert.match(plans[0].text, /مراجعة عقد الموزع/);
+  assert.doesNotMatch(plans[0].text, /مهمة مستلمة/, "a task someone already claimed is not unclaimed");
+  assert.doesNotMatch(plans[0].text, /مهمة بلا مقترح/, "nobody is responsible yet -- not the same as an ignored suggestion");
+  assert.doesNotMatch(plans[0].text, /مهمة خلصت/, "completed tasks never appear");
+  assert.doesNotMatch(plans[0].text, /مهمة مؤرشفة/, "archived tasks never appear");
+  assert.doesNotMatch(plans[0].text, /مهمة جديدة/, "still within its first day -- too soon for Basim's digest");
+
+  // Once a day, not once an hour like the employee's own nudge.
+  db.prepare("INSERT INTO agent_followups (id,kind,target_user,entity_id,sent_at,response) VALUES ('digest1','stale_unclaimed','basem',NULL,?,'sent')").run(day2);
+  assert.equal(planFollowups(db, config, day2 + 60 * 60_000).filter(plan => plan.kind === "stale_unclaimed").length, 0, "no repeat within the same day");
+  assert.equal(planFollowups(db, config, day2 + 24 * 60 * 60_000 + 1000).filter(plan => plan.kind === "stale_unclaimed").length, 1, "fires again the next day if still unclaimed");
+});
+
 test("twice-daily auto reminder fires at local 8am/8pm regardless of work hours, once per owner per slot, private + one group post each", async t => {
   const db = fixture(t);
   // t3 is only suggested (never claimed) -- still belongs on شادي's reminder,
