@@ -262,7 +262,7 @@ export function createBridgeRuntime({ config, store, auth, makeWASocket, jidNorm
       // this background delivery job.
       if (polls && choices) {
         try {
-          const pollResult = await polls.sendQuestion({ choices, chatJid: `${number}@s.whatsapp.net`, senderNumber: number }, {
+          await polls.sendQuestion({ choices, chatJid: `${number}@s.whatsapp.net`, senderNumber: number }, {
             identity: { normalizeJid: jidNormalizedUser, lookupPhoneForLid: value => current.signalRepository.lidMapping.getPNForLID(value) },
             creatorJids: [current.user?.id || auth.state.creds.me?.id, auth.state.creds.me?.lid].filter(Boolean),
             authorize: async sender => ready && !stopped && current === socket && config.tasksEnabled !== false
@@ -271,9 +271,9 @@ export function createBridgeRuntime({ config, store, auth, makeWASocket, jidNorm
               if (signal.aborted || !ready || stopped || current !== socket) throw new Error('poll_unavailable');
               return current.relayMessage(to, content, options);
             },
+            log: reason => output.info(`Titanium choices (outbox): ${reason}; text fallback retained.`),
           });
-          if (pollResult.status === 'uncertain') output.info('Titanium choices: uncertain; text fallback retained.');
-        } catch { output.info('Titanium choices: unavailable; text fallback retained.'); }
+        } catch { output.info('Titanium choices (outbox): unavailable; text fallback retained.'); }
       }
     }, signal);
   }
@@ -327,7 +327,7 @@ export function createBridgeRuntime({ config, store, auth, makeWASocket, jidNorm
           // The text is the durable fallback. A poll failure must not retry this
           // successful text or interrupt login/inbox processing.
           try {
-            const pollResult = await polls.sendQuestion({ choices: result.choices, chatJid: jid, senderNumber: body.senderNumber }, {
+            await polls.sendQuestion({ choices: result.choices, chatJid: jid, senderNumber: body.senderNumber }, {
               identity: { normalizeJid: jidNormalizedUser, lookupPhoneForLid: value => current.signalRepository.lidMapping.getPNForLID(value) },
               creatorJids: [current.user?.id || auth.state.creds.me?.id, auth.state.creds.me?.lid].filter(Boolean),
               authorize: async sender => ready && !stopped && current === socket && config.tasksEnabled !== false
@@ -336,9 +336,9 @@ export function createBridgeRuntime({ config, store, auth, makeWASocket, jidNorm
                 if (signal.aborted || !ready || stopped || current !== socket) throw new Error('poll_unavailable');
                 return current.relayMessage(to, content, options);
               },
+              log: reason => output.info(`Titanium choices (reply): ${reason}; text fallback retained.`),
             });
-            if (pollResult.status === 'uncertain') output.info('Titanium choices: uncertain; text fallback retained.');
-          } catch { output.info('Titanium choices: unavailable; text fallback retained.'); }
+          } catch { output.info('Titanium choices (reply): unavailable; text fallback retained.'); }
         }
       },
     });

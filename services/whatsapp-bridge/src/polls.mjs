@@ -50,14 +50,26 @@ export function createPollChoices({ store, config, proto, generateWAMessageConte
     if (!row?.message_proto || !JSON.parse(row.recipient_jids).includes(key.remoteJid.replace(/:\d+(?=@)/, ''))) return undefined;
     try { return proto.Message.decode(Buffer.from(row.message_proto)); } catch { return undefined; }
   }
-  async function sendQuestion({ choices: value, chatJid, senderNumber }, { identity, creatorJids, authorize, relay }) {
+  // log(reason) is a diagnostics-only hook (default no-op, so existing callers/
+  // tests that don't pass one see no behavior change): every rejection path
+  // used to return the same bare 'fallback'/'uncertain' with nothing recorded
+  // anywhere about *why*, which made a poll that silently never renders
+  // unfixable to diagnose from the field -- the text fallback still went out,
+  // so nothing looked broken except a missing poll no log line explained.
+  // reason is always one of the fixed category strings below, never a raw
+  // transport exception, message content, phone number or other secret --
+  // same "no transport exception is exposed" rule the final catch already followed.
+  async function sendQuestion({ choices: value, chatJid, senderNumber }, { identity, creatorJids, authorize, relay, log = () => {} }) {
     cleanup();
     const choices = normalizePollChoices(value, now());
-    if (!choices || !privateJid(chatJid) || senderNumber === config.botNumber || !config.allowedNumbers.has(senderNumber)
-      || !await authorize(senderNumber)) return { status: 'fallback' };
-    if (await resolvePhone(chatJid, `${senderNumber}@s.whatsapp.net`, identity) !== senderNumber) return { status: 'fallback' };
+    if (!choices) { log('bad_choices'); return { status: 'fallback' }; }
+    if (!privateJid(chatJid)) { log('bad_chat_jid'); return { status: 'fallback' }; }
+    if (senderNumber === config.botNumber) { log('sender_is_bot'); return { status: 'fallback' }; }
+    if (!config.allowedNumbers.has(senderNumber)) { log('sender_not_allowed'); return { status: 'fallback' }; }
+    if (!await authorize(senderNumber)) { log('not_authorized'); return { status: 'fallback' }; }
+    if (await resolvePhone(chatJid, `${senderNumber}@s.whatsapp.net`, identity) !== senderNumber) { log('phone_mismatch'); return { status: 'fallback' }; }
     const creators = [...new Set(creatorJids.filter(privateJid).map(identity.normalizeJid))];
-    if (!creators.length || creators.length > 2) return { status: 'fallback' };
+    if (!creators.length || creators.length > 2) { log(`bad_creator_count:${creators.length}`); return { status: 'fallback' }; }
     const canonical = `${senderNumber}@s.whatsapp.net`;
     const recipients = [...new Set([canonical, identity.normalizeJid(chatJid)])];
     const id = 'TITANIUMPOLL' + digest(JSON.stringify([senderNumber, choices.id])).toString('hex').slice(0, 32).toUpperCase();
@@ -66,9 +78,9 @@ export function createPollChoices({ store, config, proto, generateWAMessageConte
     try {
       content = await generateWAMessageContent({ poll: { name: choices.title,
         values: choices.options.map(option => option.label), selectableCount: 1, messageSecret: randomBytes(32) } }, {});
-    } catch { return { status: 'fallback' }; }
+    } catch { log('generate_content_failed'); return { status: 'fallback' }; }
     if (!content?.pollCreationMessageV3 || content.messageContextInfo?.messageSecret?.length !== 32
-      || !await authorize(senderNumber) || now() >= choices.expiresAt) return { status: 'fallback' };
+      || !await authorize(senderNumber) || now() >= choices.expiresAt) { log('bad_poll_content_or_reauthorize_failed'); return { status: 'fallback' }; }
     const bytes = Buffer.from(proto.Message.encode(content).finish());
     const claimed = store.transaction(() => {
       if (db.prepare('SELECT id FROM choice_polls WHERE id=?').get(id)) return false;
@@ -89,6 +101,7 @@ export function createPollChoices({ store, config, proto, generateWAMessageConte
       db.prepare("UPDATE choice_polls SET state='sent' WHERE id=? AND state='sending'").run(id);
       return { status: 'sent' };
     } catch {
+      log('relay_failed'); // Never echo the transport exception itself -- only that this category of thing happened.
       db.prepare("UPDATE choice_polls SET state='uncertain' WHERE id=? AND state='sending'").run(id);
       return { status: 'uncertain' }; // Text fallback was already sent; no transport exception is exposed.
     }
