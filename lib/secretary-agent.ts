@@ -236,7 +236,7 @@ export function handleAgentIntent(plan: SecretaryIntent, ctx: AgentContext): Age
         const result = clean(plan.fields.details, 4000) || clean(plan.message, 4000);
         if (!result) return { status: "clarify", reply: `شو نتيجة «${clean(task.title)}» بالضبط؟ تم التوقيع/التسليم؟ في ملف أو صورة؟ في شي متبقي؟`, taskId: task.id };
         if (owner) {
-          if (task.status === "completed") return { status: "clarify", reply: `«${clean(task.title)}» معتمدة خلص.`, taskId: task.id };
+          if (task.status === "completed") return { status: "clarify", reply: `«${clean(task.title)}» مكتملة خلص.`, taskId: task.id };
           // "approve" only ever applies to a task already sitting in approval
           // (an employee submitted it). Basim can also be the task's own
           // worker now, in which case it may still be "open" (never even

@@ -78,7 +78,7 @@ const labels: Record<string, string> = {
   createdAt: "تاريخ الإضافة", updatedAt: "آخر تحديث",
 };
 const values: Record<string, string> = {
-  open: "مفتوحة", progress: "قيد التنفيذ", approval: "بانتظار اعتماد باسم", completed: "معتمدة نهائيًا",
+  open: "مفتوحة", progress: "قيد التنفيذ", approval: "بانتظار اعتماد باسم", completed: "مكتملة نهائيًا",
   pending: "بانتظار المراجعة", rejected: "مرفوضة", red: "قصوى", yellow: "متوسطة", green: "عادية",
   add_project: "إضافة مشروع", add_task: "إضافة مهمة", claim: "استلام مهمة", comment: "إضافة تعليق",
   update: "تحديث التنفيذ", submit: "إرسال للاعتماد", approve: "اعتماد", reject: "رفض",

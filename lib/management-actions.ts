@@ -409,7 +409,7 @@ export function executeManagementAction(sqlite: DatabaseSync, claimed: Managemen
             notification = { action: "reject", title: task.title, actor: actor.name, extra: `السبب: ${reason}` }; break;
           }
           case "reopen":
-            if (task.status !== "completed") return fail(409, "invalid_transition", "إعادة الفتح متاحة للمهمة المعتمدة فقط");
+            if (task.status !== "completed") return fail(409, "invalid_transition", "إعادة الفتح متاحة للمهمة المكتملة فقط");
             Object.assign(changes, { status: task.owner ? "progress" : "open", completed_at: null, rejection_reason: null, archived_at: null, archived_by: null });
             message = `أعاد فتح المهمة: ${task.title}${command.reason ? ` — ${optionalText(command.reason, "السبب", 4000)}` : ""}`; auditAction = "reopen"; break;
           case "reassign": {

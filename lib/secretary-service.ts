@@ -56,7 +56,11 @@ function notifyTaskLegend(db: DatabaseSync, toUser: string, now: number) {
   if (toUser === "basem" || toUser === "group") return;
   enqueueAgentMessage(db, { toUser, text: TASK_COMMANDS_LEGEND }, now);
 }
-const LABELS: Record<string, string> = { open: "بانتظار الاستلام", progress: "قيد التنفيذ", approval: "بانتظار اعتماد باسم", completed: "معتمدة", active: "نشط", pending: "بانتظار الموافقة", rejected: "مرفوض" };
+// Basim: don't display a completed task's status as "معتمدة" (approved) --
+// display "مكتملة" (completed) instead. Same underlying status value
+// ("completed"), just the word shown for it everywhere a task's status is
+// rendered (task cards, report headers, the TV board).
+const LABELS: Record<string, string> = { open: "بانتظار الاستلام", progress: "قيد التنفيذ", approval: "بانتظار اعتماد باسم", completed: "مكتملة", active: "نشط", pending: "بانتظار الموافقة", rejected: "مرفوض" };
 const ACTION_LABELS: Record<string, string> = { add_project: "إنشاء مشروع", edit_project: "تعديل المشروع", approve_project: "اعتماد المشروع", reject_project: "رفض المشروع", restore_project: "إعادة فتح المشروع", archive_project: "أرشفة المشروع", delete_project: "حذف المشروع نهائيًا", add_task: "إنشاء مهمة", edit_task: "تعديل المهمة", claim: "استلام المهمة", cancel_claim: "إرجاع المهمة", comment: "إضافة تعليق", submit: "إرسال المهمة لاعتماد باسم", approve: "اعتماد إنجاز المهمة", reject: "رفض الإنجاز", reopen: "إعادة فتح المهمة", reassign: "تغيير المسؤول", move_task: "نقل المهمة", archive_task: "أرشفة المهمة", restore_task: "استعادة المهمة", delete_task: "حذف المهمة نهائيًا" };
 const clean = (value: unknown, max = 200) => String(value ?? "").replace(/[\x00-\x1f\u202a-\u202e\u2066-\u2069]/g, " ").slice(0, max);
 // Seed content for secretary_playbook (id='main') -- the standing team
@@ -365,7 +369,7 @@ function readReply(plan: SecretaryIntent, actor: ChatUser, state: Snapshot, now:
       const choices = privateChat ? taskActionPoll(task, actor.name, now) : undefined;
       return { result: { status: "summary", reply: `${greeting}\n${secretaryTaskCard(task, state, now, true)}\n\nاحكيلي شو صار معك أو شو بدك أعمل عليها.`, taskId: task.id, ...(choices ? { choices } : {}) }, scope: ["t:" + task.id, "p:" + task.projectId] };
     }
-    if (plan.projectId) { const project = state.projects.find(p => p.id === plan.projectId); if (project) { const tasks = state.tasks.filter(t => t.projectId === project.id); return { result: { status: "summary", reply: `🔵 *${clean(project.name)}* — ${LABELS[project.status] || clean(project.status)}\n${tasks.length} مهام متاحة إلك، ${tasks.filter(t => t.status === "completed").length} معتمدة.\n\n${tasks.slice(0, 6).map(t => secretaryTaskCard(t, state, now)).join("\n\n")}` }, scope: ["p:" + project.id, ...tasks.map(t => "t:" + t.id)] }; } }
+    if (plan.projectId) { const project = state.projects.find(p => p.id === plan.projectId); if (project) { const tasks = state.tasks.filter(t => t.projectId === project.id); return { result: { status: "summary", reply: `🔵 *${clean(project.name)}* — ${LABELS[project.status] || clean(project.status)}\n${tasks.length} مهام متاحة إلك، ${tasks.filter(t => t.status === "completed").length} مكتملة.\n\n${tasks.slice(0, 6).map(t => secretaryTaskCard(t, state, now)).join("\n\n")}` }, scope: ["p:" + project.id, ...tasks.map(t => "t:" + t.id)] }; } }
     return { result: { status: "clarify", reply: "أي مهمة بدك أشرح لك؟" }, scope: [] };
   }
   // "مهام خالد" names one person -- report used to always answer with every
@@ -384,13 +388,13 @@ function readReply(plan: SecretaryIntent, actor: ChatUser, state: Snapshot, now:
   const today = new Date(now + 3 * 3600_000).toISOString().slice(0, 10);
   const overdue = tasks.filter(t => t.status !== "completed" && t.dueDate && t.dueDate < today);
   const pending = tasks.filter(t => t.status === "approval");
-  // The full معتمدة/قيد التنفيذ/... breakdown only makes sense across every
+  // The full مكتملة/قيد التنفيذ/... breakdown only makes sense across every
   // status at once -- once reportStatus narrows `tasks` to a single status,
   // that breakdown would just echo the same total back under one line and
   // zeros under all the others, so it's replaced by a single count naming
   // the status actually asked for.
   const header = plan.kind === "report" ? `📋 *${reportOwner ? `ملخص مهام ${clean(reportOwner.name, 60)}` : "ملخص الإدارة"}*\n${reportStatus ? `${LABELS[reportStatus] || clean(reportStatus)}: ${tasks.length}\n`
-    : `معتمدة: ${tasks.filter(t => t.status === "completed").length}\nقيد التنفيذ: ${tasks.filter(t => t.status === "progress").length}\nبانتظار باسم: ${pending.length}\nمتأخرة بموعد مسجل: ${overdue.length}\nبدون موعد: ${tasks.filter(t => !t.dueDate && t.status !== "completed").length}\n🔴 قصوى: ${tasks.filter(t => t.priority === "red").length} • 🟡 متوسطة: ${tasks.filter(t => t.priority === "yellow").length} • 🟢 عادية: ${tasks.filter(t => t.priority === "green").length}\n`}` : `${greeting}المهام المتاحة إلك: ${tasks.length}\n`;
+    : `مكتملة: ${tasks.filter(t => t.status === "completed").length}\nقيد التنفيذ: ${tasks.filter(t => t.status === "progress").length}\nبانتظار باسم: ${pending.length}\nمتأخرة بموعد مسجل: ${overdue.length}\nبدون موعد: ${tasks.filter(t => !t.dueDate && t.status !== "completed").length}\n🔴 قصوى: ${tasks.filter(t => t.priority === "red").length} • 🟡 متوسطة: ${tasks.filter(t => t.priority === "yellow").length} • 🟢 عادية: ${tasks.filter(t => t.priority === "green").length}\n`}` : `${greeting}المهام المتاحة إلك: ${tasks.length}\n`;
   // orderedTasks always re-derives its own list from the FULL state.tasks --
   // it knows nothing about reportOwner/reportStatus -- so without this filter
   // the report header would say "ملخص مهام خالد" (or name one status) while

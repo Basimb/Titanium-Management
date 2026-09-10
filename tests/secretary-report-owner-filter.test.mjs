@@ -89,7 +89,7 @@ test('a status filter for a status with no matching tasks says so plainly instea
   const f = fixture(t);
   const r = await f.run(f.event('شو المهام المعتمدة؟'), async () => f.statusPlan('completed'));
   assert.equal(r.status, 'summary');
-  assert.match(r.reply, /معتمدة: 0/);
+  assert.match(r.reply, /مكتملة: 0/);
   assert.doesNotMatch(r.reply, /مهمة خالد/);
   assert.doesNotMatch(r.reply, /مهمة شادي/);
 });

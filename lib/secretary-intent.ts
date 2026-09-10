@@ -205,11 +205,11 @@ export function validateSecretaryIntent(value: unknown, input: SecretaryModelInp
       for (const n of candidatesFor) {
         const candidate = Number.isInteger(n) && n >= 1 ? input.ownershipCandidates[n - 1] : undefined;
         if (!candidate) failed.push({ n, reason: "ما لقيتها بالقائمة الحالية" });
-        else if (candidate.status === "completed") failed.push({ n, reason: "معتمدة خلص" });
+        else if (candidate.status === "completed") failed.push({ n, reason: "مكتملة خلص" });
         else if (candidate.status === "approval") failed.push({ n, reason: "بانتظار اعتمادك حاليًا" });
         else items.push({ n, id: candidate.id, title: candidate.title });
       }
-      if (!items.length) return emptySecretaryIntent("clarify", failed.length === 1 ? `ما قدرت آخذها: ${failed[0].reason === "ما لقيتها بالقائمة الحالية" ? "ما لقيت مهمة بهذا الرقم بالقائمة الحالية. اطلب القائمة من جديد وجرب رقمها." : failed[0].reason === "معتمدة خلص" ? "هاي المهمة معتمدة خلص، ما بينفع تاخدها من جديد." : "هاي المهمة بانتظار اعتمادك حاليًا، خلص القرار عليها الأول."}` : `ما قدرت آخذ ولا وحدة من هالأرقام:\n${failed.map(f => `رقم ${f.n}: ${f.reason}`).join("\n")}`);
+      if (!items.length) return emptySecretaryIntent("clarify", failed.length === 1 ? `ما قدرت آخذها: ${failed[0].reason === "ما لقيتها بالقائمة الحالية" ? "ما لقيت مهمة بهذا الرقم بالقائمة الحالية. اطلب القائمة من جديد وجرب رقمها." : failed[0].reason === "مكتملة خلص" ? "هاي المهمة مكتملة خلص، ما بينفع تاخدها من جديد." : "هاي المهمة بانتظار اعتمادك حاليًا، خلص القرار عليها الأول."}` : `ما قدرت آخذ ولا وحدة من هالأرقام:\n${failed.map(f => `رقم ${f.n}: ${f.reason}`).join("\n")}`);
       plan = { ...emptySecretaryIntent("claim_multiple"), message: JSON.stringify({ items, failed }) };
     }
   }
@@ -297,7 +297,7 @@ export function validateSecretaryIntent(value: unknown, input: SecretaryModelInp
     if (plan.kind === "ownership_request" && (plan.taskId === null || !input.ownershipCandidates?.some(t => t.id === plan.taskId))) return emptySecretaryIntent("clarify", "أي مهمة بدك تستلم مسؤوليتها؟ اذكر اسم المهمة والمشروع.");
     if (plan.kind === "ownership_request") {
       const chosen = input.ownershipCandidates?.find(t => t.id === plan.taskId);
-      if (chosen?.status === "completed") return emptySecretaryIntent("clarify", "هاي المهمة معتمدة خلص، ما بينفع تاخدها من جديد.");
+      if (chosen?.status === "completed") return emptySecretaryIntent("clarify", "هاي المهمة مكتملة خلص، ما بينفع تاخدها من جديد.");
       if (chosen?.status === "approval") return emptySecretaryIntent("clarify", "هاي المهمة بانتظار اعتماد باسم حاليًا، ما بينفع استلامها الآن.");
     }
     if (plan.kind === "task_transfer_request" && !input.ownershipCandidates?.some(t => t.id === plan.taskId && t.assignee === input.actor.name)) return emptySecretaryIntent("clarify", "هاي المهمة مو معيّنة إلك أصلًا. أي مهمة من مهامك بدك تحوّل؟");

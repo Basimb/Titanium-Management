@@ -108,7 +108,7 @@ export function requestDeadlineExtension(db: DatabaseSync, claimed: ManagementAc
   const actor = resolveManagementActor(db, claimed);
   const task = visibleTask(db, actor, input.taskId);
   if (!isOwner(actor as PermissionActor) && task.owner !== actor.name) return fail(403, "not_owned", "التمديد متاح للمسؤول عن المهمة فقط");
-  if (task.status === "completed") return fail(409, "invalid_transition", "المهمة معتمدة بالفعل");
+  if (task.status === "completed") return fail(409, "invalid_transition", "المهمة مكتملة بالفعل");
   const newDueDate = dateOnly(input.newDueDate, "الموعد المقترح");
   if (task.dueDate && newDueDate <= task.dueDate) return fail(400, "not_extension", "الموعد المقترح يجب أن يكون بعد الموعد الحالي");
   const reason = text(input.reason, "سبب التمديد", 1000);
@@ -130,7 +130,7 @@ export function requestPriorityChange(db: DatabaseSync, claimed: ManagementActor
   const actor = resolveManagementActor(db, claimed);
   const task = visibleTask(db, actor, input.taskId);
   if (!isOwner(actor as PermissionActor) && task.owner !== actor.name) return fail(403, "not_owned", "تعديل الأولوية متاح للمسؤول عن المهمة فقط");
-  if (task.status === "completed") return fail(409, "invalid_transition", "المهمة معتمدة بالفعل");
+  if (task.status === "completed") return fail(409, "invalid_transition", "المهمة مكتملة بالفعل");
   if (task.priority === input.newPriority) return fail(400, "not_a_change", "هذي أصلًا أولوية المهمة الحالية");
   const reason = text(input.reason, "سبب تعديل الأولوية", 1000, true);
   const summary = `تعديل أولوية «${task.title}» من ${PRIORITY_ARABIC[task.priority]} إلى ${PRIORITY_ARABIC[input.newPriority]}`;

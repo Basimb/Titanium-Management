@@ -86,7 +86,7 @@ test('explicit color lists use DB without inference, exclude archive, and never 
  const f=fixture(t);f.db.exec("UPDATE tasks SET status='completed' WHERE id='t'; UPDATE tasks SET priority='green',due_date='2020-01-01' WHERE id='private'");
  const before=JSON.stringify(f.db.prepare('SELECT * FROM tasks ORDER BY id').all());
  const run=text=>f.run(undefined,{text,senderNumber:'12025550103'},async()=>{throw Error('color read must not ask model');});
- const red=await run('اعطيني المهام الحمراء');assert.match(red.reply,/🔴 لوحة/);assert.match(red.reply,/معتمدة/);assert.doesNotMatch(red.reply,/مهمة شادي/);
+ const red=await run('اعطيني المهام الحمراء');assert.match(red.reply,/🔴 لوحة/);assert.match(red.reply,/مكتملة/);assert.doesNotMatch(red.reply,/مهمة شادي/);
  const green=await run('وريني المهام الخضراء');assert.match(green.reply,/🟢 مهمة شادي الخاصة/);assert.match(green.reply,/متأخرة عن الموعد/);assert.doesNotMatch(green.reply,/\*لوحة\*/);
  const yellow=await run('بدي المهام الصفراء');assert.match(yellow.reply,/المطابق ضمن صلاحياتك \(دون الأرشيف\): 0/);assert.match(yellow.reply,/ما في مهام تطابق/);
  assert.equal(JSON.stringify(f.db.prepare('SELECT * FROM tasks ORDER BY id').all()),before);
