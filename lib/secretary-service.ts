@@ -206,7 +206,12 @@ function lookup(db: DatabaseSync, event: Event, actor: ChatUser, state: Snapshot
   if (!row) return null;
   if (row.payload_hash !== eventHash(event) || row.actor_id !== actor.id || !scopeAllowed(JSON.parse(row.scope_json), state)) return { status: "denied", reply: "" };
   const result = JSON.parse(row.result_json);
-  if (result.choices && (actor.id !== "basem" || actor.role !== "admin" || actor.active !== 1 || event.groupId !== null)) return { status: "denied", reply: "" };
+  // A task-action poll (see taskActionPoll) is the one kind of choices any
+  // active employee can legitimately be replaying in their own private chat
+  // -- every other kind (CFM confirmations, APR approval decisions, the
+  // approval-decision listing poll) stays Basim-only, exactly as before.
+  const taskPoll = typeof result.choices?.id === "string" && result.choices.id.startsWith("TSKQ");
+  if (result.choices && (taskPoll ? (actor.active !== 1 || event.groupId !== null) : (actor.id !== "basem" || actor.role !== "admin" || actor.active !== 1 || event.groupId !== null))) return { status: "denied", reply: "" };
   if (result.status === "confirmation" || (result.status === "clarify" && isConfirmationAttempt(event.text))) {
     const lastInstruction = String(result.reply).lastIndexOf("«موافق");
     const legacy = /^«موافق (T[0-9A-F]{6})»/iu.exec(String(result.reply).slice(lastInstruction));
@@ -278,6 +283,33 @@ export function secretaryTaskCard(task: Task, state: Snapshot, now: number, deta
   const overdue = task.status !== "completed" && task.dueDate && task.dueDate < new Date(now + 3 * 3600_000).toISOString().slice(0, 10);
   return `${priority?.icon || "⚪"} ${clean(task.title, 150)}\n${LABELS[task.status] || clean(task.status)}${overdue ? " • متأخرة عن الموعد" : ""}\nالأولوية: ${priority?.label || "غير محددة"}\nالمسؤول: ${clean(task.owner || task.suggestedOwner || "لم يُعيّن")} ${task.dueDate ? `• الموعد: ${clean(task.dueDate, 10)}` : ""}${detailed ? `\nالمطلوب: ${clean(task.details || "لا توجد تفاصيل إضافية", 600)}${latest ? `\nآخر تحديث (${clean(latest.author, 50)}): ${clean(latest.body, 500)}` : "\nلا يوجد تحديث مسجّل بعد."}` : ""}`;
 }
+// Basim: "لما أسأله مين أكثر موظف عنده مهام، يحلل ويعطيني إنه أيمن عنده 17
+// مهمة" -- ranks every active employee (never Basim himself) by their open,
+// non-archived task count, same "owner if claimed, else suggested owner"
+// responsibility convention as ownerTaskGroups/numberedTaskList use
+// everywhere else, so this always agrees with what those lists show.
+function workloadLeaderboard(state: Snapshot): Array<{ name: string; count: number }> {
+  const counts = new Map<string, number>();
+  for (const task of state.tasks) {
+    if (task.archivedAt || task.status === "completed") continue;
+    const responsible = task.owner || task.suggestedOwner;
+    if (!responsible) continue;
+    counts.set(responsible, (counts.get(responsible) || 0) + 1);
+  }
+  return state.users.filter(u => u.active === 1 && u.id !== "basem")
+    .map(u => ({ name: u.name, count: counts.get(u.name) || 0 }))
+    .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name, "ar"));
+}
+function workloadReply(state: Snapshot, actor: ChatUser): { result: Result; scope: string[] } {
+  const greeting = `أهلًا يا ${clean(actor.name, 60)}، `;
+  const board = workloadLeaderboard(state);
+  if (!board.length || board[0].count === 0) return { result: { status: "summary", reply: `${greeting}ما في مهام مفتوحة موزّعة على أي موظف حاليًا.` }, scope: [] };
+  const [top, ...rest] = board;
+  const others = rest.filter(person => person.count > 0);
+  const breakdown = others.length ? `\n\nباقي الفريق:\n${others.map(person => `• ${clean(person.name, 60)} — ${taskCountPhrase(person.count)}`).join("\n")}` : "";
+  const topTasks = state.tasks.filter(t => !t.archivedAt && t.status !== "completed" && (t.owner || t.suggestedOwner) === top.name);
+  return { result: { status: "summary", reply: `${greeting}أكثر موظف عنده مهام حاليًا هو *${clean(top.name, 60)}* وعنده ${taskCountPhrase(top.count)} مفتوحة.${breakdown}\n\nبدك أشوف مهامه القادمة بالتفصيل، أنواعها، أو نحكي كيف نخفف عنه؟` }, scope: topTasks.map(t => "t:" + t.id) };
+}
 function priorityReadReply(query: Extract<PriorityTaskQuery, { kind: "query" }>, state: Snapshot, now: number, text: string): { result: Result; scope: string[] } {
   const priority = PRIORITIES[query.priority];
   const today = new Date(now + 3 * 3600_000).toISOString().slice(0, 10);
@@ -302,7 +334,7 @@ function priorityReadReply(query: Extract<PriorityTaskQuery, { kind: "query" }>,
     : `\n\nعرض ${offset + 1}–${next} من ${tasks.length}.${next < tasks.length ? ` للتكملة اكتب: «${clean(continuation, 260)} من ${next + 1}».` : ""}`;
   return { result: { status: "summary", reply: header + "\n" + cards.join("\n\n") + footer }, scope: [...tasks.map(t => "t:" + t.id), ...(query.projectId ? ["p:" + query.projectId] : [])] };
 }
-function readReply(plan: SecretaryIntent, actor: ChatUser, state: Snapshot, now: number): { result: Result; scope: string[] } {
+function readReply(plan: SecretaryIntent, actor: ChatUser, state: Snapshot, now: number, privateChat: boolean): { result: Result; scope: string[] } {
   const greeting = `أهلًا يا ${clean(actor.name, 60)}، `;
   if (plan.kind === "help") {
     // Used to be one fixed blurb for everyone that never mentioned the actual
@@ -321,7 +353,12 @@ function readReply(plan: SecretaryIntent, actor: ChatUser, state: Snapshot, now:
   if (plan.kind === "projects") return { result: { status: "summary", reply: greeting + "\n\n*المشاريع المتاحة إلك*\n\n" + (state.projects.length ? state.projects.slice(0, 16).map(p => `🔵 *${clean(p.name, 100)}* — ${LABELS[p.status] || clean(p.status)}`).join("\n\n") : "ما في مشاريع متاحة إلك حاليًا.") }, scope: state.projects.map(p => "p:" + p.id) };
   if (plan.kind === "details") {
     const task = state.tasks.find(t => t.id === plan.taskId);
-    if (task) return { result: { status: "summary", reply: `${greeting}\n${secretaryTaskCard(task, state, now, true)}\n\nاحكيلي شو صار معك أو شو بدك أعمل عليها.`, taskId: task.id }, scope: ["t:" + task.id, "p:" + task.projectId] };
+    if (task) {
+      // Group replies never carry an interactive poll (see the "never a live
+      // poll in the group" convention already applied to approvals above).
+      const choices = privateChat ? taskActionPoll(task, actor.name, now) : undefined;
+      return { result: { status: "summary", reply: `${greeting}\n${secretaryTaskCard(task, state, now, true)}\n\nاحكيلي شو صار معك أو شو بدك أعمل عليها.`, taskId: task.id, ...(choices ? { choices } : {}) }, scope: ["t:" + task.id, "p:" + task.projectId] };
+    }
     if (plan.projectId) { const project = state.projects.find(p => p.id === plan.projectId); if (project) { const tasks = state.tasks.filter(t => t.projectId === project.id); return { result: { status: "summary", reply: `🔵 *${clean(project.name)}* — ${LABELS[project.status] || clean(project.status)}\n${tasks.length} مهام متاحة إلك، ${tasks.filter(t => t.status === "completed").length} معتمدة.\n\n${tasks.slice(0, 6).map(t => secretaryTaskCard(t, state, now)).join("\n\n")}` }, scope: ["p:" + project.id, ...tasks.map(t => "t:" + t.id)] }; } }
     return { result: { status: "clarify", reply: "أي مهمة بدك أشرح لك؟" }, scope: [] };
   }
@@ -463,6 +500,77 @@ function parseApprovalPollChoice(event: Event): { approvalId: string; decision: 
   if (choice.optionId === `APR${approvalId}Y`) return { approvalId, decision: "approved" };
   if (choice.optionId === `APR${approvalId}N`) return { approvalId, decision: "rejected" };
   return null;
+}
+// Basim's "nobody should have to type" ask extended to every employee, not
+// just himself: a task's own detail view and the private notice when a task
+// lands on someone both attach a poll of the actions that actually apply
+// right now (see taskActionPoll below). CLAIM/FINISH need no extra input, so
+// a tap resolves them exactly like parseApprovalPollChoice resolves an
+// approval decision -- deterministically, no model involved (see the
+// dedicated branch in handleSecretaryEvent). NOTE/TRANSFER/EXTEND need
+// content a tap can't carry (a note's body, a colleague's name, a new date),
+// so those are handled below by resolveTaskActionTextChoice instead.
+function parseTaskActionPollChoice(event: Event): { taskId: string; action: "claim" | "submit" | "note" | "transfer" | "extend" } | null {
+  const choice = event.choice;
+  if (!choice || !choice.questionId.startsWith("TSKQ")) return null;
+  const taskId = choice.questionId.slice(4);
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(taskId)) return null;
+  const prefix = `TSK${taskId}`;
+  if (!choice.optionId.startsWith(prefix)) return null;
+  const ACTIONS: Record<string, "claim" | "submit" | "note" | "transfer" | "extend"> = { CLAIM: "claim", FINISH: "submit", NOTE: "note", TRANSFER: "transfer", EXTEND: "extend" };
+  const action = ACTIONS[choice.optionId.slice(prefix.length)];
+  return action ? { taskId, action } : null;
+}
+// Inverse of taskActionPoll's NOTE/TRANSFER/EXTEND options. Unlike CLAIM/
+// FINISH, these three cannot resolve on the tap alone -- rewrite the tap,
+// once, at the very top (same spot resolveConfirmChoice already runs),
+// into the exact sentence a person naming the task by its own title would
+// have typed, using the task's CURRENT title (never the one shown when the
+// poll was sent). The existing model-driven flow already resolves
+// plan.taskId from a title mention and already asks for whatever else it
+// still needs (the note's content, the colleague's name, the new date) --
+// exactly as it would for someone who typed the same sentence themselves.
+function resolveTaskActionTextChoice(db: DatabaseSync, event: Event): Event {
+  const parsed = parseTaskActionPollChoice(event);
+  if (!parsed || parsed.action === "claim" || parsed.action === "submit") return event;
+  // Always clear choice here, task found or not: NOTE/TRANSFER/EXTEND are
+  // never meant to be resolved deterministically, and the generic live-poll
+  // handler further below is scoped to Basim's own task-intake/approval-
+  // decision flows -- leaving choice set would fall into that and get denied
+  // outright instead of degrading to the plain (if generic) tap-label text.
+  const task = db.prepare("SELECT title FROM tasks WHERE id=?").get(parsed.taskId) as { title: string } | undefined;
+  if (!task) return { ...event, choice: undefined };
+  const title = clean(task.title, 150);
+  const text = parsed.action === "note" ? `بدي أضيف ملاحظة على مهمة «${title}»`
+    : parsed.action === "transfer" ? `بدي أحول مهمة «${title}» لحدا غيري`
+    : `بدي أمدد موعد مهمة «${title}»`;
+  return { ...event, text, choice: undefined };
+}
+// The one or two actions that actually apply to this task right now, for
+// this specific person -- never fewer than 2 (WhatsApp's own poll minimum);
+// a single applicable action stays a plain-text nudge instead of a poll.
+// Mirrors executeManagementAction's own claim/submit preconditions (see
+// management-actions.ts) so a tap either works or fails with that same
+// action's normal error message -- never a new, separate notion of "can
+// this person act on this task" that could drift from the real one.
+function taskActionPoll(task: { id: string; title: string; status: string; owner: string | null; suggestedOwner: string | null }, actorName: string, now: number): SecretaryChoices | undefined {
+  if ((task.owner || task.suggestedOwner) !== actorName) return undefined;
+  const base = `TSK${task.id}`;
+  const options: Array<{ id: string; label: string }> = [];
+  if (task.status === "open" && task.owner === null) options.push({ id: `${base}CLAIM`, label: "👋 استلمت المهمة" });
+  if (task.status === "progress" && task.owner === actorName) options.push({ id: `${base}FINISH`, label: "✅ خلصت المهمة" }, { id: `${base}NOTE`, label: "📝 أضيف ملاحظة" });
+  if (task.status === "open" || task.status === "progress") options.push({ id: `${base}TRANSFER`, label: "🔄 حوّلها لحدا غيري" });
+  if (task.status === "progress" && task.owner === actorName) options.push({ id: `${base}EXTEND`, label: "🕐 بدي تمديد" });
+  return options.length >= 2 ? { id: `TSKQ${task.id}`, title: "شو بدك تعمل بهالمهمة؟", expiresAt: now + 60 * 60_000, options } : undefined;
+}
+// Same poll, built from a fresh DB row rather than a pre-action snapshot --
+// dispatchManagementNotice's private notice fires right after a
+// create/reassign/claim/etc. just changed this exact task's status/owner,
+// so the snapshot it already holds is one step stale.
+function freshTaskActionPoll(db: DatabaseSync, taskId: string, targetName: string, now: number): SecretaryChoices | undefined {
+  const row = db.prepare("SELECT id,title,status,owner,suggested_owner AS suggestedOwner FROM tasks WHERE id=?").get(taskId) as
+    { id: string; title: string; status: string; owner: string | null; suggestedOwner: string | null } | undefined;
+  return row ? taskActionPoll(row, targetName, now) : undefined;
 }
 
 function intakeRow(db: DatabaseSync, key: string): IntakeRow | undefined {
@@ -719,6 +827,7 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
 }): Promise<Result> {
   migrateSecretary(db); const now = (dependencies.now || Date.now)();
   event = resolveConfirmChoice(event);
+  event = resolveTaskActionTextChoice(db, event);
   const actor = actorFor(db, event, config); if (!actor) return { status: "denied", reply: "" };
   // The team group is one-way by default: automated notices only (task/project
   // open/close broadcasts, sent separately as groupNotice from a DM-side
@@ -756,6 +865,38 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
         const result = applyDecision(db, fresh, { approvalId: approvalPollChoice.approvalId, decision: approvalPollChoice.decision }, now);
         deliverAgentSideEffects(db, fresh, result, now);
         return save(db, event, fresh, { status: result.status, reply: result.reply }, [], now);
+      } catch (error) {
+        if (!(error instanceof ManagementActionError)) throw error;
+        return save(db, event, fresh, { status: "clarify", reply: error.message }, [], now);
+      }
+    });
+  }
+  // A task-action poll's CLAIM/FINISH tap (see taskActionPoll above) --
+  // resolves directly for the same reason parseApprovalPollChoice does: the
+  // option id already carries the exact task and action, with nothing to
+  // look up against a model and no live state that could have gone stale. A
+  // tap is bound to a specific verified phone number voting on a poll this
+  // bridge itself sent, so it needs no separate typed confirmation step --
+  // the same trust level "claim" already has today with zero confirmation,
+  // extended here to "submit" too. Open to any active actor in their own
+  // private chat, not just Basim: these are two everyday actions any
+  // employee already has today, just reachable with a tap instead of typing.
+  const taskActionPollChoice = parseTaskActionPollChoice(event);
+  if (taskActionPollChoice && (taskActionPollChoice.action === "claim" || taskActionPollChoice.action === "submit")
+      && actor.active === 1 && event.groupId === null && !event.replyToMessageId) {
+    return transaction(db, () => {
+      const fresh = actorFor(db, event, config);
+      if (!config.enabled || !fresh || JSON.stringify(fresh) !== JSON.stringify(actor)) return { status: "denied", reply: "" };
+      const duplicate = lookup(db, event, fresh, stateFor(db, fresh)); if (duplicate) return duplicate;
+      const state = stateFor(db, fresh);
+      const task = state.tasks.find(t => t.id === taskActionPollChoice.taskId);
+      if (!task) return save(db, event, fresh, { status: "clarify", reply: "هاي المهمة ما عادت متاحة." }, [], now);
+      try {
+        const result = executeManagementAction(db, fresh, { action: taskActionPollChoice.action, taskId: task.id } as ManagementCommand,
+          { now, source: "whatsapp_secretary", auditContext: { originalText: event.text, sourceMessageId: event.messageId, confirmationRequired: false } });
+        dispatchManagementNotice(db, fresh, state, result, { projectId: task.projectId }, now);
+        notifyTaskLegend(db, fresh.id, now);
+        return save(db, event, fresh, { status: "applied", reply: `✅ ${result.message}`, taskId: task.id }, ["t:" + task.id], now);
       } catch (error) {
         if (!(error instanceof ManagementActionError)) throw error;
         return save(db, event, fresh, { status: "clarify", reply: error.message }, [], now);
@@ -1040,8 +1181,17 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
   const bareOwnershipCandidate = bareOwnershipOrdinal && bareOwnershipOrdinal >= 1 ? input.ownershipCandidates?.[bareOwnershipOrdinal - 1] : undefined;
   const directTaskList = !review && !taskDraft && !event.replyToMessageId
     && /^(?:(?:وريني|اعرض|اعرضلي|اعطيني|اعطني|شو|ارسل|ارسللي|ابعث|ابعثلي|ابعت|ابعتلي|بدي اشوف|بدي شوف|خليني اشوف|خليني شوف) )?المهام(?: المطلوبة| المطلوبه| المتاحة| المتاحه| الموجودة| الموجوده)?(?: كلها| جميعها)?(?: اشوف| بشوف| لاشوف| لأشوف)?(?: كمان مره| كمان مرة| مرة ثانية| مره ثانيه)?$/.test(listText);
+  // "مين أكثر موظف عنده مهام؟" -- counting must never be left to the model
+  // (same reason every other list in this file is server-computed, not
+  // model-recited); a management-only workload leaderboard, computed fresh
+  // from the live task catalog. A member's own snapshot only ever contains
+  // their own tasks (see canViewManagementTask), so this would silently be
+  // wrong for them -- restricted to admin/manager, who actually see everyone.
+  const workloadQuery = !review && !taskDraft && !event.replyToMessageId && (actor.role === "admin" || actor.role === "manager")
+    && /مهام|شغل|مشغول/.test(listText) && /أكثر|اكثر/.test(listText) && /مين|من |موظف|حدا|واحد|مشغول/.test(listText);
   try {
-    plan = priorityQuery ? emptySecretaryIntent(priorityQuery.kind === "clarify" ? "clarify" : "summary", priorityQuery.kind === "clarify" ? priorityQuery.reply : null)
+    plan = workloadQuery ? emptySecretaryIntent("report", "WORKLOAD_LEADERBOARD")
+      : priorityQuery ? emptySecretaryIntent(priorityQuery.kind === "clarify" ? "clarify" : "summary", priorityQuery.kind === "clarify" ? priorityQuery.reply : null)
       : directTaskList ? emptySecretaryIntent("summary")
         : bareOwnershipCandidate ? { ...emptySecretaryIntent("ownership_request"), taskId: bareOwnershipCandidate.id }
         : directCreation ?? validateSecretaryIntent(await dependencies.infer(input), input);
@@ -1099,6 +1249,10 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
     }
     if (priorityQuery?.kind === "query") {
       const read = priorityReadReply(priorityQuery, state, now, readQuestion);
+      return save(db, event, freshActor, read.result, read.scope, now);
+    }
+    if (plan.kind === "report" && plan.message === "WORKLOAD_LEADERBOARD") {
+      const read = workloadReply(state, freshActor);
       return save(db, event, freshActor, read.result, read.scope, now);
     }
     if (plan.kind === "message_status") {
@@ -1182,7 +1336,7 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
       const contextTaskId = plan.kind !== "search" && state.tasks.some(task => task.id === plan.taskId) ? plan.taskId : null;
       return save(db, event, freshActor, { status: plan.kind === "clarify" ? "clarify" : "summary", reply, ...(contextTaskId ? { taskId: contextTaskId } : {}) }, plan.kind !== "search" ? [...state.tasks.map(t => "t:" + t.id), ...state.projects.map(p => "p:" + p.id)] : [], now);
     }
-    const read = readReply(plan, freshActor, state, now); return save(db, event, freshActor, read.result, read.scope, now);
+    const read = readReply(plan, freshActor, state, now, event.groupId === null); return save(db, event, freshActor, read.result, read.scope, now);
   });
 }
 // The web dashboard (app/api/state/route.ts) already relays
@@ -1242,7 +1396,20 @@ function dispatchManagementNotice(db: DatabaseSync, actor: ChatUser, state: Snap
     : taskId
       ? (() => { const ownerName = state.tasks.find(t => t.id === taskId)?.owner ?? null; return ownerName ? state.users.find(u => u.name === ownerName)?.id ?? null : null; })()
       : null;
-  if (targetId && targetId !== actor.id) { enqueueAgentMessage(db, { toUser: targetId, text: `📌 تحديث على مهمتك:\n${notice}` }, now); notifyTaskLegend(db, targetId, now + 1); }
+  if (targetId && targetId !== actor.id) {
+    const targetName = state.users.find(u => u.id === targetId)?.name;
+    // A fresh read, not `state` (this action just changed this exact task),
+    // so create/reassign correctly offers CLAIM/TRANSFER on the now-open
+    // task, not whatever taskActionPoll would have said before it moved.
+    const choices = taskId && targetName ? freshTaskActionPoll(db, taskId, targetName, now) : undefined;
+    enqueueAgentMessage(db, { toUser: targetId, text: `📌 تحديث على مهمتك:\n${notice}`, ...(choices ? { choices } : {}) }, now);
+    notifyTaskLegend(db, targetId, now + 1);
+  }
+  // "تجيني أنا عشان أقرأها وتروح للغروب مشان يشوفوها" -- every task update
+  // should reach Basim directly, not only the group broadcast. Skipped when
+  // he is the one who just acted (no self-notice) or already the private
+  // target above (he already got the richer version with the action poll).
+  if (actor.id !== "basem" && targetId !== "basem") enqueueAgentMessage(db, { toUser: "basem", text: notice }, now);
 }
 // On-demand "remind everyone now" broadcast (Basim asking directly, not the
 // nightly agent-followups nudge cadence): groups every open, non-archived,
@@ -1267,13 +1434,30 @@ function ownerTaskGroups(state: Snapshot): Map<string, Task[]> {
   }
   return groups;
 }
+// Same "اليوم/بكرة/بعد بكرة/خلال أسبوع" bucketing as agent-followups.ts's
+// reminderBuckets (kept local -- Task and ManagementTask are different
+// shapes, and this file already can't import back from agent-followups.ts).
+function reminderBuckets(tasks: Task[], today: string): Array<{ label: string; tasks: Task[] }> {
+  const shift = (days: number) => new Date(Date.parse(`${today}T00:00:00Z`) + days * 86_400_000).toISOString().slice(0, 10);
+  const tomorrow = shift(1), dayAfter = shift(2), weekEnd = shift(7);
+  const bucket = (task: Task) => !task.dueDate ? "بدون موعد محدد"
+    : task.dueDate < today ? "🔴 متأخرة"
+    : task.dueDate === today ? "اليوم"
+    : task.dueDate === tomorrow ? "بكرة"
+    : task.dueDate === dayAfter ? "بعد بكرة"
+    : task.dueDate <= weekEnd ? "خلال أسبوع"
+    : "لاحقًا";
+  const order = ["🔴 متأخرة", "اليوم", "بكرة", "بعد بكرة", "خلال أسبوع", "لاحقًا", "بدون موعد محدد"];
+  const groups = new Map<string, Task[]>();
+  for (const task of tasks) { const key = bucket(task); const list = groups.get(key) || []; list.push(task); groups.set(key, list); }
+  return order.filter(label => groups.has(label)).map(label => ({ label, tasks: groups.get(label)! }));
+}
 function formatOwnerTaskLines(tasks: Task[], today: string): string {
-  return tasks.map((task, index) => {
+  return reminderBuckets(tasks, today).map(({ label, tasks: bucketed }) => `*${label}*\n` + bucketed.map((task, index) => {
     const priority = PRIORITIES[task.priority];
-    const overdue = task.dueDate && task.dueDate < today;
-    const suffix = overdue ? " • 🔴 متأخرة" : task.dueDate ? ` • الموعد: ${clean(task.dueDate, 10)}` : "";
+    const suffix = task.dueDate ? ` • ${clean(task.dueDate, 10)}` : "";
     return `${index + 1}. ${priority?.icon || "⚪"} ${clean(task.title, 120)} — ${LABELS[task.status] || clean(task.status)}${suffix}`;
-  }).join("\n");
+  }).join("\n")).join("\n\n");
 }
 function sendTeamTaskReminders(db: DatabaseSync, state: Snapshot, now: number): { recipients: number } {
   const today = new Date(now + 3 * 3600_000).toISOString().slice(0, 10);
@@ -1283,7 +1467,10 @@ function sendTeamTaskReminders(db: DatabaseSync, state: Snapshot, now: number): 
     if (!tasks.length) continue;
     const user = state.users.find(u => u.id === userId)!;
     const lines = formatOwnerTaskLines(tasks, today);
-    enqueueAgentMessage(db, { toUser: userId, text: `📋 تذكير بمهامك الحالية يا ${clean(user.name, 60)} (${tasks.length}):\n\n${lines}` }, now);
+    // A poll (see taskActionPoll) only ever fits one task per WhatsApp
+    // message -- attach it when this reminder names exactly one.
+    const choices = tasks.length === 1 ? taskActionPoll(tasks[0], user.name, now) : undefined;
+    enqueueAgentMessage(db, { toUser: userId, text: `📋 تذكير بمهامك الحالية يا ${clean(user.name, 60)} (${tasks.length}):\n\n${lines}`, ...(choices ? { choices } : {}) }, now);
     // Basim asked for the group notice split into one message per person
     // (rather than one long combined message listing everyone), so each
     // owner's section is its own group post -- still headed by the same

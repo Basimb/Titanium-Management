@@ -36,12 +36,50 @@ function autoReminderGroups(snapshot: { tasks: ManagementTask[]; projects: Array
   }
   return groups;
 }
+// Basim: "\u0627\u0644\u064a\u0648\u0645 \u0625\u064a\u0634 \u0639\u0646\u062f\u0647 \u0645\u0647\u0627\u0645\u060c \u0628\u0643\u0631\u0629 \u0639\u0646\u062f\u0647 \u0643\u0630\u0627\u060c \u0628\u0639\u062f \u0628\u0643\u0631\u0629 \u0639\u0646\u062f\u0647 \u0643\u0630\u0627\u060c \u0628\u0639\u062f \u0623\u0633\u0628\u0648\u0639
+// \u0639\u0646\u062f\u0647 \u0643\u0630\u0627" -- group a person's reminder by when each task is due, with the
+// bucket as a heading and its tasks listed underneath, instead of one flat
+// numbered list. Plain ISO-date string comparisons, same convention every
+// other overdue/due check in this codebase already uses (no real timezone
+// math needed once `today` itself was computed with the right offset).
+function reminderBuckets(tasks: ManagementTask[], today: string): Array<{ label: string; tasks: ManagementTask[] }> {
+  const shift = (days: number) => new Date(Date.parse(`${today}T00:00:00Z`) + days * DAY).toISOString().slice(0, 10);
+  const tomorrow = shift(1), dayAfter = shift(2), weekEnd = shift(7);
+  const bucket = (task: ManagementTask) => !task.dueDate ? "\u0628\u062f\u0648\u0646 \u0645\u0648\u0639\u062f \u0645\u062d\u062f\u062f"
+    : task.dueDate < today ? "\ud83d\udd34 \u0645\u062a\u0623\u062e\u0631\u0629"
+    : task.dueDate === today ? "\u0627\u0644\u064a\u0648\u0645"
+    : task.dueDate === tomorrow ? "\u0628\u0643\u0631\u0629"
+    : task.dueDate === dayAfter ? "\u0628\u0639\u062f \u0628\u0643\u0631\u0629"
+    : task.dueDate <= weekEnd ? "\u062e\u0644\u0627\u0644 \u0623\u0633\u0628\u0648\u0639"
+    : "\u0644\u0627\u062d\u0642\u064b\u0627";
+  const order = ["\ud83d\udd34 \u0645\u062a\u0623\u062e\u0631\u0629", "\u0627\u0644\u064a\u0648\u0645", "\u0628\u0643\u0631\u0629", "\u0628\u0639\u062f \u0628\u0643\u0631\u0629", "\u062e\u0644\u0627\u0644 \u0623\u0633\u0628\u0648\u0639", "\u0644\u0627\u062d\u0642\u064b\u0627", "\u0628\u062f\u0648\u0646 \u0645\u0648\u0639\u062f \u0645\u062d\u062f\u062f"];
+  const groups = new Map<string, ManagementTask[]>();
+  for (const task of tasks) { const key = bucket(task); const list = groups.get(key) || []; list.push(task); groups.set(key, list); }
+  return order.filter(label => groups.has(label)).map(label => ({ label, tasks: groups.get(label)! }));
+}
 function formatAutoReminderLines(tasks: ManagementTask[], today: string): string {
-  return tasks.map((task, index) => {
-    const overdue = !!task.dueDate && task.dueDate < today;
-    const suffix = overdue ? " \u2022 \ud83d\udd34 \u0645\u062a\u0623\u062e\u0631\u0629" : task.dueDate ? ` \u2022 \u0627\u0644\u0645\u0648\u0639\u062f: ${clean(task.dueDate)}` : "";
+  return reminderBuckets(tasks, today).map(({ label, tasks: bucketed }) => `*${label}*\n` + bucketed.map((task, index) => {
+    const suffix = task.dueDate ? ` \u2022 ${clean(task.dueDate)}` : "";
     return `${index + 1}. ${PRIORITY_ICON[task.priority] || "\u26aa"} ${clean(task.title)} \u2014 ${STATUS_LABEL[task.status] || clean(task.status)}${suffix}`;
-  }).join("\n");
+  }).join("\n")).join("\n\n");
+}
+// Same TSKQ/TSK id scheme as taskActionPoll in secretary-service.ts (a tap
+// resolves identically no matter which file built the poll) -- duplicated
+// locally rather than imported, same reason PRIORITY_ICON/STATUS_LABEL are:
+// secretary-service.ts imports enqueueAgentMessage FROM this file. A
+// WhatsApp message carries at most one live poll, so this only attaches one
+// when the reminder names exactly one actionable task; with several, the
+// employee names the one they mean ("\u062a\u0641\u0627\u0635\u064a\u0644 \u0645\u0647\u0645\u0629 ...") to get its own poll.
+function autoReminderPoll(tasks: ManagementTask[], actorName: string, now: number): SecretaryChoices | undefined {
+  if (tasks.length !== 1) return undefined;
+  const task = tasks[0];
+  const base = `TSK${task.id}`;
+  const options: Array<{ id: string; label: string }> = [];
+  if (task.status === "open" && !task.owner) options.push({ id: `${base}CLAIM`, label: "\ud83d\udc4b \u0627\u0633\u062a\u0644\u0645\u062a \u0627\u0644\u0645\u0647\u0645\u0629" });
+  if (task.status === "progress" && task.owner === actorName) options.push({ id: `${base}FINISH`, label: "\u2705 \u062e\u0644\u0635\u062a \u0627\u0644\u0645\u0647\u0645\u0629" }, { id: `${base}NOTE`, label: "\ud83d\udcdd \u0623\u0636\u064a\u0641 \u0645\u0644\u0627\u062d\u0638\u0629" });
+  if (task.status === "open" || task.status === "progress") options.push({ id: `${base}TRANSFER`, label: "\ud83d\udd04 \u062d\u0648\u0651\u0644\u0647\u0627 \u0644\u062d\u062f\u0627 \u063a\u064a\u0631\u064a" });
+  if (task.status === "progress" && task.owner === actorName) options.push({ id: `${base}EXTEND`, label: "\ud83d\udd50 \u0628\u062f\u064a \u062a\u0645\u062f\u064a\u062f" });
+  return options.length >= 2 ? { id: `TSKQ${task.id}`, title: "\u0634\u0648 \u0628\u062f\u0643 \u062a\u0639\u0645\u0644 \u0628\u0647\u0627\u0644\u0645\u0647\u0645\u0629\u061f", expiresAt: now + 60 * 60_000, options } : undefined;
 }
 
 function ownerActor(db: DatabaseSync): ManagementActor | null {
@@ -82,8 +120,9 @@ export function planFollowups(db: DatabaseSync, config: FollowupConfig, at: numb
       const lines = formatAutoReminderLines(tasks, today);
       const number = numberOf(userId);
       if (number && !alreadySent(db, kind, userId, null, at - DAY)) {
+        const choices = autoReminderPoll(tasks, user.name, at);
         plans.push({ id: randomBytes(8).toString("hex"), kind, targetUser: userId, entityId: null, to: `${number}@s.whatsapp.net`,
-          text: `📋 تذكير بمهامك الحالية يا ${clean(user.name)} (${tasks.length}):\n\n${lines}${link}` });
+          text: `📋 تذكير بمهامك الحالية يا ${clean(user.name)} (${tasks.length}):\n\n${lines}${link}`, ...(choices ? { choices } : {}) });
       }
       // One group post per owner (never one combined message), same
       // convention as the on-demand "ابعت تذكير المهام الآن" broadcast --

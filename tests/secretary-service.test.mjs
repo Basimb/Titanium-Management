@@ -205,9 +205,16 @@ test('an employee finishing/claiming/commenting on a task gets the standalone co
  const legend=outbox(f.db).filter(r=>r.toUser==='member'&&/تذكير بأوامر المهام/.test(r.text));
  assert.equal(legend.length,1,'the employee gets exactly one legend message after finishing their task');
  assert.match(legend[0].text,/تحويل المهمة/);assert.match(legend[0].text,/انهاء المهمة/);assert.match(legend[0].text,/اضافة ملاحظة/);assert.match(legend[0].text,/اضافة مهمة/);
+ // Basim now gets every task update privately too (see dispatchManagementNotice)
+ // -- confirm that landed for the employee's own submit above, then confirm
+ // it never doubles as the employee-facing legend, and never fires for
+ // Basim's own actions (no self-notice).
+ assert.ok(outbox(f.db).some(r=>r.toUser==='basem'&&/📤/.test(r.text)&&/لوحة/.test(r.text)),'Basim gets a private notice of the employee finishing their task');
+ assert.equal(outbox(f.db).filter(r=>r.toUser==='basem'&&/تذكير بأوامر المهام/.test(r.text)).length,0,'Basim never gets the employee-facing legend');
  const admin={senderNumber:'12025550103'};
+ const before=outbox(f.db).filter(r=>r.toUser==='basem').length;
  await f.run(command('comment',{body:'تحديث بسيط'}),{...admin,text:'علّق: تحديث بسيط'});
- assert.equal(outbox(f.db).filter(r=>r.toUser==='basem').length,0,'Basim never gets the employee-facing legend for his own actions');
+ assert.equal(outbox(f.db).filter(r=>r.toUser==='basem').length,before,'no self-notice for his own comment');
 });
 test('cancellation and expired confirmation never mutate',async t=>{
  const f=fixture(t);await f.run(command('submit'),{text:'خلصت اللوحة'});assert.equal((await f.run(undefined,{text:'إلغاء'})).status,'cancelled');assert.equal(pending(f.db),undefined);
