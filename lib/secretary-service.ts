@@ -1025,6 +1025,12 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
     if (!groups.size) return save(db, event, freshActor, { status: "clarify", reply: "ما في مهام مفتوحة معلّقة لأي موظف حاليًا؛ ما في شي أذكّر فيه." }, [], now);
     const names = [...groups.keys()].map(id => state.users.find(u => u.id === id)?.name).filter(Boolean).join("، ");
     const token = "T" + randomBytes(3).toString("hex").toUpperCase();
+    // An older, still-unconfirmed preview (message_team/announce_team/a
+    // direct edit token/etc.) must never crash this INSERT with a UNIQUE
+    // violation on conversation_key -- asking for a fresh preview always
+    // replaces whatever Basim hadn't confirmed yet, same as every other
+    // mutating direct-intercept in this function.
+    db.prepare("DELETE FROM secretary_pending WHERE conversation_key=?").run(key);
     db.prepare("INSERT INTO secretary_pending VALUES(?,?,?,?,?,?,?)").run(key, token, JSON.stringify({ action: "team_reminders" }), initialHash, event.text, event.messageId, now + CONFIRM_MS);
     log(db, freshActor, event, "secretary_team_reminders_preview", { summary: "عرض تذكير جماعي بالمهام قبل الإرسال", recipients: groups.size }, now);
     return save(db, event, freshActor, { status: "confirmation", reply: `رح أبعت لكل موظف عنده مهام مفتوحة تذكيرًا خاصًا بمهامه (${groups.size} موظف: ${names})، وأنشر على جروب الفريق رسالة منفصلة لكل موظف باسمه فوق مهامه.\n\nلم أرسل شيئًا بعد. اكتب «موافق ${token}» أو رد بالموافقة مباشرة على هذه المعاينة؛ وللتراجع اكتب «إلغاء». التأكيد صالح 10 دقائق.` }, [], now);
@@ -1046,6 +1052,9 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
     if (!body) return save(db, event, freshActor, { status: "clarify", reply: "شو النص الجديد لتعليمات السكرتير بالضبط؟ اكتبه بعد نقطتين، متل: «حدّث تعليمات السكرتير: النص هون»." }, [], now);
     const token = "T" + randomBytes(3).toString("hex").toUpperCase();
     const command = { action: "update_playbook", body };
+    // Same reasoning as team_reminders above -- never crash on a leftover
+    // unconfirmed preview from a different command.
+    db.prepare("DELETE FROM secretary_pending WHERE conversation_key=?").run(key);
     db.prepare("INSERT INTO secretary_pending VALUES(?,?,?,?,?,?,?)").run(key, token, JSON.stringify(command), initialHash, event.text, event.messageId, now + CONFIRM_MS);
     log(db, freshActor, event, "secretary_playbook_preview", { summary: "عرض تحديث تعليمات السكرتير الدائمة قبل الحفظ", confirmationRequired: true }, now);
     return save(db, event, freshActor, { status: "confirmation", reply: `رح أحدّث تعليمات السكرتير الدائمة (يلي بترجع لما حدا يكتب «تعليمات السكرتير») لهذا النص:\n\n${body}\n\nما حدّثتها بعد. اكتب «موافق ${token}» أو رد بالموافقة مباشرة على هذه المعاينة؛ وللتراجع اكتب «إلغاء». التأكيد صالح 10 دقائق.` }, [], now);

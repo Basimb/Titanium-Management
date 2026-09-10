@@ -73,3 +73,26 @@ test('nothing to remind produces a clarify and sends nothing',async t=>{
   assert.equal(result.status,'clarify');
   assert.equal(f.outbox().length,0);
 });
+
+// Found by an end-to-end smoke run of every WhatsApp command in sequence:
+// this direct-intercept's own INSERT INTO secretary_pending had no guard
+// against a still-unconfirmed preview from an unrelated prior command
+// (message_team/announce_team/a direct-edit token/etc.), unlike every other
+// mutating direct-intercept in handleSecretaryEvent, which all clear the
+// slot first. Basim asking for a reminder broadcast right after starting
+// (but not yet confirming or cancelling) some other change used to throw an
+// unhandled SQLite UNIQUE-constraint error instead of a normal reply.
+test('an unconfirmed preview from an unrelated command never crashes this trigger -- it just gets replaced',async t=>{
+  const f=fixture(t);
+  const announcePreview=await f.run(f.event('اعلن على الجروب: صباح الخير'),async()=>{const p=emptySecretaryIntent('announce_team');p.fields.body='صباح الخير';return p;});
+  assert.equal(announcePreview.status,'confirmation');
+  const reminderPreview=await f.run(f.event('ابعت تذكير المهام الآن'));
+  assert.equal(reminderPreview.status,'confirmation');
+  assert.match(reminderPreview.reply,/خالد/);
+  // Confirming now must run the reminder broadcast, not the abandoned announcement.
+  const applied=await f.run(f.event('موافق'));
+  assert.equal(applied.status,'applied');
+  const sent=f.outbox();
+  assert.ok(sent.some(m=>m.toUser==='member'));
+  assert.ok(!sent.some(m=>/صباح الخير/.test(m.text)),'the superseded announcement must never have gone out');
+});

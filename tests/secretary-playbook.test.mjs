@@ -89,3 +89,19 @@ test('cancelling the update preview leaves the stored instructions untouched',as
   const stillDefault=await f.run(f.event('تعليمات السكرتير'));
   assert.match(stillDefault.reply,/تعليمات مهمة لكل الفريق/);
 });
+
+// Same class of bug as the team-reminders trigger: this direct-intercept's
+// own INSERT INTO secretary_pending had no guard against a still-unconfirmed
+// preview left over from an unrelated prior command, so it used to crash
+// with an unhandled SQLite UNIQUE-constraint error instead of replying.
+test('an unconfirmed preview from an unrelated command never crashes this trigger -- it just gets replaced',async t=>{
+  const f=fixture(t);
+  const messagePreview=await f.run(f.event('ابعت لخالد: لا تنسى الفاتورة'),async()=>{const p={...emptySecretaryIntent('message_team'),recipientIds:['member']};p.fields.body='لا تنسى الفاتورة';return p;});
+  assert.equal(messagePreview.status,'confirmation');
+  const playbookPreview=await f.run(f.event('حدّث تعليمات السكرتير: نص بديل بعد ترك رسالة معلّقة'));
+  assert.equal(playbookPreview.status,'confirmation');
+  const applied=await f.run(f.event('موافق'));
+  assert.equal(applied.status,'applied');
+  assert.equal(f.playbook().body,'نص بديل بعد ترك رسالة معلّقة');
+  assert.equal(f.db.prepare("SELECT COUNT(*) AS n FROM agent_outbox WHERE to_user='member'").get().n,0,'the superseded team message must never have gone out');
+});
