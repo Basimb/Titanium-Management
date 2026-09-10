@@ -50,13 +50,13 @@ test('an unclaimed task suggested to an employee offers a CLAIM/TRANSFER poll, n
   assert.equal(r.status, 'summary');
   assert.ok(r.choices, 'an unclaimed suggested task must offer a poll');
   assert.equal(r.choices.id, `TSKQ${OPEN}`);
-  assert.deepEqual(r.choices.options.map(o => o.id), [`TSK${OPEN}CLAIM`, `TSK${OPEN}TRANSFER`]);
+  assert.deepEqual(r.choices.options.map(o => o.id), [`TSK${OPEN}CLAIM`, `TSK${OPEN}TRANSFER`, `TSK${OPEN}EDIT`]);
   assert.equal(r.choices.expiresAt - f.now, 60 * 60_000, 'a WhatsApp poll cannot outlive a 1-hour expiry');
 });
-test('a task already in progress offers the full FINISH/NOTE/TRANSFER/EXTEND poll', async t => {
+test('a task already in progress offers the full FINISH/NOTE/TRANSFER/EDIT/EXTEND poll', async t => {
   const f = fixture(t);
   const r = await f.run(details(PROGRESS), { text: 'شو تفاصيل اللوحة؟' });
-  assert.deepEqual(r.choices.options.map(o => o.id), [`TSK${PROGRESS}FINISH`, `TSK${PROGRESS}NOTE`, `TSK${PROGRESS}TRANSFER`, `TSK${PROGRESS}EXTEND`]);
+  assert.deepEqual(r.choices.options.map(o => o.id), [`TSK${PROGRESS}FINISH`, `TSK${PROGRESS}NOTE`, `TSK${PROGRESS}TRANSFER`, `TSK${PROGRESS}EDIT`, `TSK${PROGRESS}EXTEND`]);
 });
 test('a task view from the group, or of someone else\'s task, never carries a poll', async t => {
   const f = fixture(t);
@@ -98,13 +98,15 @@ test('a CLAIM tap for a task removed since the poll was sent is denied cleanly',
     async () => { throw Error('must not ask the model'); });
   assert.equal(tapped.status, 'clarify');
 });
-test('tapping NOTE/TRANSFER/EXTEND rewrites the tap into the exact sentence a person naming the task would type, using its live title', async t => {
+test('tapping NOTE/TRANSFER/EDIT/EXTEND rewrites the tap into the exact sentence a person naming the task would type, using its live title', async t => {
   const f = fixture(t);
   f.db.prepare('UPDATE tasks SET title=? WHERE id=?').run('لوحة معدّلة', PROGRESS);
   let seenNote; await f.run(undefined, tap(`TSKQ${PROGRESS}`, `TSK${PROGRESS}NOTE`), async input => { seenNote = input.text; return emptySecretaryIntent('clarify', 'شو الملاحظة؟'); });
   assert.equal(seenNote, 'بدي أضيف ملاحظة على مهمة «لوحة معدّلة»');
   let seenTransfer; await f.run(undefined, tap(`TSKQ${PROGRESS}`, `TSK${PROGRESS}TRANSFER`), async input => { seenTransfer = input.text; return emptySecretaryIntent('clarify', 'لمين؟'); });
   assert.equal(seenTransfer, 'بدي أحول مهمة «لوحة معدّلة» لحدا غيري');
+  let seenEdit; await f.run(undefined, tap(`TSKQ${PROGRESS}`, `TSK${PROGRESS}EDIT`), async input => { seenEdit = input.text; return emptySecretaryIntent('clarify', 'شو الأولوية الجديدة؟'); });
+  assert.equal(seenEdit, 'بدي أعدل أولوية مهمة «لوحة معدّلة»');
   let seenExtend; await f.run(undefined, tap(`TSKQ${PROGRESS}`, `TSK${PROGRESS}EXTEND`), async input => { seenExtend = input.text; return emptySecretaryIntent('clarify', 'لأي تاريخ؟'); });
   assert.equal(seenExtend, 'بدي أمدد موعد مهمة «لوحة معدّلة»');
 });
@@ -129,7 +131,7 @@ test('a task newly reassigned through chat privately notifies the new owner with
   assert.ok(toNewOwner?.choicesJson, 'the newly assigned owner must get a tappable poll, not just plain text');
   const choices = JSON.parse(toNewOwner.choicesJson);
   assert.equal(choices.id, `TSKQ${PROGRESS}`);
-  assert.deepEqual(choices.options.map(o => o.id), [`TSK${PROGRESS}CLAIM`, `TSK${PROGRESS}TRANSFER`], 'the task is open again after reassignment, so CLAIM/TRANSFER apply, not FINISH/NOTE/EXTEND');
+  assert.deepEqual(choices.options.map(o => o.id), [`TSK${PROGRESS}CLAIM`, `TSK${PROGRESS}TRANSFER`, `TSK${PROGRESS}EDIT`], 'the task is open again after reassignment, so CLAIM/TRANSFER/EDIT apply, not FINISH/NOTE/EXTEND');
 });
 test('a duplicate delivery of the same details view replays the identical poll for the employee, never denied', async t => {
   const f = fixture(t);

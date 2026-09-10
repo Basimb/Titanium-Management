@@ -77,7 +77,7 @@ function autoReminderPoll(tasks: ManagementTask[], actorName: string, now: numbe
   const options: Array<{ id: string; label: string }> = [];
   if (task.status === "open" && !task.owner) options.push({ id: `${base}CLAIM`, label: "\ud83d\udc4b \u0627\u0633\u062a\u0644\u0645\u062a \u0627\u0644\u0645\u0647\u0645\u0629" });
   if (task.status === "progress" && task.owner === actorName) options.push({ id: `${base}FINISH`, label: "\u2705 \u062e\u0644\u0635\u062a \u0627\u0644\u0645\u0647\u0645\u0629" }, { id: `${base}NOTE`, label: "\ud83d\udcdd \u0623\u0636\u064a\u0641 \u0645\u0644\u0627\u062d\u0638\u0629" });
-  if (task.status === "open" || task.status === "progress") options.push({ id: `${base}TRANSFER`, label: "\ud83d\udd04 \u062d\u0648\u0651\u0644\u0647\u0627 \u0644\u062d\u062f\u0627 \u063a\u064a\u0631\u064a" });
+  if (task.status === "open" || task.status === "progress") options.push({ id: `${base}TRANSFER`, label: "\ud83d\udd04 \u062d\u0648\u0651\u0644\u0647\u0627 \u0644\u062d\u062f\u0627 \u063a\u064a\u0631\u064a" }, { id: `${base}EDIT`, label: "\ud83d\udd27 \u063a\u064a\u0651\u0631 \u0627\u0644\u0623\u0648\u0644\u0648\u064a\u0629" });
   if (task.status === "progress" && task.owner === actorName) options.push({ id: `${base}EXTEND`, label: "\ud83d\udd50 \u0628\u062f\u064a \u062a\u0645\u062f\u064a\u062f" });
   return options.length >= 2 ? { id: `TSKQ${task.id}`, title: "\u0634\u0648 \u0628\u062f\u0643 \u062a\u0639\u0645\u0644 \u0628\u0647\u0627\u0644\u0645\u0647\u0645\u0629\u061f", expiresAt: now + 60 * 60_000, options } : undefined;
 }

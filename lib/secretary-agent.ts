@@ -4,7 +4,7 @@
  * files durable approvals, and never mutates without the action engine.
  */
 import type { DatabaseSync } from "node:sqlite";
-import { decideApproval, findPendingApproval, formatApprovalChoice, formatPendingList, listApprovals, patchTaskCreateApproval, requestDeadlineExtension, requestProjectClose, requestProjectCreate, requestTaskClose, requestTaskOwnership, requestTaskTransfer, approvalTypeLabel, type Approval } from "./approvals.ts";
+import { decideApproval, findPendingApproval, formatApprovalChoice, formatPendingList, listApprovals, patchTaskCreateApproval, requestDeadlineExtension, requestPriorityChange, requestProjectClose, requestProjectCreate, requestTaskClose, requestTaskOwnership, requestTaskTransfer, approvalTypeLabel, type Approval } from "./approvals.ts";
 import { executeManagementAction, ManagementActionError, type ManagementActor } from "./management-actions.ts";
 import { addKnowledge, formatKnowledgeHits, searchKnowledge } from "./knowledge.ts";
 import { activeRules, formatRules, policyViolations, proposeRuleFromStatement, recordCorrection, suggestOwner } from "./rules.ts";
@@ -25,7 +25,7 @@ export type AgentContext = {
   // "no live poll possible here" and every choice-builder below degrades to
   // its existing text-only reply, exactly as it did before this field existed.
   conversationKey?: string;
-  users: Array<{ id: string; name: string; active?: number }>; tasks: Array<{ id: string; title: string; projectId: string; status: string; owner: string | null; dueDate: string | null }>;
+  users: Array<{ id: string; name: string; active?: number }>; tasks: Array<{ id: string; title: string; projectId: string; status: string; owner: string | null; dueDate: string | null; priority: string }>;
   projects: Array<{ id: string; name: string; status: string }>;
   /** Store a pending command for the existing confirmation flow (token returned). */
   stash: (command: Record<string, unknown>) => string;
@@ -214,6 +214,21 @@ export function handleAgentIntent(plan: SecretaryIntent, ctx: AgentContext): Age
         }
         const request = requestDeadlineExtension(db, actor, { taskId: task.id, newDueDate: String(plan.fields.dueDate), reason }, { now });
         return { status: "applied", reply: `📨 رفعت طلب التمديد لباسم: ${request.approval.summary}\nالسبب: ${reason}\nبخبرك أول ما يقرر.`, taskId: task.id, notify: [{ userId: "basem", text: request.ownerMessage, choices: request.choices }], groupNotice: null };
+      }
+      case "priority_change": {
+        const task = ctx.tasks.find(candidate => candidate.id === plan.taskId);
+        if (!task) return { status: "clarify", reply: "أي مهمة تقصد؟" };
+        const newPriority = plan.fields.priority;
+        if (!newPriority) return { status: "clarify", reply: `شو الأولوية الجديدة لـ«${clean(task.title)}»؟ قصوى، متوسطة، أو عادية؟`, taskId: task.id };
+        const priorityLabel = (value: string) => value === "red" ? "🔴 قصوى" : value === "yellow" ? "🟡 متوسطة" : "🟢 عادية";
+        if (task.priority === newPriority) return { status: "clarify", reply: `«${clean(task.title)}» أصلًا ${priorityLabel(newPriority)}.`, taskId: task.id };
+        const statedReason = clean(plan.fields.reason, 1000);
+        if (owner) {
+          const token = ctx.stash({ action: "edit_task", taskId: task.id, priority: newPriority });
+          return { status: "confirmation", reply: `تعديل أولوية «${clean(task.title)}» إلى ${priorityLabel(newPriority)}.\nاكتب «موافق ${token}» للتنفيذ.`, taskId: task.id };
+        }
+        const request = requestPriorityChange(db, actor, { taskId: task.id, newPriority, ...(statedReason ? { reason: statedReason } : {}) }, { now });
+        return { status: "applied", reply: `📨 رفعت طلب تعديل الأولوية لباسم: ${request.approval.summary}\nبخبرك أول ما يقرر.`, taskId: task.id, notify: [{ userId: "basem", text: request.ownerMessage, choices: request.choices }], groupNotice: null };
       }
       case "close_request": {
         const task = ctx.tasks.find(candidate => candidate.id === plan.taskId);

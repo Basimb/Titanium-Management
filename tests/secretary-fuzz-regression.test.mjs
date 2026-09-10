@@ -86,7 +86,7 @@ test('randomized task-action polls: always 2-12 valid-charset options, always sc
 
 test('randomized poll taps (valid and adversarially malformed) never throw and always resolve to a real status', async t => {
   const ITERATIONS = 150;
-  const ACTIONS = ['CLAIM', 'FINISH', 'NOTE', 'TRANSFER', 'EXTEND', 'GARBAGE', '', 'CLAIMX'];
+  const ACTIONS = ['CLAIM', 'FINISH', 'NOTE', 'TRANSFER', 'EDIT', 'EXTEND', 'GARBAGE', '', 'CLAIMX'];
   for (let i = 0; i < ITERATIONS; i++) {
     const status = pick(['open', 'progress', 'approval', 'completed']);
     const employee = pick(EMPLOYEES);

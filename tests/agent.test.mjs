@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import { executeManagementAction, getManagementSnapshot, migrateManagementActions, ManagementActionError } from "../lib/management-actions.ts";
-import { decideApproval, findPendingApproval, listApprovals, requestDeadlineExtension, requestProjectClose, requestProjectCreate, requestTaskClose, requestTaskOwnership, requestTaskTransfer, staleApprovals } from "../lib/approvals.ts";
+import { decideApproval, findPendingApproval, listApprovals, requestDeadlineExtension, requestPriorityChange, requestProjectClose, requestProjectCreate, requestTaskClose, requestTaskOwnership, requestTaskTransfer, staleApprovals } from "../lib/approvals.ts";
 import { can, capabilities, inScope } from "../lib/permissions.ts";
 import { activeRules, policyViolations, proposeRuleFromStatement, recordCorrection, suggestOwner, CORRECTION_THRESHOLD } from "../lib/rules.ts";
 import { addKnowledge, searchKnowledge, formatKnowledgeHits } from "../lib/knowledge.ts";
@@ -81,6 +81,25 @@ test("member cannot edit deadlines directly; extension request goes to owner and
   assert.match(decision.notifyRequester, /وافق باسم/); assert.match(decision.notifyGroup, /مُدّد/);
   assert.throws(() => decideApproval(db, owner, { approvalId: approval.id, decision: "rejected" }, { now: T0 + 2 }), /حُسم/);
   assert.ok(db.prepare("SELECT COUNT(*) AS n FROM audit_logs WHERE action IN ('request_approval','approve_request')").get().n >= 2);
+});
+
+// Basim: "عدل المهمة، بدي أعدل... بأهميتها" -- same trust model as the
+// deadline-extension test right above: even a manager (task.edit capability
+// included) never changes a task's priority directly, this always files a
+// request to Basim first, mirroring requestDeadlineExtension exactly.
+test("member cannot edit priority directly; priority_change request goes to owner and applies on approval", t => {
+  const db = fixture(t);
+  assert.throws(() => executeManagementAction(db, khaled, { action: "edit_task", taskId: "t1", priority: "red" }, { now: T0 }), ManagementActionError);
+  const { approval, ownerMessage } = requestPriorityChange(db, khaled, { taskId: "t1", newPriority: "red", reason: "قصة عاجلة" }, { now: T0 });
+  assert.equal(approval.status, "pending"); assert.match(ownerMessage, /خالد طلب تعديل أولوية/);
+  assert.equal(db.prepare("SELECT priority FROM tasks WHERE id='t1'").get().priority, "yellow", "task unchanged before decision");
+  assert.throws(() => requestPriorityChange(db, khaled, { taskId: "t1", newPriority: "green" }, { now: T0 }), /مماثل/);
+  assert.throws(() => requestPriorityChange(db, khaled, { taskId: "t1", newPriority: "yellow" }, { now: T0 }), /أصلًا/, "requesting the current priority again is not a change");
+  assert.throws(() => decideApproval(db, khaled, { approvalId: approval.id, decision: "approved" }, { now: T0 + 1 }), ManagementActionError);
+  const decision = decideApproval(db, owner, { approvalId: approval.id, decision: "approved" }, { now: T0 + 1 });
+  assert.equal(decision.approval.status, "approved");
+  assert.equal(db.prepare("SELECT priority FROM tasks WHERE id='t1'").get().priority, "red");
+  assert.match(decision.notifyRequester, /وافق باسم/); assert.match(decision.notifyGroup, /عُدّلت أولوية/);
 });
 
 // Basim's complaint: proactive approval requests (deadline extension, task
@@ -333,6 +352,28 @@ test("agent handler: employee extension files a request and notifies owner; owne
   assert.equal(voiceDecide.status, "clarify", "nothing pending after decision");
 });
 
+// Mirrors the extension test right above exactly, for priority_change (the
+// EDIT poll button's target intent -- see taskActionPoll in
+// secretary-service.ts): an employee's request is filed for Basim, Basim
+// himself gets a direct confirmation token instead.
+test("agent handler: employee priority_change files a request and notifies owner; owner gets confirmation token instead", t => {
+  const db = fixture(t);
+  const base = { intakeMode: null, action: null, projectId: null, recipientIds: [], message: null, fields: { title: null, name: null, details: null, priority: "red", dueDate: null, ownerId: null, reason: "قصة عاجلة", body: null, remindAt: null } };
+  const snapshot = getManagementSnapshot(db, owner);
+  const ctx = actor => ({ db, actor, now: T0, users: snapshot.users, tasks: snapshot.tasks, projects: snapshot.projects, stash: () => "TXYZ" });
+  const clarify = handleAgentIntent({ ...base, kind: "priority_change", taskId: "t1", fields: { ...base.fields, priority: null } }, ctx(khaled));
+  assert.equal(clarify.status, "clarify", "no priority named yet must ask, not guess");
+  const member = handleAgentIntent({ ...base, kind: "priority_change", taskId: "t1" }, ctx(khaled));
+  assert.equal(member.status, "applied"); assert.equal(member.notify[0].userId, "basem");
+  assert.equal(listApprovals(db, owner).length, 1);
+  const already = handleAgentIntent({ ...base, kind: "priority_change", taskId: "t2", fields: { ...base.fields, priority: "yellow" } }, ctx(khaled));
+  assert.equal(already.status, "clarify", "t2's priority is already yellow by default");
+  const boss = handleAgentIntent({ ...base, kind: "priority_change", taskId: "t2" }, ctx(owner));
+  assert.equal(boss.status, "confirmation"); assert.match(boss.reply, /TXYZ/);
+  const decide = handleAgentIntent({ ...base, kind: "decide", action: "approve", taskId: null, message: "تعديل أولوية خالد" }, ctx(owner));
+  assert.equal(decide.status, "applied"); assert.equal(db.prepare("SELECT priority FROM tasks WHERE id='t1'").get().priority, "red");
+});
+
 // Basim reported that "ارفض الاول"/"رفض رقم 1" kept coming back with the exact
 // same "في أكثر من طلب مطابق" list no matter what he typed next, whenever two
 // or more unrelated requests were pending together. Root cause: the ordinal
@@ -456,7 +497,7 @@ test("follow-ups: overdue owner nudge once per day, stale approval to owner, dig
   assert.equal(overdueNudge.to, "962770000000@s.whatsapp.net");
   assert.doesNotMatch(overdueNudge.text, /https?:\/\//, "Basim: never put the dashboard link in an employee-facing task message");
   assert.ok(overdueNudge.choices, "an overdue nudge must offer tappable options too");
-  assert.deepEqual(overdueNudge.choices.options.map(o => o.id), ["TSKt1FINISH", "TSKt1NOTE", "TSKt1TRANSFER", "TSKt1EXTEND"]);
+  assert.deepEqual(overdueNudge.choices.options.map(o => o.id), ["TSKt1FINISH", "TSKt1NOTE", "TSKt1TRANSFER", "TSKt1EDIT", "TSKt1EXTEND"]);
   assert.equal(planFollowups(db, { ...config }, Date.UTC(2026, 8, 10, 20, 0)).length, 0, "outside working hours");
   const sent = [];
   const jobs = createFollowupJobs({ db, config, now: () => at });
@@ -494,7 +535,7 @@ test("unclaimed task: hourly nudge to its suggested owner during work hours, sto
   // nudge must offer a tappable claim/transfer poll instead of asking the
   // employee to type anything.
   assert.ok(plans[0].choices, "an unclaimed task's nudge must offer tappable options, not ask the employee to type");
-  assert.deepEqual(plans[0].choices.options.map(o => o.id), ["TSKt6CLAIM", "TSKt6TRANSFER"]);
+  assert.deepEqual(plans[0].choices.options.map(o => o.id), ["TSKt6CLAIM", "TSKt6TRANSFER", "TSKt6EDIT"]);
 
   assert.equal(planFollowups(db, config, Date.UTC(2026, 8, 10, 20, 0)).filter(plan => plan.kind === "unclaimed_task").length, 0, "outside working hours");
 

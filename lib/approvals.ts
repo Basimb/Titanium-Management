@@ -4,7 +4,7 @@ import { executeManagementAction, getManagementSnapshot, ManagementActionError, 
 import { can, isOwner, type PermissionActor } from "./permissions.ts";
 import type { SecretaryChoices } from "./secretary-choices.ts";
 
-export type ApprovalType = "deadline_extension" | "task_close" | "task_ownership" | "task_transfer" | "task_create" | "project_create" | "project_close" | "rule" | "policy";
+export type ApprovalType = "deadline_extension" | "priority_change" | "task_close" | "task_ownership" | "task_transfer" | "task_create" | "project_create" | "project_close" | "rule" | "policy";
 export type ApprovalStatus = "pending" | "approved" | "rejected" | "expired";
 export type Approval = {
   id: string; type: ApprovalType; status: ApprovalStatus; requestedBy: string; requestedByName: string;
@@ -16,7 +16,7 @@ export type ApprovalDecision = { approval: Approval; effect: ManagementResult | 
 export class ApprovalError extends ManagementActionError {}
 const fail = (status: number, code: string, message: string): never => { throw new ApprovalError(status, code, message); };
 const SELECT = "SELECT id,type,status,requested_by AS requestedBy,requested_by_name AS requestedByName,entity_type AS entityType,entity_id AS entityId,summary,payload,decided_by AS decidedBy,decision_note AS decisionNote,created_at AS createdAt,decided_at AS decidedAt,last_nudged_at AS lastNudgedAt FROM approvals";
-const TYPE_LABEL: Record<ApprovalType, string> = { deadline_extension: "تمديد موعد", task_close: "اعتماد إغلاق مهمة", task_ownership: "طلب مسؤولية مهمة", task_transfer: "طلب تحويل مهمة", task_create: "فتح مهمة", project_create: "فتح مشروع", project_close: "اعتماد إغلاق مشروع", rule: "اعتماد قاعدة", policy: "اعتماد سياسة" };
+const TYPE_LABEL: Record<ApprovalType, string> = { deadline_extension: "تمديد موعد", priority_change: "تعديل أولوية", task_close: "اعتماد إغلاق مهمة", task_ownership: "طلب مسؤولية مهمة", task_transfer: "طلب تحويل مهمة", task_create: "فتح مهمة", project_create: "فتح مشروع", project_close: "اعتماد إغلاق مشروع", rule: "اعتماد قاعدة", policy: "اعتماد سياسة" };
 const PRIORITY_ARABIC: Record<string, string> = { red: "🔴 عاجلة", yellow: "🟡 متوسطة", green: "🟢 عادية" };
 export const APPROVAL_TTL_MS = 14 * 24 * 60 * 60_000;
 // Every approval request DM ends with this same explicit 🟢/🔴 choice, so
@@ -116,6 +116,27 @@ export function requestDeadlineExtension(db: DatabaseSync, claimed: ManagementAc
   const at = now(options);
   const approval = insert(db, actor, { type: "deadline_extension", entityType: "task", entityId: task.id, summary, payload: { oldDueDate: task.dueDate, newDueDate, reason, taskTitle: task.title, expectedUpdatedAt: task.updatedAt } }, at);
   const ownerMessage = `${actor.name} طلب تمديد مهمة «${task.title}»\nالموعد السابق: ${task.dueDate ?? "غير محدد"}\nالموعد المقترح: ${newDueDate}\nالسبب: ${reason}${APPROVAL_CHOICE_HINT}`;
+  return { approval, ownerMessage, choices: approvalDecisionPoll(approval, at) };
+}
+
+/** Employee/manager asks to change a task's priority. Same trust model as
+ * requestDeadlineExtension -- nothing changes on the task until Basim decides,
+ * even for a manager who otherwise has the task.edit capability, since
+ * priority_change (like extension) is deliberately routed through this
+ * request path for everyone except Basim (see the "owner" check in
+ * secretary-agent.ts's priority_change case). */
+export function requestPriorityChange(db: DatabaseSync, claimed: ManagementActor, input: { taskId: string; newPriority: "red" | "yellow" | "green"; reason?: string }, options: { now?: number } = {}): { approval: Approval; ownerMessage: string; choices: SecretaryChoices } {
+  migrateManagementActions(db);
+  const actor = resolveManagementActor(db, claimed);
+  const task = visibleTask(db, actor, input.taskId);
+  if (!isOwner(actor as PermissionActor) && task.owner !== actor.name) return fail(403, "not_owned", "تعديل الأولوية متاح للمسؤول عن المهمة فقط");
+  if (task.status === "completed") return fail(409, "invalid_transition", "المهمة معتمدة بالفعل");
+  if (task.priority === input.newPriority) return fail(400, "not_a_change", "هذي أصلًا أولوية المهمة الحالية");
+  const reason = text(input.reason, "سبب تعديل الأولوية", 1000, true);
+  const summary = `تعديل أولوية «${task.title}» من ${PRIORITY_ARABIC[task.priority]} إلى ${PRIORITY_ARABIC[input.newPriority]}`;
+  const at = now(options);
+  const approval = insert(db, actor, { type: "priority_change", entityType: "task", entityId: task.id, summary, payload: { oldPriority: task.priority, newPriority: input.newPriority, reason, taskTitle: task.title, expectedUpdatedAt: task.updatedAt } }, at);
+  const ownerMessage = `${actor.name} طلب تعديل أولوية مهمة «${task.title}»\nمن: ${PRIORITY_ARABIC[task.priority]}\nإلى: ${PRIORITY_ARABIC[input.newPriority]}${reason ? `\nالسبب: ${reason}` : ""}${APPROVAL_CHOICE_HINT}`;
   return { approval, ownerMessage, choices: approvalDecisionPoll(approval, at) };
 }
 
@@ -292,6 +313,11 @@ export function decideApproval(db: DatabaseSync, claimed: ManagementActor, input
           notifyGroup = `📅 مُدّد موعد مهمة «${approval.payload.taskTitle}» إلى ${approval.payload.newDueDate}`;
           break;
         }
+        case "priority_change": {
+          effect = executeManagementAction(db, actor, { action: "edit_task", taskId: approval.entityId!, priority: approval.payload.newPriority as "red" | "yellow" | "green" }, { now: at, source: "approval", auditContext: { origin: "approval", confirmedBy: actor.id } });
+          notifyGroup = `${PRIORITY_ARABIC[String(approval.payload.newPriority)]} عُدّلت أولوية مهمة «${approval.payload.taskTitle}»`;
+          break;
+        }
         case "task_close": {
           effect = executeManagementAction(db, actor, { action: "approve", taskId: approval.entityId! }, { now: at, source: "approval", auditContext: { origin: "approval", confirmedBy: actor.id } });
           notifyGroup = `✅ اعتُمد إغلاق مهمة «${approval.payload.taskTitle}» (${approval.requestedByName})`;
@@ -382,6 +408,7 @@ export function findPendingApproval(db: DatabaseSync, claimed: ManagementActor, 
   if (!hint.type && !hint.requesterName && hint.text) {
     const lower = normalize(hint.text);
     if (/تمديد|مهله|موعد/.test(lower)) candidates = candidates.filter(approval => approval.type === "deadline_extension");
+    else if (/اولوي|أهمي|اهمي/.test(lower)) candidates = candidates.filter(approval => approval.type === "priority_change");
     else if (/مشروع/.test(lower) && /اغلاق|سكر|ارشف|انهاء/.test(lower)) candidates = candidates.filter(approval => approval.type === "project_close");
     else if (/اغلاق|انهاء|خلص/.test(lower)) candidates = candidates.filter(approval => approval.type === "task_close");
     else if (/تحويل|حول/.test(lower)) candidates = candidates.filter(approval => approval.type === "task_transfer");

@@ -17,7 +17,12 @@ function fixture(t) {
     INSERT INTO users VALUES('basem','باسم','admin',1,NULL,1,1),('member','خالد','member',1,NULL,1,1),('other','شادي','member',1,NULL,1,1);
     INSERT INTO projects VALUES('p','مشروع تجريبي','active','باسم',1,NULL,NULL,NULL),('p2','مشروع ثان','active','باسم',1,NULL,NULL,NULL);
     INSERT INTO tasks VALUES('t','p','لوحة','تفاصيل تنفيذ','red','progress','خالد','خالد',1,'2026-01-01',NULL,NULL,1,1,NULL,NULL),
-      ('private','p2','مهمة شادي الخاصة','تفاصيل سرية','yellow','progress','شادي','شادي',1,NULL,NULL,NULL,1,1,NULL,NULL);`);
+      ('private','p2','مهمة شادي الخاصة','تفاصيل سرية','yellow','progress','شادي','شادي',1,NULL,NULL,NULL,1,1,NULL,NULL);
+    -- secretaryTaskCard no longer surfaces task.details at all (Basim: "شيل
+    -- المطلوب من القصة") -- the last comment is now the only detail-bearing
+    -- text a "details" reply shows, so the sensitive marker this file's
+    -- leak tests look for has to live there instead of in task.details.
+    INSERT INTO comments VALUES(1,'private','شادي','تفاصيل سرية',1);`);
   migrateSecretary(db);
   const config = { enabled:true, sharedKey:'ab'.repeat(32), contacts:[{userId:'basem',number:'12025550103'},{userId:'member',number:'12025550101'},{userId:'other',number:'12025550102'}],allowedGroupIds:['12345@g.us'] };
   let count = 0, now = 1788580000000;

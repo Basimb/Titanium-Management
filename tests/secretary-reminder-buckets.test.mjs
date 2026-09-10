@@ -54,7 +54,7 @@ test('a single-task reminder attaches that task\'s own action poll', async t2 =>
   const plans = planFollowups(db, config, morning).filter(p => p.kind === 'auto_reminder_morning' && p.targetUser === 'member');
   assert.ok(plans[0].choices, 'a reminder naming exactly one task should offer its poll');
   assert.equal(plans[0].choices.id, 'TSKQsolo');
-  assert.deepEqual(plans[0].choices.options.map(o => o.id), ['TSKsoloFINISH', 'TSKsoloNOTE', 'TSKsoloTRANSFER', 'TSKsoloEXTEND']);
+  assert.deepEqual(plans[0].choices.options.map(o => o.id), ['TSKsoloFINISH', 'TSKsoloNOTE', 'TSKsoloTRANSFER', 'TSKsoloEDIT', 'TSKsoloEXTEND']);
 });
 
 test('the on-demand "ابعت تذكير المهام الآن" broadcast also buckets by due date', async t2 => {

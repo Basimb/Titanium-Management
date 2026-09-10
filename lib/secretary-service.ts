@@ -281,7 +281,13 @@ export function secretaryTaskCard(task: Task, state: Snapshot, now: number, deta
   const latest = state.comments.filter(c => c.taskId === task.id).sort((a, b) => b.createdAt - a.createdAt)[0];
   const priority = PRIORITIES[task.priority];
   const overdue = task.status !== "completed" && task.dueDate && task.dueDate < new Date(now + 3 * 3600_000).toISOString().slice(0, 10);
-  return `${priority?.icon || "⚪"} ${clean(task.title, 150)}\n${LABELS[task.status] || clean(task.status)}${overdue ? " • متأخرة عن الموعد" : ""}\nالأولوية: ${priority?.label || "غير محددة"}\nالمسؤول: ${clean(task.owner || task.suggestedOwner || "لم يُعيّن")} ${task.dueDate ? `• الموعد: ${clean(task.dueDate, 10)}` : ""}${detailed ? `\nالمطلوب: ${clean(task.details || "لا توجد تفاصيل إضافية", 600)}${latest ? `\nآخر تحديث (${clean(latest.author, 50)}): ${clean(latest.body, 500)}` : "\nلا يوجد تحديث مسجّل بعد."}` : ""}`;
+  // Basim: "شو المطلوب أولوية قصوى؟ شيل المطلوب من القصة" -- this line used to
+  // always show "المطلوب: <task.details, or a filler line when empty>", which
+  // for a task whose details is empty just echoed the priority back at him
+  // (or printed a meaningless "لا توجد تفاصيل إضافية" filler) and read as
+  // noise. He only wants the task itself, its status/who/when, and the last
+  // update -- never a "required" line, whether or not details is set.
+  return `${priority?.icon || "⚪"} ${clean(task.title, 150)}\n${LABELS[task.status] || clean(task.status)}${overdue ? " • متأخرة عن الموعد" : ""}\nالأولوية: ${priority?.label || "غير محددة"}\nالمسؤول: ${clean(task.owner || task.suggestedOwner || "لم يُعيّن")} ${task.dueDate ? `• الموعد: ${clean(task.dueDate, 10)}` : ""}${detailed ? `\n${latest ? `آخر تحديث (${clean(latest.author, 50)}): ${clean(latest.body, 500)}` : "لا يوجد تحديث مسجّل بعد."}` : ""}`;
 }
 // Basim: "لما أسأله مين أكثر موظف عنده مهام، يحلل ويعطيني إنه أيمن عنده 17
 // مهمة" -- ranks every active employee (never Basim himself) by their open,
@@ -510,14 +516,14 @@ function parseApprovalPollChoice(event: Event): { approvalId: string; decision: 
 // dedicated branch in handleSecretaryEvent). NOTE/TRANSFER/EXTEND need
 // content a tap can't carry (a note's body, a colleague's name, a new date),
 // so those are handled below by resolveTaskActionTextChoice instead.
-function parseTaskActionPollChoice(event: Event): { taskId: string; action: "claim" | "submit" | "note" | "transfer" | "extend" } | null {
+function parseTaskActionPollChoice(event: Event): { taskId: string; action: "claim" | "submit" | "note" | "transfer" | "extend" | "edit" } | null {
   const choice = event.choice;
   if (!choice || !choice.questionId.startsWith("TSKQ")) return null;
   const taskId = choice.questionId.slice(4);
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(taskId)) return null;
   const prefix = `TSK${taskId}`;
   if (!choice.optionId.startsWith(prefix)) return null;
-  const ACTIONS: Record<string, "claim" | "submit" | "note" | "transfer" | "extend"> = { CLAIM: "claim", FINISH: "submit", NOTE: "note", TRANSFER: "transfer", EXTEND: "extend" };
+  const ACTIONS: Record<string, "claim" | "submit" | "note" | "transfer" | "extend" | "edit"> = { CLAIM: "claim", FINISH: "submit", NOTE: "note", TRANSFER: "transfer", EXTEND: "extend", EDIT: "edit" };
   const action = ACTIONS[choice.optionId.slice(prefix.length)];
   return action ? { taskId, action } : null;
 }
@@ -543,6 +549,7 @@ function resolveTaskActionTextChoice(db: DatabaseSync, event: Event): Event {
   const title = clean(task.title, 150);
   const text = parsed.action === "note" ? `بدي أضيف ملاحظة على مهمة «${title}»`
     : parsed.action === "transfer" ? `بدي أحول مهمة «${title}» لحدا غيري`
+    : parsed.action === "edit" ? `بدي أعدل أولوية مهمة «${title}»`
     : `بدي أمدد موعد مهمة «${title}»`;
   return { ...event, text, choice: undefined };
 }
@@ -559,7 +566,7 @@ function taskActionPoll(task: { id: string; title: string; status: string; owner
   const options: Array<{ id: string; label: string }> = [];
   if (task.status === "open" && task.owner === null) options.push({ id: `${base}CLAIM`, label: "👋 استلمت المهمة" });
   if (task.status === "progress" && task.owner === actorName) options.push({ id: `${base}FINISH`, label: "✅ خلصت المهمة" }, { id: `${base}NOTE`, label: "📝 أضيف ملاحظة" });
-  if (task.status === "open" || task.status === "progress") options.push({ id: `${base}TRANSFER`, label: "🔄 حوّلها لحدا غيري" });
+  if (task.status === "open" || task.status === "progress") options.push({ id: `${base}TRANSFER`, label: "🔄 حوّلها لحدا غيري" }, { id: `${base}EDIT`, label: "🔧 غيّر الأولوية" });
   if (task.status === "progress" && task.owner === actorName) options.push({ id: `${base}EXTEND`, label: "🕐 بدي تمديد" });
   return options.length >= 2 ? { id: `TSKQ${task.id}`, title: "شو بدك تعمل بهالمهمة؟", expiresAt: now + 60 * 60_000, options } : undefined;
 }

@@ -19,7 +19,7 @@ test('conversational provider keeps task planner schema and untrusted context bo
   assert.equal(body.model,'gpt-4o');
   assert.equal(body.tool_choice,'required');
   assert.equal(body.parallel_tool_calls,false);
-  assert.equal(body.tools.length,25);
+  assert.equal(body.tools.length,26);
   assert.ok(body.tools.every(tool=>tool.type==='function' && tool.function.strict===true));
   assert.equal(body.tools.find(tool=>tool.function.name==='chat').function.parameters.required.includes('message'),true);
   assert.equal(body.messages.length,2);
