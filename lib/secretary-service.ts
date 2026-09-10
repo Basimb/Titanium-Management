@@ -374,16 +374,29 @@ function readReply(plan: SecretaryIntent, actor: ChatUser, state: Snapshot, now:
   // users list, same as task_transfer_request/correction) narrows the same
   // report shape down to one person's own tasks instead of a second kind.
   const reportOwner = plan.kind === "report" && plan.fields.ownerId ? state.users.find(u => u.id === plan.fields.ownerId) : null;
-  const tasks = state.tasks.filter(t => !t.archivedAt && (!reportOwner || (t.owner || t.suggestedOwner) === reportOwner.name));
+  // Same complaint, different axis: "مين عنده مهام مش مستلمة؟" used to get the
+  // FULL overview back (every status, including already-claimed progress
+  // tasks) because report had no status filter at all -- Basim naming a
+  // status ("مش مستلمة", "قيد التنفيذ"...) now narrows the same report shape
+  // down to just that one lifecycle status instead of dumping everything.
+  const reportStatus = plan.kind === "report" ? plan.fields.status : null;
+  const tasks = state.tasks.filter(t => !t.archivedAt && (!reportOwner || (t.owner || t.suggestedOwner) === reportOwner.name) && (!reportStatus || t.status === reportStatus));
   const today = new Date(now + 3 * 3600_000).toISOString().slice(0, 10);
   const overdue = tasks.filter(t => t.status !== "completed" && t.dueDate && t.dueDate < today);
   const pending = tasks.filter(t => t.status === "approval");
-  const header = plan.kind === "report" ? `📋 *${reportOwner ? `ملخص مهام ${clean(reportOwner.name, 60)}` : "ملخص الإدارة"}*\nمعتمدة: ${tasks.filter(t => t.status === "completed").length}\nقيد التنفيذ: ${tasks.filter(t => t.status === "progress").length}\nبانتظار باسم: ${pending.length}\nمتأخرة بموعد مسجل: ${overdue.length}\nبدون موعد: ${tasks.filter(t => !t.dueDate && t.status !== "completed").length}\n🔴 قصوى: ${tasks.filter(t => t.priority === "red").length} • 🟡 متوسطة: ${tasks.filter(t => t.priority === "yellow").length} • 🟢 عادية: ${tasks.filter(t => t.priority === "green").length}\n` : `${greeting}المهام المتاحة إلك: ${tasks.length}\n`;
+  // The full معتمدة/قيد التنفيذ/... breakdown only makes sense across every
+  // status at once -- once reportStatus narrows `tasks` to a single status,
+  // that breakdown would just echo the same total back under one line and
+  // zeros under all the others, so it's replaced by a single count naming
+  // the status actually asked for.
+  const header = plan.kind === "report" ? `📋 *${reportOwner ? `ملخص مهام ${clean(reportOwner.name, 60)}` : "ملخص الإدارة"}*\n${reportStatus ? `${LABELS[reportStatus] || clean(reportStatus)}: ${tasks.length}\n`
+    : `معتمدة: ${tasks.filter(t => t.status === "completed").length}\nقيد التنفيذ: ${tasks.filter(t => t.status === "progress").length}\nبانتظار باسم: ${pending.length}\nمتأخرة بموعد مسجل: ${overdue.length}\nبدون موعد: ${tasks.filter(t => !t.dueDate && t.status !== "completed").length}\n🔴 قصوى: ${tasks.filter(t => t.priority === "red").length} • 🟡 متوسطة: ${tasks.filter(t => t.priority === "yellow").length} • 🟢 عادية: ${tasks.filter(t => t.priority === "green").length}\n`}` : `${greeting}المهام المتاحة إلك: ${tasks.length}\n`;
   // orderedTasks always re-derives its own list from the FULL state.tasks --
-  // it knows nothing about reportOwner -- so without this filter the report
-  // header would say "ملخص مهام خالد" while the grouped listing below it
-  // still dumped every task from everyone, exactly the bug being fixed here.
-  const ordered = orderedTasks(state, now).filter(t => !reportOwner || (t.owner || t.suggestedOwner) === reportOwner.name);
+  // it knows nothing about reportOwner/reportStatus -- so without this filter
+  // the report header would say "ملخص مهام خالد" (or name one status) while
+  // the grouped listing below it still dumped every task from everyone in
+  // every status, exactly the bug being fixed here.
+  const ordered = orderedTasks(state, now).filter(t => (!reportOwner || (t.owner || t.suggestedOwner) === reportOwner.name) && (!reportStatus || t.status === reportStatus));
   if (plan.kind === "summary") {
     const list = numberedTaskList(ordered, now);
     const reply = `${header.trimEnd()}${list ? `\n${list}` : "\nما في مهام متاحة إلك حاليًا."}\n\nتم عرض جميع المهام (${ordered.length}).\nاختار رقم المهمة كما هو مكتوب، مثل: «رقم 12».`;
@@ -1035,7 +1048,7 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
       // Only the stored opaque option selects a value; the submitted display label is not an instruction.
       const draft = { ...current, ...(selected.value === null ? {} : { [selected.field]: selected.value }) } as TaskDraft;
       const plan: SecretaryIntent = { kind: "task_draft", intakeMode: "continue", action: null, taskId: null, projectId: draft.projectId, recipientIds: [], message: null,
-        fields: { title: draft.title, details: draft.details, ownerId: draft.ownerId, priority: draft.priority, dueDate: draft.dueDate, name: null, reason: null, body: null, remindAt: null } };
+        fields: { title: draft.title, details: draft.details, ownerId: draft.ownerId, priority: draft.priority, dueDate: draft.dueDate, name: null, reason: null, body: null, remindAt: null, status: null } };
       return taskIntake(db, event, freshActor, state, plan, key, current, now, selected.value === null ? selected.field : undefined);
     } catch (error) {
       if (!(error instanceof SecretaryChoiceError) && !(error instanceof ManagementActionError)) throw error;

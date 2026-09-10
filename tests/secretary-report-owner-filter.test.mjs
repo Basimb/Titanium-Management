@@ -28,7 +28,8 @@ function fixture(t) {
   const event = (text, extra = {}) => ({ messageId: `DIRECT-${++sequence}`, responseMessageId: `REPLY-${sequence}`, senderNumber: '12025550103', groupId: null, text, receivedAt: now, ...extra });
   const run = (e, infer = async () => { throw Error('the deterministic flow must not invoke the provider'); }) => handleSecretaryEvent(db, e, config, { infer, now: () => now });
   const reportPlan = ownerId => { const p = emptySecretaryIntent('report'); return { ...p, fields: { ...p.fields, ownerId } }; };
-  return { db, event, run, reportPlan };
+  const statusPlan = (status, ownerId = null) => { const p = emptySecretaryIntent('report'); return { ...p, fields: { ...p.fields, status, ownerId } }; };
+  return { db, event, run, reportPlan, statusPlan };
 }
 
 test('"مهام خالد" (report with fields.ownerId) returns only that person\'s tasks, never everyone\'s', async t => {
@@ -58,4 +59,37 @@ test('an unrecognized ownerId asks who exactly, instead of guessing or dumping e
   const r = await f.run(f.event('مهام شخص غير مسجل'), async () => ({ ...p, fields: { ...p.fields, ownerId: 'ghost' } }));
   assert.equal(r.status, 'clarify');
   assert.match(r.reply, /مين الموظف المسجّل/);
+});
+
+// Basim's other complaint about the same "dumps everything" bug, on the
+// status axis instead of the person axis: "مين عنده مهام مش مستلمة؟" used to
+// get the full overview back (every status, claimed tasks included) because
+// report had no status filter at all -- fields.status now narrows the same
+// report shape to exactly one lifecycle status.
+test('"مين عنده مهام مش مستلمة؟" (report with fields.status=open) returns only unclaimed tasks, never claimed/in-progress ones', async t => {
+  const f = fixture(t);
+  const r = await f.run(f.event('مين عنده مهام مش مستلمة؟'), async () => f.statusPlan('open'));
+  assert.equal(r.status, 'summary');
+  assert.match(r.reply, /بانتظار الاستلام: 2/);
+  assert.match(r.reply, /مهمة خالد الثانية/);
+  assert.match(r.reply, /مهمة شادي/);
+  assert.doesNotMatch(r.reply, /مهمة خالد(?! الثانية)/, 'the already-claimed (progress) task must never appear in an unclaimed-only report');
+});
+
+test('a status filter combined with a named person narrows to just that person\'s tasks in that one status', async t => {
+  const f = fixture(t);
+  const r = await f.run(f.event('مين عنده مهام مش مستلمة'), async () => f.statusPlan('open', 'member'));
+  assert.equal(r.status, 'summary');
+  assert.match(r.reply, /ملخص مهام خالد/);
+  assert.match(r.reply, /مهمة خالد الثانية/);
+  assert.doesNotMatch(r.reply, /مهمة شادي/);
+});
+
+test('a status filter for a status with no matching tasks says so plainly instead of silently listing everything', async t => {
+  const f = fixture(t);
+  const r = await f.run(f.event('شو المهام المعتمدة؟'), async () => f.statusPlan('completed'));
+  assert.equal(r.status, 'summary');
+  assert.match(r.reply, /معتمدة: 0/);
+  assert.doesNotMatch(r.reply, /مهمة خالد/);
+  assert.doesNotMatch(r.reply, /مهمة شادي/);
 });
