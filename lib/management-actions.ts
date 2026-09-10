@@ -360,7 +360,15 @@ export function executeManagementAction(sqlite: DatabaseSync, claimed: Managemen
             message = `عدّل المهمة: ${task.title}`; auditAction = "edit"; break;
           }
           case "claim":
-            if (task.status !== "open" || (task.owner !== null && task.owner !== actor.name)) return fail(409, "invalid_transition", "المهمة ليست متاحة للاستلام");
+            // A stale/duplicate poll (an old task-action message tapped after the
+            // task has already moved on -- claimed, submitted, rejected back to
+            // its owner...) is expected to land here; naming who already has it
+            // (or that the tapper already does) tells the tapper what actually
+            // happened instead of a generic "not available" that reads like a bug.
+            if (task.status !== "open" || (task.owner !== null && task.owner !== actor.name)) return fail(409, "invalid_transition",
+              task.owner === actor.name ? "هاي المهمة أصلاً مستلمة عندك من قبل، ما في داعي تستلمها من جديد"
+                : task.owner ? `هاي المهمة أصلاً مستلمة من ${task.owner}`
+                  : "المهمة ليست متاحة للاستلام");
             if (!manager && task.suggestedOwner !== actor.name) return fail(403, "not_assigned", "هذه المهمة لم يعيّنها باسم لك");
             Object.assign(changes, { status: "progress", owner: actor.name, started_at: at, completed_at: null, rejection_reason: null, last_update_at: at });
             message = `استلم المهمة وبدأ تنفيذها: ${task.title}`; auditAction = "claim"; break;

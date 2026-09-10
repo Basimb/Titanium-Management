@@ -116,6 +116,20 @@ test("assigned-only claim and cross-task access are enforced", t => {
   assert.equal(canViewManagementTask(member, { owner: other.name, suggestedOwner: member.name }), false);
 });
 
+// A stale/duplicate poll tap on "claim" (the old bug where a swallowed resend
+// left several copies of the same poll live, one of them tapped after the
+// task had already moved on) must tell the tapper what actually happened --
+// "already yours" or "already someone else's" -- not a generic "not
+// available" that reads like the tap itself failed for no reason.
+test("re-claiming an already-claimed task names who has it instead of a generic refusal", t => {
+  const db = fixture(t);
+  run(db, { action: "claim", taskId: "assigned" }, member);
+  assert.throws(() => run(db, { action: "claim", taskId: "assigned" }, member),
+    error => error instanceof ManagementActionError && error.code === "invalid_transition" && /أصلاً مستلمة عندك/.test(error.message));
+  assert.throws(() => run(db, { action: "claim", taskId: "private" }, admin),
+    error => error instanceof ManagementActionError && error.code === "invalid_transition" && error.message.includes(`أصلاً مستلمة من ${other.name}`));
+});
+
 test("comment records text without changing status; submit requires final admin approval", t => {
   const db = fixture(t);
   run(db, { action: "comment", taskId: "own", comment: "أنجزت جزءًا وباقي جزء" }, member);
