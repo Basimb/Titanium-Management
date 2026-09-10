@@ -196,6 +196,31 @@ test('a NOTE/TRANSFER/EXTEND tap for a task removed since the poll was sent fall
   let seen; await f.run(undefined, { text: '📝 أضيف ملاحظة', ...tap(`TSKQ${PROGRESS}`, `TSK${PROGRESS}NOTE`) }, async input => { seen = input; return emptySecretaryIntent('chat', 'تمام'); });
   assert.equal(seen.text, '📝 أضيف ملاحظة', 'the poll option label, since there is no live task left to rewrite around');
 });
+// Basim: "بدي هذه تتحول تصويت للكل وفي كل مكان" -- the standalone command
+// legend (see notifyTaskLegend/TASK_COMMANDS_LEGEND/taskCommandsLegendPoll in
+// lib/secretary-service.ts) must now carry its own tappable poll of the same
+// four bare commands it already tells people to type, everywhere it's sent.
+test('the standalone command legend carries a tappable poll of its own four commands', async t => {
+  const f = fixture(t);
+  await f.run(undefined, tap(`TSKQ${OPEN}`, `TSK${OPEN}CLAIM`), async () => { throw Error('must not ask the model'); });
+  const legend = outbox(f.db).find(r => r.toUser === 'member' && /تذكير بأوامر المهام/.test(r.text));
+  assert.ok(legend?.choicesJson, 'the legend message must carry a poll, not go out as plain text alone');
+  const choices = JSON.parse(legend.choicesJson);
+  assert.equal(choices.id, 'LGDQ');
+  assert.deepEqual(choices.options.map(o => o.id), ['LGDTRANSFER', 'LGDFINISH', 'LGDNOTE', 'LGDADD']);
+  assert.equal(choices.expiresAt - f.now, 60 * 60_000, 'a WhatsApp poll cannot outlive a 1-hour expiry');
+});
+test('tapping a legend poll option rewrites the tap into the exact bare command a person would type, generic to any task', async t => {
+  const f = fixture(t);
+  let seenTransfer; await f.run(undefined, tap('LGDQ', 'LGDTRANSFER'), async input => { seenTransfer = input.text; return emptySecretaryIntent('clarify', 'أي مهمة؟'); });
+  assert.equal(seenTransfer, 'تحويل المهمة');
+  let seenFinish; await f.run(undefined, tap('LGDQ', 'LGDFINISH'), async input => { seenFinish = input.text; return emptySecretaryIntent('clarify', 'أي مهمة؟'); });
+  assert.equal(seenFinish, 'انهاء المهمة');
+  let seenNote; await f.run(undefined, tap('LGDQ', 'LGDNOTE'), async input => { seenNote = input.text; return emptySecretaryIntent('clarify', 'أي مهمة؟'); });
+  assert.equal(seenNote, 'اضافة ملاحظة');
+  let seenAdd; await f.run(undefined, tap('LGDQ', 'LGDADD'), async input => { seenAdd = input.text; return emptySecretaryIntent('clarify', 'أي مشروع؟'); });
+  assert.equal(seenAdd, 'اضافة مهمة');
+});
 test('a task newly reassigned through chat privately notifies the new owner with a CLAIM/TRANSFER poll of their own', async t => {
   const f = fixture(t); const admin = { senderNumber: '12025550103' };
   const p = { ...emptySecretaryIntent('command'), action: 'reassign', taskId: PROGRESS, fields: { ...emptySecretaryIntent('command').fields, ownerId: 'other' } };

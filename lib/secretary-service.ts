@@ -48,13 +48,42 @@ const SENSITIVE = new Set(["edit_project", "approve_project", "reject_project", 
 // type about a task, sent as a SEPARATE follow-up message right after any
 // task-related message reaches that employee. See notifyTaskLegend below.
 const TASK_COMMANDS_LEGEND = "🧭 تذكير بأوامر المهام:\n• لتحويل المهمة: اكتب «تحويل المهمة»\n• لاعتماد إنهاء المهمة: اكتب «انهاء المهمة»\n• لإضافة ملاحظة: اكتب «اضافة ملاحظة» مع رقم المهمة\n• لإضافة مهمة جديدة: اكتب «اضافة مهمة»";
+// Basim: "بدي هذه تتحول تصويت للكل وفي كل مكان" -- the legend above is plain
+// text everywhere it's sent, so attach a poll alongside it (same trick as
+// resolveTaskActionTextChoice's NOTE/TRANSFER/EDIT/EXTEND below) whose four
+// options are just the exact bare command phrases the legend already tells
+// people to type. A tap is rewritten to that literal text, once, at the very
+// top of the pipeline (resolveTaskCommandsLegendChoice), then falls through
+// the SAME existing handling a person typing it themselves already gets --
+// no new task-resolution logic, since these commands are already generic
+// (not bound to one task) exactly like their typed form is today. Unlike
+// taskActionPoll (bound to one task's id in its option ids), this poll is
+// identical everywhere it's attached, so it needs no task/actor context.
+function taskCommandsLegendPoll(now: number): SecretaryChoices {
+  return { id: "LGDQ", title: "🧭 أو اضغط أي أمر مباشرة:", expiresAt: now + 60 * 60_000, options: [
+    { id: "LGDTRANSFER", label: "🔄 تحويل المهمة" }, { id: "LGDFINISH", label: "✅ انهاء المهمة" },
+    { id: "LGDNOTE", label: "📝 اضافة ملاحظة" }, { id: "LGDADD", label: "🆕 اضافة مهمة" }] };
+}
+// Inverse of taskCommandsLegendPoll: a tapped option arrives as an ordinary
+// event with event.choice set. This poll carries no task/actor-specific
+// state in its option ids (unlike CFM/TSKQ/TCLQ above), so unlike those it
+// never needs a live DB/state check here -- rewriting to the literal command
+// text is always valid, and the normal pipeline resolves it exactly as it
+// would for someone typing the same word.
+function resolveTaskCommandsLegendChoice(event: Event): Event {
+  const choice = event.choice;
+  if (!choice || choice.questionId !== "LGDQ") return event;
+  const TEXT: Record<string, string> = { LGDTRANSFER: "تحويل المهمة", LGDFINISH: "انهاء المهمة", LGDNOTE: "اضافة ملاحظة", LGDADD: "اضافة مهمة" };
+  const text = TEXT[choice.optionId];
+  return text ? { ...event, text, choice: undefined } : event;
+}
 /** Queues the command legend as its own WhatsApp message (never in the same
  * bubble as the task message itself) for a real employee recipient only --
  * never for Basim and never for the group. Call this right alongside every
  * task-related message/notice an employee receives, per Basim's request. */
 function notifyTaskLegend(db: DatabaseSync, toUser: string, now: number) {
   if (toUser === "basem" || toUser === "group") return;
-  enqueueAgentMessage(db, { toUser, text: TASK_COMMANDS_LEGEND }, now);
+  enqueueAgentMessage(db, { toUser, text: TASK_COMMANDS_LEGEND, choices: taskCommandsLegendPoll(now) }, now);
 }
 // Basim: don't display a completed task's status as "معتمدة" (approved) --
 // display "مكتملة" (completed) instead. Same underlying status value
@@ -890,6 +919,7 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
 }): Promise<Result> {
   migrateSecretary(db); const now = (dependencies.now || Date.now)();
   event = resolveConfirmChoice(event);
+  event = resolveTaskCommandsLegendChoice(event);
   event = resolveTaskActionTextChoice(db, event);
   event = resolveTaskCloseDecisionRejectChoice(db, event);
   const actor = actorFor(db, event, config); if (!actor) return { status: "denied", reply: "" };
