@@ -650,6 +650,18 @@ test('admin adding a task directly for someone else broadcasts to the group and 
  assert.ok(rows.some(r=>r.toUser==='other'),'the assigned owner must get a private heads-up');
  assert.ok(rows.some(r=>r.toUser==='other'&&/تذكير بأوامر المهام/.test(r.text)),'the newly assigned employee also gets the standalone command legend');
  assert.ok(!rows.some(r=>r.toUser==='basem'));
+ // The legend used to follow the task-specific CLAIM/TRANSFER poll as a
+ // SECOND poll to the same new owner one millisecond later, which silently
+ // superseded (broke the tap-ability of) that first poll at the WhatsApp
+ // bridge layer -- see lib/secretary-service.ts notifyTaskLegend. The task
+ // poll must still carry real options, and the legend that follows it must
+ // never carry a competing poll of its own.
+ const toOther=f.db.prepare("SELECT text, choices_json AS choicesJson FROM agent_outbox WHERE to_user='other' ORDER BY id").all();
+ const taskPoll=toOther.find(r=>r.choicesJson&&/تحديث على مهمتك/.test(r.text));
+ assert.ok(taskPoll,'the new owner must get a real tappable task poll, not just plain text');
+ assert.ok(JSON.parse(taskPoll.choicesJson).options.some(o=>/CLAIM$/.test(o.id)),'a brand-new, unclaimed task must offer CLAIM');
+ const legendRow=toOther.find(r=>/تذكير بأوامر المهام/.test(r.text));
+ assert.equal(legendRow.choicesJson,null,'the legend must never compete with the task poll just sent to the same person');
 });
 test('an employee proposing a new task files it for Basim and gets the command legend, never Basim',async t=>{
  const f=fixture(t);

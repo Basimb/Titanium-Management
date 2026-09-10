@@ -252,11 +252,23 @@ test('a task newly reassigned through chat privately notifies the new owner with
   const token = f.db.prepare('SELECT token FROM secretary_pending').get().token;
   const result = await f.run(undefined, { ...admin, text: `موافق ${token}` });
   assert.equal(result.status, 'applied');
-  const toNewOwner = f.db.prepare("SELECT choices_json AS choicesJson FROM agent_outbox WHERE to_user='other'").get();
-  assert.ok(toNewOwner?.choicesJson, 'the newly assigned owner must get a tappable poll, not just plain text');
+  const toNewOwnerRows = f.db.prepare("SELECT text, choices_json AS choicesJson FROM agent_outbox WHERE to_user='other' ORDER BY id").all();
+  const toNewOwner = toNewOwnerRows.find(r => r.choicesJson);
+  assert.ok(toNewOwner, 'the newly assigned owner must get a tappable poll, not just plain text');
   const choices = JSON.parse(toNewOwner.choicesJson);
   assert.equal(choices.id, `TSKQ${PROGRESS}`);
   assert.deepEqual(choices.options.map(o => o.id), [`TSK${PROGRESS}CLAIM`, `TSK${PROGRESS}TRANSFER`, `TSK${PROGRESS}EDIT`], 'the task is open again after reassignment, so CLAIM/TRANSFER/EDIT apply, not FINISH/NOTE/EXTEND');
+  // Basim hit this for real: the standalone command legend used to follow
+  // this task poll as a SECOND poll to the same person a millisecond later,
+  // which silently superseded (broke the tap-ability of) the CLAIM poll
+  // above at the WhatsApp bridge layer (polls.mjs treats one new poll per
+  // phone number as invalidating whatever poll was still live for it) --
+  // so "استلمت المهمة" looked like it was offered but never actually worked.
+  // The legend must still reach him as plain text, just never as a
+  // competing poll when a task-specific one was already attached.
+  const legend = toNewOwnerRows.find(r => /تذكير بأوامر المهام/.test(r.text));
+  assert.ok(legend, 'the newly assigned owner still gets the plain-text command legend');
+  assert.equal(legend.choicesJson, null, 'the legend must never carry its own poll here -- it would silently invalidate the CLAIM/TRANSFER/EDIT poll just sent to the same person');
 });
 test('a duplicate delivery of the same details view replays the identical poll for the employee, never denied', async t => {
   const f = fixture(t);

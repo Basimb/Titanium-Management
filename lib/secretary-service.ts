@@ -109,10 +109,28 @@ function resolveTaskCommandsLegendChoice(db: DatabaseSync, event: Event, config:
 /** Queues the command legend as its own WhatsApp message (never in the same
  * bubble as the task message itself) for a real employee recipient only --
  * never for Basim and never for the group. Call this right alongside every
- * task-related message/notice an employee receives, per Basim's request. */
-function notifyTaskLegend(db: DatabaseSync, toUser: string, now: number) {
+ * task-related message/notice an employee receives, per Basim's request.
+ *
+ * withPoll=false sends the legend as plain text only, no attached poll.
+ * The WhatsApp bridge (polls.mjs sendQuestion) treats a poll as one-per-
+ * phone-number: sending ANY new poll to a sender immediately supersedes
+ * (invalidates the tap-ability of) whatever poll was still live for that
+ * same sender, even one sent a moment earlier for an unrelated purpose --
+ * a deliberate anti-replay guard, not a bug in that file. Basim hit this
+ * for real: reassigning him a task queues a task-specific CLAIM/TRANSFER/
+ * EDIT poll to the new owner, and this legend used to follow it one
+ * millisecond later as a SECOND poll to that same person -- silently
+ * killing the CLAIM poll's tap-ability (or its WhatsApp-side delivery
+ * retry) before he ever got to tap it, so "استلمت المهمة" never appeared
+ * to actually work. Callers that already attached a task-specific poll to
+ * the message the employee just received must pass withPoll=false here so
+ * the legend never competes with it -- the legend's own commands mostly
+ * overlap that poll's options anyway (TRANSFER/EDIT), and the plain-text
+ * reminder is still enough to point them at "اضافة مهمة" for anything the
+ * task poll doesn't cover. */
+function notifyTaskLegend(db: DatabaseSync, toUser: string, now: number, withPoll = true) {
   if (toUser === "basem" || toUser === "group") return;
-  enqueueAgentMessage(db, { toUser, text: TASK_COMMANDS_LEGEND, choices: taskCommandsLegendPoll(now) }, now);
+  enqueueAgentMessage(db, { toUser, text: TASK_COMMANDS_LEGEND, ...(withPoll ? { choices: taskCommandsLegendPoll(now) } : {}) }, now);
 }
 // Basim: don't display a completed task's status as "معتمدة" (approved) --
 // display "مكتملة" (completed) instead. Same underlying status value
@@ -1596,7 +1614,7 @@ function dispatchManagementNotice(db: DatabaseSync, actor: ChatUser, state: Snap
     // task, not whatever taskActionPoll would have said before it moved.
     const choices = taskId && targetName ? freshTaskActionPoll(db, taskId, targetName, now) : undefined;
     enqueueAgentMessage(db, { toUser: targetId, text: `📌 تحديث على مهمتك:\n${notice}`, ...(choices ? { choices } : {}) }, now);
-    notifyTaskLegend(db, targetId, now + 1);
+    notifyTaskLegend(db, targetId, now + 1, !choices);
   }
   // "تجيني أنا عشان أقرأها وتروح للغروب مشان يشوفوها" -- every task update
   // should reach Basim directly, not only the group broadcast. Skipped when
@@ -1785,7 +1803,7 @@ function safeKnowledge(db: DatabaseSync, actor: ChatUser, query: string) {
 }
 /** Private notifications and group notices produced by agent actions go to the durable queue; the bridge delivers them. */
 function deliverAgentSideEffects(db: DatabaseSync, actor: ChatUser, result: AgentResult, now: number) {
-  for (const item of result.notify ?? []) if (item.userId !== actor.id) { enqueueAgentMessage(db, { toUser: item.userId, text: item.text, choices: item.choices }, now); notifyTaskLegend(db, item.userId, now + 1); }
+  for (const item of result.notify ?? []) if (item.userId !== actor.id) { enqueueAgentMessage(db, { toUser: item.userId, text: item.text, choices: item.choices }, now); notifyTaskLegend(db, item.userId, now + 1, !item.choices); }
   if (result.groupNotice) enqueueAgentMessage(db, { toUser: "group", text: result.groupNotice }, now);
 }
 
