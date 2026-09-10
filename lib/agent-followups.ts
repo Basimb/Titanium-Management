@@ -104,7 +104,6 @@ export function planFollowups(db: DatabaseSync, config: FollowupConfig, at: numb
   const userIdByName = new Map(users.map(user => [user.name, user.id]));
   const today = localDay(at, offset);
   const plans: Planned[] = [];
-  const link = config.publicUrl ? `\n${config.publicUrl}` : "";
 
   // Twice-daily team task reminder (Basim asked for one at 8am and one at
   // 8pm local, every day) -- deliberately computed and returned BEFORE the
@@ -122,7 +121,7 @@ export function planFollowups(db: DatabaseSync, config: FollowupConfig, at: numb
       if (number && !alreadySent(db, kind, userId, null, at - DAY)) {
         const choices = autoReminderPoll(tasks, user.name, at);
         plans.push({ id: randomBytes(8).toString("hex"), kind, targetUser: userId, entityId: null, to: `${number}@s.whatsapp.net`,
-          text: `📋 تذكير بمهامك الحالية يا ${clean(user.name)} (${tasks.length}):\n\n${lines}${link}`, ...(choices ? { choices } : {}) });
+          text: `📋 تذكير بمهامك الحالية يا ${clean(user.name)} (${tasks.length}):\n\n${lines}`, ...(choices ? { choices } : {}) });
       }
       // One group post per owner (never one combined message), same
       // convention as the on-demand "ابعت تذكير المهام الآن" broadcast --
@@ -151,11 +150,13 @@ export function planFollowups(db: DatabaseSync, config: FollowupConfig, at: numb
     const nudgedToday = alreadySent(db, "overdue_task", userId, task.id, at - DAY) || alreadySent(db, "silent_task", userId, task.id, at - DAY);
     if (nudgedToday) continue;
     if (overdue || expectedPassed) {
+      const choices = autoReminderPoll([task], task.owner, at);
       plans.push({ id: randomBytes(8).toString("hex"), kind: "overdue_task", targetUser: userId, entityId: task.id, to: `${number}@s.whatsapp.net`,
-        text: `⏰ يا ${clean(task.owner)}، مهمة «${clean(task.title)}» كان موعدها ${task.dueDate ?? task.expectedAt} ولم تُغلق بعد.\nوين وصلت؟ إذا بدك تمديد قلّي الموعد الجديد والسبب وأرفعه لباسم.${link}` });
+        text: `⏰ يا ${clean(task.owner)}، مهمة «${clean(task.title)}» كان موعدها ${task.dueDate ?? task.expectedAt} ولم تُغلق بعد.\nوين وصلت؟ إذا بدك تمديد قلّي الموعد الجديد والسبب وأرفعه لباسم.`, ...(choices ? { choices } : {}) });
     } else if (silent && !alreadySent(db, "silent_task", userId, task.id, at - 2 * DAY)) {
+      const choices = autoReminderPoll([task], task.owner, at);
       plans.push({ id: randomBytes(8).toString("hex"), kind: "silent_task", targetUser: userId, entityId: task.id, to: `${number}@s.whatsapp.net`,
-        text: `👋 يا ${clean(task.owner)}، ما وصلني تحديث على «${clean(task.title)}» من 3 أيام. وين وصلت؟ اكتب لي أو سجّل صوت وأنا أحدّثها.` });
+        text: `👋 يا ${clean(task.owner)}، ما وصلني تحديث على «${clean(task.title)}» من 3 أيام. وين وصلت؟ أو سجّل صوت وأنا أحدّثها.`, ...(choices ? { choices } : {}) });
     }
   }
   // Basim asked for unclaimed (still "open", never rejected/transferred) tasks
@@ -176,8 +177,9 @@ export function planFollowups(db: DatabaseSync, config: FollowupConfig, at: numb
     if (!userId || !number) continue;
     if (alreadySent(db, "unclaimed_task", userId, task.id, at - HOUR)) continue;
     if (db.prepare("SELECT id FROM approvals WHERE status='pending' AND entity_id=?").get(task.id)) continue;
+    const choices = autoReminderPoll([task], responsible, at);
     plans.push({ id: randomBytes(8).toString("hex"), kind: "unclaimed_task", targetUser: userId, entityId: task.id, to: `${number}@s.whatsapp.net`,
-      text: `⏳ يا ${clean(responsible)}، مهمة «${clean(task.title)}» لسا بانتظار ردك.\nاكتب «استلمت» أو اسم المهمة لبدء التنفيذ، أو قلي إذا مش مسؤوليتك.${link}` });
+      text: `⏳ يا ${clean(responsible)}، مهمة «${clean(task.title)}» لسا بانتظار ردك.`, ...(choices ? { choices } : {}) });
   }
   const ownerNumber = numberOf(owner.id);
   if (ownerNumber && !alreadySent(db, "stale_approval", owner.id, null, at - DAY)) {

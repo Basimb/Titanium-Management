@@ -452,7 +452,11 @@ test("follow-ups: overdue owner nudge once per day, stale approval to owner, dig
   const config = { enabled: true, contacts: [{ userId: "basem", number: "966500000000" }, { userId: "khaled", number: "962770000000" }], groupId: "123@g.us" };
   let plans = planFollowups(db, config, at);
   assert.deepEqual(plans.map(plan => plan.kind).sort(), ["daily_digest", "overdue_task"]);
-  assert.equal(plans.find(plan => plan.kind === "overdue_task").to, "962770000000@s.whatsapp.net");
+  const overdueNudge = plans.find(plan => plan.kind === "overdue_task");
+  assert.equal(overdueNudge.to, "962770000000@s.whatsapp.net");
+  assert.doesNotMatch(overdueNudge.text, /https?:\/\//, "Basim: never put the dashboard link in an employee-facing task message");
+  assert.ok(overdueNudge.choices, "an overdue nudge must offer tappable options too");
+  assert.deepEqual(overdueNudge.choices.options.map(o => o.id), ["TSKt1FINISH", "TSKt1NOTE", "TSKt1TRANSFER", "TSKt1EXTEND"]);
   assert.equal(planFollowups(db, { ...config }, Date.UTC(2026, 8, 10, 20, 0)).length, 0, "outside working hours");
   const sent = [];
   const jobs = createFollowupJobs({ db, config, now: () => at });
@@ -484,7 +488,13 @@ test("unclaimed task: hourly nudge to its suggested owner during work hours, sto
   assert.equal(plans[0].targetUser, "shadi");
   assert.equal(plans[0].to, "962780000000@s.whatsapp.net");
   assert.match(plans[0].text, /تجديد الرخصة/);
-  assert.match(plans[0].text, /استلمت/);
+  assert.doesNotMatch(plans[0].text, /https?:\/\//, "Basim: never put the dashboard link in an employee-facing task message");
+  // Basim: typing "استلمت" and having the bot guess which task is exactly
+  // the "so complicated, make it options" complaint -- an unclaimed task's
+  // nudge must offer a tappable claim/transfer poll instead of asking the
+  // employee to type anything.
+  assert.ok(plans[0].choices, "an unclaimed task's nudge must offer tappable options, not ask the employee to type");
+  assert.deepEqual(plans[0].choices.options.map(o => o.id), ["TSKt6CLAIM", "TSKt6TRANSFER"]);
 
   assert.equal(planFollowups(db, config, Date.UTC(2026, 8, 10, 20, 0)).filter(plan => plan.kind === "unclaimed_task").length, 0, "outside working hours");
 
