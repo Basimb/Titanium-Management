@@ -356,6 +356,22 @@ test('old token/quote cannot execute a replacement request; only the current pen
  assert.equal(f.db.prepare("SELECT count(*) n FROM audit_logs WHERE action='delete'").get().n,1);
 });
 
+test('owner-requested deadline extension with a stated reason saves the reason as a visible task comment',async t=>{
+ const f=fixture(t);const manager={senderNumber:'12025550103'};
+ const plan={...emptySecretaryIntent('extension'),taskId:'t',fields:{...emptySecretaryIntent().fields,dueDate:'2026-09-13',reason:'بانتظار موافقة المحامي'}};
+ const proposal=await f.run(plan,{...manager,text:'مدد لوحة للسبت وحط ملاحظه بانتظار موافقة المحامي'});
+ assert.equal(proposal.status,'confirmation');
+ assert.match(proposal.reply,/بانتظار موافقة المحامي/,'the stated reason must be echoed back before execution, not silently dropped');
+ const token=pending(f.db).token;
+ const applied=await f.run(undefined,{...manager,text:`موافق ${token}`},async()=>{throw Error('confirmation must not reach the model');});
+ assert.equal(applied.status,'applied');
+ assert.equal(f.db.prepare("SELECT due_date FROM tasks WHERE id='t'").get().due_date,'2026-09-13');
+ const comment=f.db.prepare("SELECT body,author FROM comments WHERE task_id='t'").get();
+ assert.ok(comment,'the extension reason must be recorded as a task comment, not lost');
+ assert.equal(comment.body,'بانتظار موافقة المحامي');
+ assert.equal(comment.author,'باسم');
+});
+
 test('bare approval without a pending request cannot become a model-generated action',async t=>{
  const f=fixture(t);
  for(const text of ['نعم','موافق','تمام','موافق T123ABC']) {

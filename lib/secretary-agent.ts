@@ -206,10 +206,11 @@ export function handleAgentIntent(plan: SecretaryIntent, ctx: AgentContext): Age
       case "extension": {
         const task = ctx.tasks.find(candidate => candidate.id === plan.taskId);
         if (!task) return { status: "clarify", reply: "أي مهمة تقصد؟" };
-        const reason = clean(plan.fields.reason, 1000) || "لم يُذكر سبب";
+        const statedReason = clean(plan.fields.reason, 1000);
+        const reason = statedReason || "لم يُذكر سبب";
         if (owner) {
-          const token = ctx.stash({ action: "edit_task", taskId: task.id, dueDate: plan.fields.dueDate });
-          return { status: "confirmation", reply: `تعديل موعد «${clean(task.title)}» إلى ${plan.fields.dueDate}.\nاكتب «موافق ${token}» للتنفيذ.`, taskId: task.id };
+          const token = ctx.stash({ action: "edit_task", taskId: task.id, dueDate: plan.fields.dueDate, ...(statedReason ? { reason: statedReason } : {}) });
+          return { status: "confirmation", reply: `تعديل موعد «${clean(task.title)}» إلى ${plan.fields.dueDate}.${statedReason ? `\nالملاحظة: ${statedReason}` : ""}\nاكتب «موافق ${token}» للتنفيذ.`, taskId: task.id };
         }
         const request = requestDeadlineExtension(db, actor, { taskId: task.id, newDueDate: String(plan.fields.dueDate), reason }, { now });
         return { status: "applied", reply: `📨 رفعت طلب التمديد لباسم: ${request.approval.summary}\nالسبب: ${reason}\nبخبرك أول ما يقرر.`, taskId: task.id, notify: [{ userId: "basem", text: request.ownerMessage }], groupNotice: null };

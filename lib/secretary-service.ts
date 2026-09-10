@@ -1258,7 +1258,16 @@ function sendTeamTaskReminders(db: DatabaseSync, state: Snapshot, now: number): 
 }
 function perform(db: DatabaseSync, event: Event, actor: ChatUser, state: Snapshot, command: Record<string, unknown>, now: number, context: Record<string, unknown>): Result {
   try {
-    const result = executeManagementAction(db, actor, command as ManagementCommand, { now, source: "whatsapp_secretary", auditContext: { ...context, senderNumber: event.senderNumber, origin: "whatsapp", proposedCommand: command } });
+    // A stashed edit_task can carry a "reason" (e.g. why a deadline moved) that
+    // TaskFields/ACTION_KEYS has no column for -- executeManagementAction
+    // rejects any command with a field outside ACTION_KEYS[action], so it must
+    // be stripped from the edit_task command itself and applied afterward as
+    // a separate, visible comment instead of being silently dropped.
+    const { reason, ...editCommand } = command;
+    const result = executeManagementAction(db, actor, editCommand as ManagementCommand, { now, source: "whatsapp_secretary", auditContext: { ...context, senderNumber: event.senderNumber, origin: "whatsapp", proposedCommand: command } });
+    if (command.action === "edit_task" && typeof command.taskId === "string" && typeof reason === "string" && reason.trim()) {
+      executeManagementAction(db, actor, { action: "comment", taskId: command.taskId, comment: reason } as ManagementCommand, { now, source: "whatsapp_secretary", auditContext: { ...context, senderNumber: event.senderNumber, origin: "whatsapp", proposedCommand: command } });
+    }
     const taskId = typeof command.taskId === "string" ? command.taskId : result.entityType === "task" ? result.entityId : undefined;
     if (taskId) db.prepare("UPDATE secretary_reminders SET responded_at=? WHERE actor_id=? AND task_id=? AND group_id IS ? AND state='sent' AND responded_at IS NULL").run(now, actor.id, taskId, event.groupId);
     // Remember this project for a short window so a follow-up task-open
