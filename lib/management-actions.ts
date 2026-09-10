@@ -131,7 +131,16 @@ export function getManagementSnapshot(sqlite: DatabaseSync, claimed: ManagementA
   return atomic(sqlite, false, () => {
     const actor = resolveManagementActor(sqlite, claimed);
     const manager = isManagementAdmin(actor);
-    const tasks = (sqlite.prepare(`${TASK_SELECT} ORDER BY created_at,id`).all() as ManagementTask[]).filter(task => canViewManagementTask(actor, task));
+    // Basim's explicit instruction: an archived task (whether it archived
+    // itself on approval, or was archived manually) shows up NOWHERE for
+    // anyone but him -- not in a colleague's own task list, not in a
+    // manager's-department view, nothing. He alone keeps the ability to pull
+    // one up (the dashboard's "الأرشيف" filter) for the historical record.
+    // scope (canViewManagementTask/inScope) still decides visibility for a
+    // live task exactly as before; this only adds the archived-hides-from-
+    // everyone-but-Basim rule on top of it.
+    const tasks = (sqlite.prepare(`${TASK_SELECT} ORDER BY created_at,id`).all() as ManagementTask[])
+      .filter(task => manager || (task.archivedAt === null && canViewManagementTask(actor, task)));
     const taskIds = new Set(tasks.map(task => task.id));
     const projectIds = new Set(tasks.map(task => task.projectId));
     const projects = (sqlite.prepare(`${PROJECT_SELECT} ORDER BY created_at,id`).all() as unknown as ManagementProject[])
@@ -321,7 +330,15 @@ export function executeManagementAction(sqlite: DatabaseSync, claimed: Managemen
       const task = taskById(sqlite, taskCommand.taskId, actor); previous = task; entityId = task.id;
       const project = projectById(sqlite, task.projectId); checkVersion(command, task, project);
       if (command.action !== "delete_task" && command.action !== "restore_task") {
-        if (task.archivedAt !== null) return fail(409, "task_archived", "المهمة مؤرشفة؛ استرجعها أولًا");
+        // "reopen" is excluded from this gate on purpose: since approve now
+        // auto-archives (see the "approve" case below), a completed task is
+        // ALWAYS archived by the time anyone could reopen it, and reopen is
+        // exactly the action that is supposed to undo that -- it clears
+        // archived_at itself a few lines down. A task archived any other way
+        // still can't be reopened (reopen requires status "completed", which
+        // a manually-archived open/in-progress task never has), so this
+        // stays narrowly scoped to the auto-archive-on-approve case.
+        if (task.archivedAt !== null && command.action !== "reopen") return fail(409, "task_archived", "المهمة مؤرشفة؛ استرجعها أولًا");
         activeProject(project);
       }
       const changes: Record<string, SQLInputValue> = { updated_at: Math.max(at, (task.updatedAt ?? 0) + 1) };
@@ -371,8 +388,19 @@ export function executeManagementAction(sqlite: DatabaseSync, claimed: Managemen
             message = `أرسل المهمة لاعتماد باسم: ${task.title}`; auditAction = "submit"; break;
           case "approve":
             if (task.status !== "approval") return fail(409, "invalid_transition", "المهمة ليست بانتظار الاعتماد");
-            Object.assign(changes, { status: "completed", completed_at: at, rejection_reason: null });
-            message = `اعتمد إنجاز المهمة: ${task.title}`; auditAction = "approve"; break;
+            // Basim's explicit instruction: any task that gets approved is DONE,
+            // full stop -- archive it the same moment, don't wait for a separate
+            // manual archive_task. Combined with the manager-only read in
+            // getManagementSnapshot below, this makes a completed task disappear
+            // from every listing/report for everyone but Basim right away; he can
+            // still pull it up (dashboard's "الأرشيف" filter, or restore_task) for
+            // the historical record. reopen/restore_task both already require
+            // restore_task first on an archived task (the "task is archived,
+            // restore it first" gate a few lines up) -- same two-step an admin
+            // already needed for a manually-archived task, now also covering one
+            // that archived itself on approval.
+            Object.assign(changes, { status: "completed", completed_at: at, rejection_reason: null, archived_at: at, archived_by: actor.name });
+            message = `اعتمد إنجاز المهمة: ${task.title} (وأُرشفت تلقائيًا)`; auditAction = "approve"; break;
           case "reject": {
             if (task.status !== "approval") return fail(409, "invalid_transition", "المهمة ليست بانتظار الاعتماد");
             const reason = required(command.reason, "سبب الرفض", 4000);
@@ -382,7 +410,7 @@ export function executeManagementAction(sqlite: DatabaseSync, claimed: Managemen
           }
           case "reopen":
             if (task.status !== "completed") return fail(409, "invalid_transition", "إعادة الفتح متاحة للمهمة المعتمدة فقط");
-            Object.assign(changes, { status: task.owner ? "progress" : "open", completed_at: null, rejection_reason: null });
+            Object.assign(changes, { status: task.owner ? "progress" : "open", completed_at: null, rejection_reason: null, archived_at: null, archived_by: null });
             message = `أعاد فتح المهمة: ${task.title}${command.reason ? ` — ${optionalText(command.reason, "السبب", 4000)}` : ""}`; auditAction = "reopen"; break;
           case "reassign": {
             if (!Object.hasOwn(command, "ownerId")) return fail(400, "assignee_required", "حدّد الموظف أو اختر إلغاء التعيين");
