@@ -280,8 +280,10 @@ export function handleAgentIntent(plan: SecretaryIntent, ctx: AgentContext): Age
         const policy = plan.fields.reason === "require_due_date" ? { requireDueDate: true } : plan.fields.reason === "require_owner" ? { requireOwner: true } : undefined;
         const suggest = plan.fields.ownerId && ctx.users.some(user => user.id === plan.fields.ownerId) ? plan.fields.ownerId : null;
         const proposal = proposeRuleFromStatement(db, actor, { statement, keywords, suggestOwner: suggest, policy }, { now });
-        void proposal;
-        return { status: "summary", reply: `سجّلت القاعدة كاقتراح بانتظار اعتمادك:\n«${statement}»${keywords.length ? `\nالنطاق: ${keywords.join("، ")}` : ""}\n\nقل «اعتمد القاعدة» لتفعيلها أو «ارفض».` };
+        // proposal.choices is the same 🟢/🔴 poll every other approval type attaches --
+        // this case is only ever reached by owner (see the `if (!owner)` guard above),
+        // so the poll rides straight on this reply rather than a separate notify.
+        return { status: "summary", reply: `سجّلت القاعدة كاقتراح بانتظار اعتمادك:\n«${statement}»${keywords.length ? `\nالنطاق: ${keywords.join("، ")}` : ""}\n\nقل «اعتمد القاعدة» لتفعيلها أو «ارفض».`, choices: proposal.choices };
       }
       case "correction": {
         if (!owner) return { status: "denied", reply: "التصحيحات الدائمة من باسم فقط." };
@@ -292,7 +294,9 @@ export function handleAgentIntent(plan: SecretaryIntent, ctx: AgentContext): Age
         const toName = ctx.users.find(user => user.id === to)?.name ?? to;
         const outcome = recordCorrection(db, actor, { category: "assignment", from: fromName, to: toName, context: clean(plan.message, 300), keywords }, { now });
         const base = `سجّلت التصحيح: ${fromName ? `${fromName} → ` : ""}${toName}${keywords.length ? ` (${keywords.join("، ")})` : ""}.`;
-        if (outcome.proposal) return { status: "summary", reply: `${base}\n\n${outcome.proposal.ownerMessage}` };
+        // Same as the "rule" case above: this only fires for owner, so the rule
+        // proposal's poll rides on this direct reply rather than a notify push.
+        if (outcome.proposal) return { status: "summary", reply: `${base}\n\n${outcome.proposal.ownerMessage}`, choices: outcome.proposal.choices };
         const task = ctx.tasks.find(candidate => candidate.id === plan.taskId);
         return { status: "summary", reply: `${base}${task ? `\nبدك أعيد تعيين «${clean(task.title)}» إلى ${toName} الآن؟ قل «عيّنها لـ${toName}».` : ""}`, ...(task ? { taskId: task.id } : {}) };
       }

@@ -283,13 +283,17 @@ export function patchTaskCreateApproval(db: DatabaseSync, claimed: ManagementAct
   return hydrate(db.prepare(`${SELECT} WHERE id=?`).get(approval.id) as Record<string, unknown>);
 }
 
-/** A rule/policy proposal (from a correction pattern or an explicit statement). */
-export function requestRule(db: DatabaseSync, claimed: ManagementActor, input: { kind: "assignment" | "policy" | "note"; statement: string; match?: Record<string, unknown>; effect?: Record<string, unknown> }, options: { now?: number } = {}): { approval: Approval; ownerMessage: string } {
+/** A rule/policy proposal (from a correction pattern or an explicit statement). Like every
+ * other approval-request function here, this attaches a real tappable 🟢/🔴 poll -- a rule
+ * proposal is a decision Basim needs to act on exactly like a deadline extension or a task
+ * transfer, and it shouldn't be the one request type that makes him type "اعتمد" by hand. */
+export function requestRule(db: DatabaseSync, claimed: ManagementActor, input: { kind: "assignment" | "policy" | "note"; statement: string; match?: Record<string, unknown>; effect?: Record<string, unknown> }, options: { now?: number } = {}): { approval: Approval; ownerMessage: string; choices: SecretaryChoices } {
   migrateManagementActions(db);
   const actor = resolveManagementActor(db, claimed);
   const statement = text(input.statement, "نص القاعدة", 1000);
-  const approval = insert(db, actor, { type: input.kind === "policy" ? "policy" : "rule", entityType: "rule", entityId: null, summary: statement, payload: { kind: input.kind, statement, match: input.match ?? {}, effect: input.effect ?? {} } }, now(options));
-  return { approval, ownerMessage: `اقتراح قاعدة:\n${statement}${APPROVAL_CHOICE_HINT}` };
+  const at = now(options);
+  const approval = insert(db, actor, { type: input.kind === "policy" ? "policy" : "rule", entityType: "rule", entityId: null, summary: statement, payload: { kind: input.kind, statement, match: input.match ?? {}, effect: input.effect ?? {} } }, at);
+  return { approval, ownerMessage: `اقتراح قاعدة:\n${statement}${APPROVAL_CHOICE_HINT}`, choices: approvalDecisionPoll(approval, at) };
 }
 
 /** Owner decides. The effect is applied through the same audited action engine. */

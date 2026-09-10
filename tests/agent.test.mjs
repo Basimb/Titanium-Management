@@ -286,16 +286,46 @@ test("rules: repeated corrections propose a rule; approved rule suggests owner; 
     if (index < CORRECTION_THRESHOLD - 1) assert.equal(outcome.proposal, null);
   }
   assert.ok(proposal, "third correction proposes a rule");
+  // A rule proposal is a decision for Basim exactly like a deadline extension or
+  // a task transfer -- it must carry the same tappable 🟢/🔴 poll, not just text.
+  assert.ok(proposal.choices, "recordCorrection's rule proposal must attach a poll");
+  assert.equal(proposal.choices.id, `APR${proposal.approval.id}`);
+  assert.deepEqual(proposal.choices.options.map(option => option.label), ["🟢 اعتماد", "🔴 رفض"]);
   assert.equal(activeRules(db).length, 0, "nothing active before owner approval");
   decideApproval(db, owner, { approvalId: proposal.approval.id, decision: "approved" }, { now: T0 + 10 });
   assert.equal(activeRules(db).length, 1);
   assert.equal(suggestOwner(db, { text: "تركيب لوحة الصيدلية" })?.ownerId, "شادي");
   assert.equal(suggestOwner(db, { text: "متابعة الكهرباء" }), null);
   const policy = proposeRuleFromStatement(db, owner, { statement: "لا مهمة بدون موعد", keywords: [], policy: { requireDueDate: true } }, { now: T0 + 11 });
+  assert.ok(policy.choices, "proposeRuleFromStatement must also attach a poll");
   decideApproval(db, owner, { approvalId: policy.approval.id, decision: "approved" }, { now: T0 + 12 });
   assert.equal(policyViolations(db, { title: "x", dueDate: null }).length, 1);
   assert.equal(policyViolations(db, { title: "x", dueDate: "2026-10-01" }).length, 0);
   assert.equal(recordCorrection(db, khaled, { category: "assignment", from: "a", to: "b", context: "" }).count, 0, "members cannot record corrections");
+});
+
+// The "rule"/"correction" agent-intent cases are only ever reachable by Basim
+// himself (see the `if (!owner)` guards in secretary-agent.ts), so their poll
+// rides directly on the AgentResult.choices field of the reply he gets back --
+// there is no separate notify recipient to attach it to.
+test("agent handler: a rule statement and a repeated correction both come back with a tappable poll", t => {
+  const db = fixture(t);
+  const snapshot = getManagementSnapshot(db, owner);
+  const base = { intakeMode: null, action: null, taskId: null, projectId: null, recipientIds: [], fields: { title: null, name: null, details: null, priority: null, dueDate: null, ownerId: null, reason: null, body: null, remindAt: null } };
+  const ctx = now => ({ db, actor: owner, now, users: snapshot.users, tasks: snapshot.tasks, projects: snapshot.projects, stash: () => "TRUL" });
+
+  const ruleResult = handleAgentIntent({ ...base, kind: "rule", message: "لوحة، لوحات", fields: { ...base.fields, body: "أي مهمة عن اللوحات تكون لشادي" } }, ctx(T0));
+  assert.equal(ruleResult.status, "summary");
+  assert.ok(ruleResult.choices, "an explicit rule statement must attach a tappable poll, not just ownerMessage text");
+  assert.deepEqual(ruleResult.choices.options.map(option => option.label), ["🟢 اعتماد", "🔴 رفض"]);
+
+  const khaledId = snapshot.users.find(user => user.name === "خالد").id;
+  let correctionResult;
+  for (let index = 0; index < CORRECTION_THRESHOLD; index += 1) {
+    correctionResult = handleAgentIntent({ ...base, kind: "correction", message: "دفعة، دفعات", fields: { ...base.fields, ownerId: khaledId, name: "شادي" } }, ctx(T0 + 20 + index));
+  }
+  assert.ok(correctionResult.choices, "the threshold-triggered correction proposal must also attach a poll");
+  assert.deepEqual(correctionResult.choices.options.map(option => option.label), ["🟢 اعتماد", "🔴 رفض"]);
 });
 
 test("knowledge: FTS search with visibility scoping, checked by the agent before web search", t => {

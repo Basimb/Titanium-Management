@@ -2,6 +2,7 @@ import type { DatabaseSync } from "node:sqlite";
 import { requestRule, type Approval } from "./approvals.ts";
 import { migrateManagementActions, resolveManagementActor, type ManagementActor } from "./management-actions.ts";
 import { can, type PermissionActor } from "./permissions.ts";
+import type { SecretaryChoices } from "./secretary-choices.ts";
 
 export type Rule = { id: string; kind: "assignment" | "policy" | "note"; statement: string; match: { keywords?: string[]; projectId?: string | null; category?: string | null }; effect: { suggestOwner?: string | null; requireDueDate?: boolean; requireOwner?: boolean; watcher?: string | null }; active: number; approvedBy: string; createdAt: number };
 export const CORRECTION_THRESHOLD = 3;
@@ -51,7 +52,7 @@ export function policyViolations(db: DatabaseSync, draft: { title: string; proje
  * CORRECTION_THRESHOLD times, file a rule proposal for the owner. Nothing becomes
  * a rule without an explicit owner decision.
  */
-export function recordCorrection(db: DatabaseSync, claimed: ManagementActor, input: { category: "assignment" | "priority" | "other"; from: string | null; to: string | null; context: string; keywords?: string[] }, options: { now?: number } = {}): { count: number; proposal: { approval: Approval; ownerMessage: string } | null } {
+export function recordCorrection(db: DatabaseSync, claimed: ManagementActor, input: { category: "assignment" | "priority" | "other"; from: string | null; to: string | null; context: string; keywords?: string[] }, options: { now?: number } = {}): { count: number; proposal: { approval: Approval; ownerMessage: string; choices: SecretaryChoices } | null } {
   migrateManagementActions(db);
   const actor = resolveManagementActor(db, claimed);
   if (!can(actor as PermissionActor, "rule.propose") && !can(actor as PermissionActor, "rule.approve")) return { count: 0, proposal: null };
