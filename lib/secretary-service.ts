@@ -898,6 +898,21 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
       const state = stateFor(db, fresh);
       const task = state.tasks.find(t => t.id === taskActionPollChoice.taskId);
       if (!task) return save(db, event, fresh, { status: "clarify", reply: "هاي المهمة ما عادت متاحة." }, [], now);
+      // Basim's explicit rule: nobody closes a task without leaving a note on
+      // it first. FINISH itself stays a tap -- "ما بدي حد يكتب ولا حد يعمل،
+      // بدهم بس يختاروا" is still honored for the action itself -- but a tap
+      // carries no free text, so it can only check that a note was already
+      // logged this work cycle (via the NOTE tap/flow, which does the actual
+      // typing) rather than accept the close with nothing behind it. Scoped
+      // to comments added since this claim (started_at), so a note left
+      // during an earlier work cycle on a previously reopened task never
+      // silently satisfies this one.
+      if (taskActionPollChoice.action === "submit") {
+        const startedAt = (db.prepare("SELECT started_at AS startedAt FROM tasks WHERE id=?").get(task.id) as { startedAt: number | null } | undefined)?.startedAt ?? 0;
+        const hasNote = db.prepare("SELECT 1 FROM comments WHERE task_id=? AND created_at>=? LIMIT 1").get(task.id, startedAt);
+        if (!hasNote) return save(db, event, fresh, { status: "clarify",
+          reply: `لازم تضيف ملاحظة بنتيجة الشغل قبل ما تقفل «${clean(task.title, 150)}» -- اضغط «📝 أضيف ملاحظة» واكتبها، وبعدين اضغط «✅ خلصت المهمة» تاني.`, taskId: task.id }, [], now);
+      }
       try {
         const result = executeManagementAction(db, fresh, { action: taskActionPollChoice.action, taskId: task.id } as ManagementCommand,
           { now, source: "whatsapp_secretary", auditContext: { originalText: event.text, sourceMessageId: event.messageId, confirmationRequired: false } });

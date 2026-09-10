@@ -76,12 +76,36 @@ test('tapping CLAIM resolves the claim directly, never asking the model, and bro
   assert.ok(rows.some(r => r.toUser === 'group' && /👋/.test(r.text)), 'a claim tap must broadcast to the group exactly like a typed claim');
   assert.ok(rows.some(r => r.toUser === 'member' && /تذكير بأوامر المهام/.test(r.text)), 'the tapping employee still gets the command legend');
 });
-test('tapping FINISH resolves the submit directly and moves the task to pending Basim approval', async t => {
+// Basim's explicit rule: nobody closes a task without a note. FINISH itself
+// stays a tap (his original "بدهم بس يختاروا، ما بدي حد يكتب" design), so this
+// only checks a note was already logged this work cycle -- via a prior NOTE
+// tap/typed comment -- never that the tap itself carries one.
+test('tapping FINISH is refused (never asking the model) when no note was logged this work cycle', async t => {
   const f = fixture(t);
+  const tapped = await f.run(undefined, tap(`TSKQ${PROGRESS}`, `TSK${PROGRESS}FINISH`),
+    async () => { throw Error('a FINISH tap must resolve directly, never ask the model'); });
+  assert.equal(tapped.status, 'clarify');
+  assert.match(tapped.reply, /لازم تضيف ملاحظة/);
+  assert.equal(f.db.prepare('SELECT status FROM tasks WHERE id=?').get(PROGRESS).status, 'progress', 'refused -- must not have moved to approval');
+});
+test('a note logged earlier this work cycle (e.g. via a prior NOTE tap/typed comment) lets FINISH resolve the submit directly and move the task to pending Basim approval', async t => {
+  const f = fixture(t);
+  f.db.prepare("INSERT INTO comments VALUES(1,?,?,?,?)").run(PROGRESS, 'خالد', 'سلّمت اللوحة للفريق الفني اليوم', f.now - 1000);
   const tapped = await f.run(undefined, tap(`TSKQ${PROGRESS}`, `TSK${PROGRESS}FINISH`),
     async () => { throw Error('a FINISH tap must resolve directly, never ask the model'); });
   assert.equal(tapped.status, 'applied');
   assert.equal(f.db.prepare('SELECT status FROM tasks WHERE id=?').get(PROGRESS).status, 'approval');
+});
+// A note left during an EARLIER work cycle on a task that was reopened and
+// reclaimed (started_at reset) must never silently satisfy this one.
+test('a note from a previous, already-finished work cycle does not satisfy the requirement after the task is reopened and reclaimed', async t => {
+  const f = fixture(t);
+  f.db.prepare("INSERT INTO comments VALUES(1,?,?,?,?)").run(PROGRESS, 'خالد', 'ملاحظة قديمة من دورة عمل سابقة', 0);
+  f.db.prepare("UPDATE tasks SET started_at=? WHERE id=?").run(f.now, PROGRESS); // reclaimed just now, after that old comment
+  const tapped = await f.run(undefined, tap(`TSKQ${PROGRESS}`, `TSK${PROGRESS}FINISH`),
+    async () => { throw Error('a FINISH tap must resolve directly, never ask the model'); });
+  assert.equal(tapped.status, 'clarify');
+  assert.equal(f.db.prepare('SELECT status FROM tasks WHERE id=?').get(PROGRESS).status, 'progress');
 });
 test('a stale CLAIM tap (task already claimed by someone else since the poll was sent) fails cleanly instead of throwing', async t => {
   const f = fixture(t);
