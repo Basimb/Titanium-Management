@@ -314,3 +314,22 @@ test('provider cannot turn a completion report into owner approval without an ap
   const explicit = validateSecretaryIntent(command('approve'), context('اعتمد إنجاز اللوحة'));
   assert.equal(explicit.action, 'approve');
 });
+
+// Basim's explicit rejection of reassign-as-workaround ("مابدي احول مهمه بدي
+// اقولو يستلم مهمه محوله اله اساسا بس ما استلمها") led to a dedicated,
+// non-mutating nudge(taskId) kind -- restricted to Basim/admin, same as
+// reassign-of-others, since it messages a third party on the actor's behalf.
+function nudge(extra = {}) { return { ...emptySecretaryIntent('nudge'), taskId: TASK, ...extra }; }
+test('nudge is restricted to Basim/admin -- a regular member cannot use it to ping a coworker', () => {
+  expectClarify(nudge(), context('ذكّر خالد يستلم المهمة', {
+    actor: { id: MEMBER, name: 'موظف تجريبي', role: 'member' },
+  }), 'a non-admin actor must be refused, never allowed to trigger a nudge to someone else');
+});
+test('nudge is allowed for Basim/admin with a valid, existing taskId', () => {
+  const result = validateSecretaryIntent(nudge(), context('ذكّر خالد يستلم المهمة'));
+  assert.equal(result.kind, 'nudge');
+  assert.equal(result.taskId, TASK);
+});
+test('nudge for a taskId outside the authorized catalog is clarified like any other command, never trusted blindly', () => {
+  expectClarify(nudge({ taskId: 'not-authorized' }), context('ذكّر خالد يستلم مهمة وهمية'));
+});

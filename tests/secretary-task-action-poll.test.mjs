@@ -270,6 +270,55 @@ test('a task newly reassigned through chat privately notifies the new owner with
   assert.ok(legend, 'the newly assigned owner still gets the plain-text command legend');
   assert.equal(legend.choicesJson, null, 'the legend must never carry its own poll here -- it would silently invalidate the CLAIM/TRANSFER/EDIT poll just sent to the same person');
 });
+// Basim's explicit correction after rejecting reassign as a workaround: "انا
+// مابدي احول مهمه بدي اقولو يستلم مهمه محوله اله اساسا بس ما استلمها" -- nudge
+// must resend خالد's already-live claim/action poll for OPEN, with zero
+// change to the task itself, and no "موافق TOKEN" confirmation step at all.
+function nudge(taskId) { return { ...emptySecretaryIntent('nudge'), taskId }; }
+test('nudge resends the current owner/suggested-owner their exact claim poll, right away, with no confirmation step and no task mutation', async t => {
+  const f = fixture(t); const admin = { senderNumber: '12025550103' };
+  const before = f.db.prepare('SELECT status,owner,suggested_owner AS suggestedOwner FROM tasks WHERE id=?').get(OPEN);
+  const r = await f.run(nudge(OPEN), { ...admin, text: 'ذكّر خالد يستلم المهمة المقترحة' });
+  assert.equal(r.status, 'applied', 'nudge must resolve immediately, unlike reassign which needs a موافق confirmation');
+  const after = f.db.prepare('SELECT status,owner,suggested_owner AS suggestedOwner FROM tasks WHERE id=?').get(OPEN);
+  assert.deepEqual(after, before, 'nudge must never change the task record itself');
+  const toMemberRows = f.db.prepare("SELECT text, choices_json AS choicesJson FROM agent_outbox WHERE to_user='member' ORDER BY id").all();
+  const poll = toMemberRows.find(row => row.choicesJson);
+  assert.ok(poll, 'خالد must get a real tappable poll, not just a plain-text nudge');
+  const choices = JSON.parse(poll.choicesJson);
+  assert.equal(choices.id, `TSKQ${OPEN}`);
+  assert.deepEqual(choices.options.map(o => o.id), [`TSK${OPEN}CLAIM`, `TSK${OPEN}TRANSFER`, `TSK${OPEN}EDIT`], 'the exact same poll the task is already offering, not a new/different one');
+  const legend = toMemberRows.find(row => /تذكير بأوامر المهام/.test(row.text));
+  assert.ok(legend, 'خالد still gets the plain-text command legend');
+  assert.equal(legend.choicesJson, null, 'the legend must never carry its own poll here -- it would silently invalidate the CLAIM/TRANSFER/EDIT poll just sent to the same person');
+});
+test('nudge on a task already in progress resends the FINISH/NOTE/TRANSFER/EDIT/EXTEND poll to its current owner', async t => {
+  const f = fixture(t); const admin = { senderNumber: '12025550103' };
+  const r = await f.run(nudge(PROGRESS), { ...admin, text: 'ذكّر خالد باللوحة' });
+  assert.equal(r.status, 'applied');
+  const poll = f.db.prepare("SELECT choices_json AS choicesJson FROM agent_outbox WHERE to_user='member' AND choices_json IS NOT NULL ORDER BY id DESC LIMIT 1").get();
+  assert.deepEqual(JSON.parse(poll.choicesJson).options.map(o => o.id), [`TSK${PROGRESS}FINISH`, `TSK${PROGRESS}NOTE`, `TSK${PROGRESS}TRANSFER`, `TSK${PROGRESS}EDIT`, `TSK${PROGRESS}EXTEND`]);
+});
+test('nudge on a task with no owner or suggested owner at all is refused cleanly instead of nudging nobody', async t => {
+  const f = fixture(t); const admin = { senderNumber: '12025550103' };
+  f.db.prepare('UPDATE tasks SET suggested_owner=NULL WHERE id=?').run(OPEN);
+  const r = await f.run(nudge(OPEN), { ...admin, text: 'ذكّر بالمهمة المقترحة' });
+  assert.equal(r.status, 'clarify');
+  assert.match(r.reply, /ما إلها مسؤول/);
+});
+test('nudge refuses to let Basim "remind" himself about his own task', async t => {
+  const f = fixture(t); const admin = { senderNumber: '12025550103' };
+  f.db.prepare("UPDATE tasks SET owner='باسم', suggested_owner=NULL WHERE id=?").run(PROGRESS);
+  const r = await f.run(nudge(PROGRESS), { ...admin, text: 'ذكرني باللوحة' });
+  assert.equal(r.status, 'clarify');
+  assert.match(r.reply, /مهمتك انت/);
+});
+test('nudge on an archived/removed task is denied cleanly instead of throwing', async t => {
+  const f = fixture(t); const admin = { senderNumber: '12025550103' };
+  f.db.prepare('DELETE FROM tasks WHERE id=?').run(OPEN);
+  const r = await f.run(nudge(OPEN), { ...admin, text: 'ذكّر خالد' });
+  assert.equal(r.status, 'clarify');
+});
 test('a duplicate delivery of the same details view replays the identical poll for the employee, never denied', async t => {
   const f = fixture(t);
   const extra = { messageId: 'DUP-1', responseMessageId: 'DUP-REPLY-1', text: 'شو تفاصيل مهمتي المقترحة؟' };

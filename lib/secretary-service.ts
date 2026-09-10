@@ -949,6 +949,27 @@ function reminder(db: DatabaseSync, event: Event, actor: ChatUser, state: Snapsh
   log(db, actor, event, "secretary_reminder", { summary: "جدول تذكيرًا لمهمة", taskId: task.id, dueAt: due }, now);
   return save(db, event, actor, { status: "scheduled", reply: `جدولت تذكيرك عن «${clean(task.title)}» يوم ${new Intl.DateTimeFormat("ar-JO", { timeZone: "Asia/Amman", dateStyle: "medium", timeStyle: "short" }).format(due)} في نفس المحادثة.`, taskId: task.id }, ["t:" + task.id], now);
 }
+// Basim: "بدي اقولو يستلم مهمه محوله اله اساسا بس ما استلمها" -- distinct from
+// both remind (only ever reminds the ACTOR himself, later, in his own chat)
+// and reassign (mutates the task, resets started_at, needs a "موافق"
+// confirmation). This changes nothing about the task at all: it just resends
+// the exact same claim/transfer/edit poll dispatchManagementNotice already
+// sent, right now, to whoever the task is currently suggested to or owned
+// by -- so it needs no confirmation either, same as a plain notification.
+function nudgeOwner(db: DatabaseSync, event: Event, actor: ChatUser, state: Snapshot, taskId: string, now: number): Result {
+  const task = state.tasks.find(t => t.id === taskId);
+  if (!task || task.archivedAt) return save(db, event, actor, { status: "clarify", reply: "هاي المهمة ما عادت متاحة." }, [], now);
+  const responsible = task.owner || task.suggestedOwner;
+  if (!responsible) return save(db, event, actor, { status: "clarify", reply: "هاي المهمة ما إلها مسؤول حاليًا لتذكيره." }, ["t:" + task.id], now);
+  if (responsible === actor.name) return save(db, event, actor, { status: "clarify", reply: "هاي مهمتك انت -- ما في حدا غيرك لتذكيره فيها." }, ["t:" + task.id], now);
+  const targetId = state.users.find(u => u.name === responsible)?.id;
+  if (!targetId) return save(db, event, actor, { status: "clarify", reply: "ما قدرت ألاقي حساب هذا الموظف لأرسله تذكيرًا." }, ["t:" + task.id], now);
+  const choices = freshTaskActionPoll(db, taskId, responsible, now);
+  enqueueAgentMessage(db, { toUser: targetId, text: `⏳ يا ${clean(responsible)}، مهمة «${clean(task.title)}» لسا بانتظار ردك.`, ...(choices ? { choices } : {}) }, now);
+  notifyTaskLegend(db, targetId, now + 1, !choices);
+  log(db, actor, event, "secretary_nudge", { summary: "أعاد إرسال تذكير المهمة لصاحبها الحالي", taskId: task.id, targetUserId: targetId }, now);
+  return save(db, event, actor, { status: "applied", reply: `✅ بعتّ لـ${clean(responsible)} تذكيرًا بمهمة «${clean(task.title)}».`, taskId: task.id }, ["t:" + task.id], now);
+}
 
 // Search only an exact user-authored question, never model-extracted history or a
 // task catalog. Private/project questions are answered through authorized DB reads.
@@ -1472,7 +1493,7 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
         return save(db, event, freshActor, { status: "summary", ...(batch ? { batchId: batch.batchId } : {}), reply: batch ? `نتيجة آخر طلب إرسال وافقت عليه للتيم:\n${batch.recipients.map(user => `• ${clean(user.name, 80)}: ${secretaryOutboxDeliveryLabel(user)}`).join("\n")}\nإقرار خادم واتساب: ${batch.acceptedCount}؛ وصول للجهاز: ${batch.deliveredCount}؛ قراءة: ${batch.readCount}. نجاح محاولة النقل وحده لا يثبت الوصول أو القراءة.` : "ما في طلب إرسال للتيم وافقت عليه ومسجّل بعد." }, [], now);
       } catch(error) { if (!(error instanceof SecretaryOutboxError)) throw error; return save(db, event, freshActor, { status: "clarify", reply: error.message }, [], now); }
     }
-    if (plan.kind === "command" || plan.kind === "remind" || plan.kind === "message_team" || plan.kind === "announce_team" || plan.kind === "claim_multiple") db.prepare("DELETE FROM secretary_pending WHERE conversation_key=?").run(key);
+    if (plan.kind === "command" || plan.kind === "remind" || plan.kind === "nudge" || plan.kind === "message_team" || plan.kind === "announce_team" || plan.kind === "claim_multiple") db.prepare("DELETE FROM secretary_pending WHERE conversation_key=?").run(key);
     if (plan.kind === "claim_multiple") {
       const { items, failed } = JSON.parse(plan.message || "{}") as { items?: Array<{ n: number; id: string; title: string }>; failed?: Array<{ n: number; reason: string }> };
       if (!items?.length) return save(db, event, freshActor, { status: "clarify", reply: "ما قدرت آخذ ولا مهمة من الأرقام يلي ذكرتها." }, [], now);
@@ -1539,6 +1560,7 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
       }
       return reminder(db, event, freshActor, state, task.id, due, now);
     }
+    if (plan.kind === "nudge") return nudgeOwner(db, event, freshActor, state, String(plan.taskId), now);
     if (plan.kind === "chat" || plan.kind === "clarify" || plan.kind === "search") {
       if (plan.kind === "clarify" && plan.message === PROJECT_NAME_QUESTION) markAwaitingProjectName(db, key, now);
       let reply = publicReply || plan.message || "أي مهمة تقصد، وشو المطلوب؟";
