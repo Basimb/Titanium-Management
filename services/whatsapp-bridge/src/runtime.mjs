@@ -262,7 +262,7 @@ export function createBridgeRuntime({ config, store, auth, makeWASocket, jidNorm
       // this background delivery job.
       if (polls && choices) {
         try {
-          await polls.sendQuestion({ choices, chatJid: `${number}@s.whatsapp.net`, senderNumber: number }, {
+          await polls.sendQuestion({ choices, chatJid: `${number}@s.whatsapp.net`, senderNumber: number, messageId }, {
             identity: { normalizeJid: jidNormalizedUser, lookupPhoneForLid: value => current.signalRepository.lidMapping.getPNForLID(value) },
             creatorJids: [current.user?.id || auth.state.creds.me?.id, auth.state.creds.me?.lid].filter(Boolean),
             authorize: async sender => ready && !stopped && current === socket && config.tasksEnabled !== false
@@ -327,7 +327,7 @@ export function createBridgeRuntime({ config, store, auth, makeWASocket, jidNorm
           // The text is the durable fallback. A poll failure must not retry this
           // successful text or interrupt login/inbox processing.
           try {
-            await polls.sendQuestion({ choices: result.choices, chatJid: jid, senderNumber: body.senderNumber }, {
+            await polls.sendQuestion({ choices: result.choices, chatJid: jid, senderNumber: body.senderNumber, messageId }, {
               identity: { normalizeJid: jidNormalizedUser, lookupPhoneForLid: value => current.signalRepository.lidMapping.getPNForLID(value) },
               creatorJids: [current.user?.id || auth.state.creds.me?.id, auth.state.creds.me?.lid].filter(Boolean),
               authorize: async sender => ready && !stopped && current === socket && config.tasksEnabled !== false

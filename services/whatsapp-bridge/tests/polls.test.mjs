@@ -110,6 +110,33 @@ test('poll proto and random secret are persisted before a single relay with requ
   assert.equal(content.message, undefined); // getMessage requires IMessage, not WAMessage.
 });
 
+test('a resend with a fresh messageId replaces a previous still-active poll for the exact same question, instead of being silently swallowed as existing forever', async t => {
+  const f = fixture(t);
+  assert.equal((await f.send(choices(), { messageId: 'MSG_1' })).status, 'sent');
+  assert.equal(f.sent.length, 1);
+  const first = f.sent[0];
+  // Same sender, same exact question (e.g. an explicit nudge, or the hourly
+  // unclaimed-task reminder in agent-followups.ts, both of which intentionally
+  // reuse the same choices.id every time) but a brand-new messageId, exactly
+  // like a real second delivery attempt: this must create a genuinely new
+  // WhatsApp poll, never silently report 'existing' and skip sending one.
+  assert.equal((await f.send(choices(), { messageId: 'MSG_2' })).status, 'sent');
+  assert.equal(f.sent.length, 2);
+  const second = f.sent[1];
+  assert.notEqual(first.options.messageId, second.options.messageId);
+  const rows = f.store.db.prepare('SELECT id,state FROM choice_polls').all();
+  assert.equal(rows.length, 1); // the stale row was replaced, not accumulated forever
+  assert.equal(rows[0].id, second.options.messageId);
+  assert.equal(rows[0].state, 'sent');
+  // The old poll's own id is gone; a vote referencing it no longer resolves,
+  // but the fresh one still does.
+  assert.equal(f.polls.outgoingMessage({ id: first.options.messageId, remoteJid: first.jid, fromMe: true }), undefined);
+  assert.equal(await f.accept(f.vote()), true);
+  // A retry of the very same attempt (identical messageId) still dedupes exactly as before.
+  assert.equal((await f.send(choices(), { messageId: 'MSG_2' })).status, 'existing');
+  assert.equal(f.sent.length, 2);
+});
+
 test('real encrypted vote survives private-store restart and queues only the server-owned option identity', async t => {
   const f = fixture(t);
   await f.send();

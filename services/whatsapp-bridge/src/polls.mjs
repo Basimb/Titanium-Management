@@ -59,7 +59,7 @@ export function createPollChoices({ store, config, proto, generateWAMessageConte
   // reason is always one of the fixed category strings below, never a raw
   // transport exception, message content, phone number or other secret --
   // same "no transport exception is exposed" rule the final catch already followed.
-  async function sendQuestion({ choices: value, chatJid, senderNumber }, { identity, creatorJids, authorize, relay, log = () => {} }) {
+  async function sendQuestion({ choices: value, chatJid, senderNumber, messageId }, { identity, creatorJids, authorize, relay, log = () => {} }) {
     cleanup();
     const choices = normalizePollChoices(value, now());
     if (!choices) { log('bad_choices'); return { status: 'fallback' }; }
@@ -72,7 +72,16 @@ export function createPollChoices({ store, config, proto, generateWAMessageConte
     if (!creators.length || creators.length > 2) { log(`bad_creator_count:${creators.length}`); return { status: 'fallback' }; }
     const canonical = `${senderNumber}@s.whatsapp.net`;
     const recipients = [...new Set([canonical, identity.normalizeJid(chatJid)])];
-    const id = 'TITANIUMPOLL' + digest(JSON.stringify([senderNumber, choices.id])).toString('hex').slice(0, 32).toUpperCase();
+    // messageId (the caller's own outbound WhatsApp message id, fresh and
+    // random per delivery attempt) folds into the poll id so a genuine resend
+    // of the exact same question -- an explicit nudge, or the hourly
+    // unclaimed-task reminder in agent-followups.ts, both of which reuse the
+    // same choices.id every time on purpose -- gets its own distinct WhatsApp
+    // poll message rather than colliding with (and being silently swallowed
+    // by) whichever poll was already sent for that question. A retry of this
+    // exact same attempt (same messageId) still computes the same id, so it
+    // still dedupes below exactly as before.
+    const id = 'TITANIUMPOLL' + digest(JSON.stringify([senderNumber, choices.id, messageId ?? null])).toString('hex').slice(0, 32).toUpperCase();
     if (db.prepare('SELECT id FROM choice_polls WHERE id=?').get(id)) return { status: 'existing' };
     let content;
     try {
@@ -85,6 +94,12 @@ export function createPollChoices({ store, config, proto, generateWAMessageConte
     const claimed = store.transaction(() => {
       if (db.prepare('SELECT id FROM choice_polls WHERE id=?').get(id)) return false;
       db.prepare("UPDATE choice_polls SET state='superseded',message_proto=NULL WHERE sender=? AND state IN ('sent','sending','uncertain')").run(senderNumber);
+      // UNIQUE(sender,question_id) exists only to keep one row per question per
+      // sender -- it must never be what permanently blocks a fresh, intentional
+      // resend of that very question. The previous row for this exact question
+      // (whatever its state -- it was just superseded above if it was still
+      // live) is replaced, not accumulated forever.
+      db.prepare('DELETE FROM choice_polls WHERE sender=? AND question_id=?').run(senderNumber, choices.id);
       db.prepare('INSERT INTO choice_polls(id,question_id,sender,chat_jid,recipient_jids,creator_jids,choices_json,message_proto,created_at,expires_at,state) VALUES(?,?,?,?,?,?,?,?,?,?,?)')
         .run(id, choices.id, senderNumber, canonical, JSON.stringify(recipients), JSON.stringify(creators), JSON.stringify(choices), bytes, now(), choices.expiresAt, 'sending');
       return true;
