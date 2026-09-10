@@ -15,7 +15,7 @@ import { enqueueAgentMessage } from "./agent-followups.ts";
 import { safeConversationalReply } from "./secretary-conversation-policy.ts";
 import { secretaryReviewRequest, isSecretaryIdentityQuery, isAddressedToSecretary, SECRETARY_IDENTITY } from "./secretary-review.ts";
 import { migrateSecretaryOutbox, getSecretaryOutboxRecipients, createSecretaryOutboxPreview, confirmSecretaryOutboxPreview, getSecretaryOutboxStatus, secretaryOutboxDeliveryLabel, SecretaryOutboxError } from "./secretary-outbox.ts";
-import { migrateSecretaryChoices, createSecretaryChoices, consumeSecretaryChoice, clearSecretaryChoices, secretaryChoiceOptions, SecretaryChoiceError, type SecretaryChoices, type SecretaryChoiceField } from "./secretary-choices.ts";
+import { migrateSecretaryChoices, createSecretaryChoices, consumeSecretaryChoice, clearSecretaryChoices, secretaryChoiceOptions, peekSecretaryChoiceField, SecretaryChoiceError, type SecretaryChoices, type SecretaryChoiceField } from "./secretary-choices.ts";
 
 type Task = { id: string; projectId: string; title: string; details: string; status: string; priority: string; owner: string | null; suggestedOwner: string | null; dueDate: string | null; updatedAt: number | null; archivedAt: number | null };
 type Project = { id: string; name: string; status: string; updatedAt?: number | null; archivedAt?: number | null };
@@ -263,16 +263,14 @@ function numberedTaskList(tasks: Task[], now: number) {
     return `${stableOrdinal(index + 1, tasks.length)} ${priority?.icon || "⚪"} ${clean(task.title, 90).replace(/\*/g, "")} — ${LABELS[task.status] || clean(task.status)} • ${clean(task.owner || task.suggestedOwner || "غير معيّن", 50)}${suffix}`;
   }).join("\n");
 }
-export function formatSecretaryProjectHeadings(reply: string, state: Pick<Snapshot, "projects" | "tasks">) {
-  return reply.split("\n").map(line => {
-    const plain = line.replace(/\*/g, "");
-    const content = plain.replace(/^\s*(?:(?:[-•]|\d+[.)])\s*)?(?:[🔵🔴🟡🟢⚪]\s*)?(?:المشروع:\s*)?/u, "");
-    const project = [...state.projects].sort((a, b) => b.name.length - a.name.length).find(p =>
-      content === p.name || content.startsWith(p.name + ":") || content.startsWith(p.name + " —") || content.startsWith(p.name + " -"));
-    if (project) return `🔵 *${project.name.replace(/\*/g, "")}*${content.slice(project.name.length)}`;
-    if (state.tasks.some(t => content === t.title || content.startsWith(t.title + " —") || content.startsWith(t.title + ":"))) return plain;
-    return line;
-  }).join("\n");
+// Used to bold-and-🔵 any project name the model's free chat/clarify text
+// mentioned inline -- Basim asked for zero special treatment of the concept
+// anywhere, even a visual hint that a name is "a project", so this now only
+// strips a stray literal "المشروع:" label the model might still emit,
+// leaving the rest of the line as ordinary text (project names themselves,
+// like "دابوق", are still fine -- he asked about them himself in that case).
+export function formatSecretaryProjectHeadings(reply: string, _state: Pick<Snapshot, "projects" | "tasks">) {
+  return reply.split("\n").map(line => line.replace(/^(\s*(?:[-•]|\d+[.)])?\s*)المشروع:\s*/u, "$1")).join("\n");
 }
 export function secretaryTaskCard(task: Task, state: Snapshot, now: number, detailed = false) {
   const latest = state.comments.filter(c => c.taskId === task.id).sort((a, b) => b.createdAt - a.createdAt)[0];
@@ -316,7 +314,7 @@ function readReply(plan: SecretaryIntent, actor: ChatUser, state: Snapshot, now:
     // unfulfilled "I'll re-review" promise for everyone.
     const isBasem = actor.id === "basem" && actor.role === "admin";
     const body = isBasem
-      ? "احكيلي بطريقتك: شو مهامي؟ اشرح مهمة جديدة، سجل تحديث، افتح مشروعًا، أو اعتمد/ارفض طلب معلّق. اسألني عن أي مهمة أو مشروع بالاسم وبجاوبك."
+      ? "احكيلي بطريقتك: شو مهامي؟ اشرح مهمة جديدة، سجل تحديث، أو اعتمد/ارفض طلب معلّق. اسألني عن أي مهمة بالاسم وبجاوبك."
       : `احكيلي بطريقتك: شو مهامي؟ سجل تحديث على مهمة قيد التنفيذ، أو اسألني عن أي مهمة بالاسم.\n${TASK_COMMANDS_LEGEND}\nولو عندك مهمة معروضة عليك وبعدك ما استلمتها: اكتب «استلمت» لبدء التنفيذ.`;
     return { result: { status: "summary", reply: `${greeting}${SECRETARY_IDENTITY}\n${body}\nالدخول للموقع برمز خاص على واتسابك المسجّل:\n${ORIGIN}/` }, scope: [] };
   }
@@ -325,7 +323,7 @@ function readReply(plan: SecretaryIntent, actor: ChatUser, state: Snapshot, now:
     const task = state.tasks.find(t => t.id === plan.taskId);
     if (task) return { result: { status: "summary", reply: `${greeting}\n${secretaryTaskCard(task, state, now, true)}\n\nاحكيلي شو صار معك أو شو بدك أعمل عليها.`, taskId: task.id }, scope: ["t:" + task.id, "p:" + task.projectId] };
     if (plan.projectId) { const project = state.projects.find(p => p.id === plan.projectId); if (project) { const tasks = state.tasks.filter(t => t.projectId === project.id); return { result: { status: "summary", reply: `🔵 *${clean(project.name)}* — ${LABELS[project.status] || clean(project.status)}\n${tasks.length} مهام متاحة إلك، ${tasks.filter(t => t.status === "completed").length} معتمدة.\n\n${tasks.slice(0, 6).map(t => secretaryTaskCard(t, state, now)).join("\n\n")}` }, scope: ["p:" + project.id, ...tasks.map(t => "t:" + t.id)] }; } }
-    return { result: { status: "clarify", reply: "أي مهمة أو مشروع بدك أشرح لك؟" }, scope: [] };
+    return { result: { status: "clarify", reply: "أي مهمة بدك أشرح لك؟" }, scope: [] };
   }
   // "مهام خالد" names one person -- report used to always answer with every
   // task from everyone regardless, which is exactly the "sends me everything,
@@ -496,7 +494,7 @@ function choiceCatalogHash(state: Snapshot) {
   return hash({ projects: state.projects.map(project => ({ id: project.id, name: project.name, status: project.status, updatedAt: project.updatedAt, archivedAt: project.archivedAt })),
     users: state.users.map(user => ({ id: user.id, name: user.name, active: user.active, role: user.role })) });
 }
-function missingChoiceField(draft: TaskDraft): SecretaryChoiceField | null {
+function missingChoiceField(draft: TaskDraft): Exclude<SecretaryChoiceField, "approvalDecision"> | null {
   if (!draft.projectId && !draft.newProjectName && !draft.noProject) return "projectId";
   if (!draft.title) return null;
   if (!draft.ownerId) return "ownerId";
@@ -748,6 +746,20 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
       || event.groupId !== null || event.inputKind === "voice" || event.replyToMessageId) return { status: "denied", reply: "" };
     const state = stateFor(db, freshActor); const duplicate = lookup(db, event, freshActor, state); if (duplicate) return duplicate;
     try {
+      // Two different kinds of live poll can occupy this conversation's one
+      // slot -- a task-intake field question, or (new) an approval-decision
+      // poll (see approvalDecisionChoices in secretary-agent.ts). Peek which
+      // one is actually stored before committing to the task-draft-specific
+      // validation below, which would otherwise reject every approval tap as
+      // a stale/mismatched choice.
+      if (peekSecretaryChoiceField(db, key) === "approvalDecision") {
+        const selected = consumeSecretaryChoice(db, { conversationKey: key, actorId: freshActor.id, draftVersion: "approvalDecision", catalogHash: "approvalDecision", now }, eventChoice);
+        const [approvalId, mark] = String(selected.value ?? "").split("|");
+        if (!approvalId || (mark !== "Y" && mark !== "N")) throw new SecretaryChoiceError();
+        const result = applyDecision(db, freshActor, { approvalId, decision: mark === "Y" ? "approved" : "rejected" }, now);
+        deliverAgentSideEffects(db, freshActor, result, now);
+        return save(db, event, freshActor, { status: result.status, reply: result.reply }, [], now);
+      }
       const liveIntake = intakeRow(db, key);
       if (!taskDraft || !storedIntake || !liveIntake || liveIntake.expires_at <= now || hash(liveIntake) !== hash(storedIntake)) throw new SecretaryChoiceError();
       const selected = consumeSecretaryChoice(db, { conversationKey: key, actorId: freshActor.id, draftVersion: hash(liveIntake), catalogHash: choiceCatalogHash(state), now }, eventChoice);
@@ -758,7 +770,7 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
         fields: { title: draft.title, details: draft.details, ownerId: draft.ownerId, priority: draft.priority, dueDate: draft.dueDate, name: null, reason: null, body: null, remindAt: null } };
       return taskIntake(db, event, freshActor, state, plan, key, current, now, selected.value === null ? selected.field : undefined);
     } catch (error) {
-      if (!(error instanceof SecretaryChoiceError)) throw error;
+      if (!(error instanceof SecretaryChoiceError) && !(error instanceof ManagementActionError)) throw error;
       return save(db, event, freshActor, { status: "clarify", reply: error.message }, [], now);
     }
   });
@@ -1096,8 +1108,12 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
     if (AGENT_KINDS.has(plan.kind)) {
       db.prepare("DELETE FROM secretary_pending WHERE conversation_key=?").run(key);
       const result = handleAgentIntent(plan, { db, actor: freshActor, now, inputKind: event.inputKind, text: event.text, suppressNotices: event.groupId === null && /(?:لا|ما)\s+(?:تبعت|تبعث|ترسل)|بدون\s+(?:رسائل|إشعارات|اشعارات)/u.test(event.text), users: state.users, tasks: state.tasks, projects: state.projects,
+        // Interactive choice-button storage is scoped to Basim's own private
+        // chat only (see approvalDecisionChoices/createSecretaryChoices) --
+        // same gate intakeChoices already uses for the task-intake polls.
+        conversationKey: event.groupId === null ? key : undefined,
         stash: command => { const token = "T" + randomBytes(3).toString("hex").toUpperCase(); db.prepare("INSERT INTO secretary_pending VALUES(?,?,?,?,?,?,?)").run(key, token, JSON.stringify(command), initialHash, event.text, event.messageId, now + CONFIRM_MS); log(db, freshActor, event, "secretary_proposal", { summary: "عرض تغييرًا ينتظر التأكيد", proposedCommand: command, confirmationRequired: true }, now); return token; } });
-      if (result) { deliverAgentSideEffects(db, freshActor, result, now); return save(db, event, freshActor, { status: result.status, reply: result.reply, ...(result.taskId ? { taskId: result.taskId } : {}) }, [...(result.taskId ? ["t:" + result.taskId] : []), ...(result.projectId ? ["p:" + result.projectId] : [])], now); }
+      if (result) { deliverAgentSideEffects(db, freshActor, result, now); return save(db, event, freshActor, { status: result.status, reply: result.reply, ...(result.taskId ? { taskId: result.taskId } : {}), ...(result.choices ? { choices: result.choices } : {}) }, [...(result.taskId ? ["t:" + result.taskId] : []), ...(result.projectId ? ["p:" + result.projectId] : [])], now); }
     }
     if (plan.kind === "command") {
       const command = commandFrom(plan, state);
@@ -1123,7 +1139,7 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
     }
     if (plan.kind === "chat" || plan.kind === "clarify" || plan.kind === "search") {
       if (plan.kind === "clarify" && plan.message === PROJECT_NAME_QUESTION) markAwaitingProjectName(db, key, now);
-      let reply = publicReply || plan.message || "أي مهمة أو مشروع تقصد، وشو المطلوب؟";
+      let reply = publicReply || plan.message || "أي مهمة تقصد، وشو المطلوب؟";
       if (plan.kind === "chat" || plan.kind === "clarify") reply = formatSecretaryProjectHeadings(safeConversationalReply(reply), state);
       // The planner explicitly identifies contextual replies; an unrelated topic has no focus.
       const contextTaskId = plan.kind !== "search" && state.tasks.some(task => task.id === plan.taskId) ? plan.taskId : null;

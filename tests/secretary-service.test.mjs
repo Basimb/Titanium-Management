@@ -541,12 +541,15 @@ test('general task question recovers from inference failure with scoped live dat
  assert.equal(f.db.prepare('SELECT count(*) n FROM tasks').get().n,2);
 });
 
-test('conversational lists enforce bold project headings with ordinary task names', async()=>{
+test('conversational replies get no special project-name treatment, just a stray "المشروع:" label stripped', async()=>{
  const {formatSecretaryProjectHeadings}=await import('../lib/secretary-service.ts');
  const state={projects:[{name:'مشروع تجريبي'}],tasks:[{title:'مهمة أولى'}]};
- assert.equal(formatSecretaryProjectHeadings('🔵 مشروع تجريبي\n🔴 **مهمة أولى**',state),'🔵 *مشروع تجريبي*\n🔴 مهمة أولى');
- assert.equal(formatSecretaryProjectHeadings('🔵 **مشروع تجريبي**:\n🟢 مهمة أولى',state),'🔵 *مشروع تجريبي*:\n🟢 مهمة أولى');
+ // A raw project name mentioned in an answer stays exactly as written -- no bolding, no 🔵.
+ assert.equal(formatSecretaryProjectHeadings('مشروع تجريبي\n🔴 مهمة أولى',state),'مشروع تجريبي\n🔴 مهمة أولى');
  assert.equal(formatSecretaryProjectHeadings('ناقشنا مشروع تجريبي اليوم',state),'ناقشنا مشروع تجريبي اليوم');
+ // A stray literal "المشروع:" label (however the model phrased the rest) is dropped, list marker kept.
+ assert.equal(formatSecretaryProjectHeadings('المشروع: مشروع تجريبي',state),'مشروع تجريبي');
+ assert.equal(formatSecretaryProjectHeadings('1. المشروع: مشروع تجريبي',state),'1. مشروع تجريبي');
 });
 
 test('project test request survives model start metadata and confirms once without team notices',async t=>{

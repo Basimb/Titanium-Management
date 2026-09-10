@@ -10,14 +10,21 @@ import { addKnowledge, formatKnowledgeHits, searchKnowledge } from "./knowledge.
 import { activeRules, formatRules, policyViolations, proposeRuleFromStatement, recordCorrection, suggestOwner } from "./rules.ts";
 import { can, isOwner, type PermissionActor } from "./permissions.ts";
 import type { SecretaryIntent } from "./secretary-intent.ts";
+import { createSecretaryChoices, type SecretaryChoices } from "./secretary-choices.ts";
 
-export type AgentResult = { status: string; reply: string; taskId?: string; projectId?: string; groupNotice?: string | null; notify?: Array<{ userId: string; text: string }> };
+export type AgentResult = { status: string; reply: string; taskId?: string; projectId?: string; groupNotice?: string | null; notify?: Array<{ userId: string; text: string }>; choices?: SecretaryChoices };
 export type AgentContext = {
   db: DatabaseSync; actor: ManagementActor; now: number; inputKind?: string | null; suppressNotices?: boolean;
   // The admin's own raw WhatsApp text, when available -- see the "decide"
   // case's use of it below for why this must be the verbatim message and
   // never the model-produced plan.message.
   text?: string | null;
+  // Present only for a real, tappable-poll-eligible conversation (Basim's own
+  // private chat -- see secretary-service.ts's call site, which mirrors
+  // intakeChoices' own `event.groupId === null` gate). Absent/empty means
+  // "no live poll possible here" and every choice-builder below degrades to
+  // its existing text-only reply, exactly as it did before this field existed.
+  conversationKey?: string;
   users: Array<{ id: string; name: string; active?: number }>; tasks: Array<{ id: string; title: string; projectId: string; status: string; owner: string | null; dueDate: string | null }>;
   projects: Array<{ id: string; name: string; status: string }>;
   /** Store a pending command for the existing confirmation flow (token returned). */
@@ -89,6 +96,31 @@ export function applyDecision(db: DatabaseSync, actor: ManagementActor, input: {
   return { status: "applied", reply: `✅ ${decision.approval.status === "approved" ? "اعتمدت" : "رفضت"} ${approvalTypeLabel(decision.approval.type)}: ${decision.approval.summary}`, groupNotice: decision.notifyGroup, notify };
 }
 
+// Basim's stated complaint: several pending approvals arrive as text-only
+// 🟢/🔴 instructions ("اعتمد 1"/"ارفض 2") with nothing to actually tap, and
+// he loses track of which number is which request. Whenever one of his own
+// live replies already shows one or more pending approvals as a decision
+// surface (the "approvals" owner listing below, and "decide"'s
+// ambiguous-multi-candidate/no-target fallbacks), attach a real tappable
+// poll with one ✅/❌ pair per request -- tapping resolves that exact
+// approval regardless of how many others are pending, with no number to
+// pick. Bounded to the existing 12-option/createSecretaryChoices cap (6
+// approvals × 2 decisions); beyond that, or outside a private reply this
+// admin can actually tap (see AgentContext.conversationKey), this quietly
+// returns undefined and callers keep their existing text-only reply --
+// exactly like intakeChoices' own fallback for the same table.
+function approvalDecisionChoices(db: DatabaseSync, ctx: AgentContext, pending: Approval[]): SecretaryChoices | undefined {
+  if (!ctx.conversationKey || ctx.actor.id !== "basem" || !pending.length || pending.length > 6) return undefined;
+  const options = pending.flatMap(approval => [
+    { label: `✅ اعتماد — ${approvalTypeLabel(approval.type)}: ${approval.summary}`, value: `${approval.id}|Y` },
+    { label: `❌ رفض — ${approvalTypeLabel(approval.type)}: ${approval.summary}`, value: `${approval.id}|N` },
+  ]);
+  try {
+    return createSecretaryChoices(db, { conversationKey: ctx.conversationKey, actorId: ctx.actor.id, draftVersion: "approvalDecision", catalogHash: "approvalDecision",
+      field: "approvalDecision", title: "اختار القرار", options, now: ctx.now, expiresAt: ctx.now + 30 * 60_000 });
+  } catch { return undefined; }
+}
+
 export function handleAgentIntent(plan: SecretaryIntent, ctx: AgentContext): AgentResult | null {
   const { db, actor, now } = ctx;
   const owner = isOwner(actor as PermissionActor);
@@ -97,7 +129,7 @@ export function handleAgentIntent(plan: SecretaryIntent, ctx: AgentContext): Age
     switch (plan.kind) {
       case "approvals": {
         const pending = listApprovals(db, actor, { status: "pending" });
-        if (owner) return { status: "summary", reply: formatPendingList(pending) };
+        if (owner) { const choices = approvalDecisionChoices(db, ctx, pending); return { status: "summary", reply: formatPendingList(pending), ...(choices ? { choices } : {}) }; }
         if (!pending.length) return { status: "summary", reply: "ما عندك طلبات معلّقة عند باسم حاليًا." };
         return { status: "summary", reply: `طلباتك بانتظار قرار باسم:\n${pending.map((approval, index) => `${index + 1}. ${approvalTypeLabel(approval.type)} — ${approval.summary}`).join("\n")}` };
       }
@@ -145,9 +177,15 @@ export function handleAgentIntent(plan: SecretaryIntent, ctx: AgentContext): Age
           // Same per-item 🟢/🔴 block + blank-line separation as formatPendingList
           // (see its comment) -- this is the other place several pending
           // requests can land in one message, and it must look the same way.
-          else if (found.candidates.length > 1) return { status: "clarify", reply: `في أكثر من طلب مطابق:\n\n${found.candidates.map((approval, index) => formatApprovalChoice(approval, index)).join("\n\n")}\n\nاختر رقم الطلب، أو قل «اعتمد الكل» أو «ارفض الكل».` };
+          else if (found.candidates.length > 1) {
+            const choices = approvalDecisionChoices(db, ctx, found.candidates);
+            return { status: "clarify", reply: `في أكثر من طلب مطابق:\n\n${found.candidates.map((approval, index) => formatApprovalChoice(approval, index)).join("\n\n")}\n\nاختر رقم الطلب، أو قل «اعتمد الكل» أو «ارفض الكل».`, ...(choices ? { choices } : {}) };
+          }
         }
-        if (!target) return { status: "clarify", reply: `ما قدرت أحدد الطلب المقصود.\n${formatPendingList(pending)}` };
+        if (!target) {
+          const choices = approvalDecisionChoices(db, ctx, pending);
+          return { status: "clarify", reply: `ما قدرت أحدد الطلب المقصود.\n${formatPendingList(pending)}`, ...(choices ? { choices } : {}) };
+        }
         // Basim may correct a still-pending task-open request in the very
         // message he decides it ("اعتمد بس خلها حمراء ومدتها يومين") --
         // patch the request before deciding so the corrected values are what

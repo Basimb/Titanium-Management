@@ -9,6 +9,7 @@ import { addKnowledge, searchKnowledge, formatKnowledgeHits } from "../lib/knowl
 import { createFollowupJobs, enqueueAgentMessage, planFollowups } from "../lib/agent-followups.ts";
 import { handleAgentIntent, parseProjectTaskLines, createProjectBundle } from "../lib/secretary-agent.ts";
 import { emptySecretaryIntent } from "../lib/secretary-intent.ts";
+import { migrateSecretaryChoices, peekSecretaryChoiceField } from "../lib/secretary-choices.ts";
 import { groupBudgetRemaining, isGroupWorthy, GROUP_DAILY_BUDGET } from "../lib/team-chat-policy.ts";
 
 const owner = { id: "basem", name: "باسم", role: "admin", active: 1 };
@@ -351,6 +352,56 @@ test("decide resolves an ordinal from the admin's raw text even when the model's
   // listApprovals defaults to status:"pending" when no filter is given, so the
   // full rejected count needs an explicit status filter here.
   assert.equal(listApprovals(db, owner, { status: "rejected" }).length, 4);
+});
+
+// Basim's actual complaint: his approvals come back green/red with nothing to
+// tap, and once more than one is pending he can't tell which number is which
+// request. The owner-listing ("approvals") and the ambiguous-multi-candidate
+// "decide" clarify are the two places several pending requests land in one
+// message -- both must now attach a real tap-to-decide poll (one ✅/❌ pair per
+// request) instead of only the text-based ordinal instructions, but only in a
+// conversation that can actually show a live poll (see AgentContext.conversationKey),
+// and only up to the existing 12-option/6-approval cap.
+test("approvals listing and the ambiguous-decide clarify attach a real tap-to-decide poll, bounded and gated on conversationKey", t => {
+  const db = fixture(t);
+  migrateSecretaryChoices(db);
+  const snapshot = getManagementSnapshot(db, owner);
+  const ctx = (actor, extra = {}) => ({ db, actor, now: T0, conversationKey: "basem-dm", users: snapshot.users, tasks: snapshot.tasks, projects: snapshot.projects, stash: () => "T", ...extra });
+  const inTx = work => { db.exec("BEGIN"); try { const result = work(); db.exec("COMMIT"); return result; } catch (error) { db.exec("ROLLBACK"); throw error; } };
+  requestDeadlineExtension(db, khaled, { taskId: "t1", newDueDate: "2026-09-10", reason: "المحكمة" }, { now: T0 });
+  requestTaskOwnership(db, shadi, { taskId: "t2" }, { now: T0 + 1 });
+  const base = { intakeMode: null, action: null, taskId: null, projectId: null, recipientIds: [], fields: { title: null, name: null, details: null, priority: null, dueDate: null, ownerId: null, reason: null, body: null, remindAt: null } };
+  // Owner listing: one ✅/❌ pair per pending request, no number to pick.
+  const list = inTx(() => handleAgentIntent({ ...base, kind: "approvals", message: null }, ctx(owner)));
+  assert.ok(list.choices, "owner approvals listing must attach a real poll");
+  assert.equal(list.choices.options.length, 4);
+  assert.ok(list.choices.options.some(o => /تمديد/.test(o.label) && /✅/.test(o.label)));
+  assert.ok(list.choices.options.some(o => /تمديد/.test(o.label) && /❌/.test(o.label)));
+  assert.equal(peekSecretaryChoiceField(db, "basem-dm"), "approvalDecision");
+  // Ambiguous "decide" (text matches neither an ordinal nor a specific
+  // requester) must show the same kind of poll for its candidates -- this is
+  // the exact "عندك خمس طلبات" scenario he described.
+  const ambiguous = inTx(() => handleAgentIntent({ ...base, kind: "decide", action: "approve", message: "بدك تقرر إيش" }, ctx(owner, { text: "قرر" })));
+  assert.equal(ambiguous.status, "clarify");
+  assert.ok(ambiguous.choices, "ambiguous multi-candidate clarify must attach a real poll too");
+  assert.equal(ambiguous.choices.options.length, 4);
+  // An employee asking about their own requests never gets a decision poll
+  // (they can't decide anything) -- plain text only, as before.
+  const employeeView = inTx(() => handleAgentIntent({ ...base, kind: "approvals" }, ctx(khaled)));
+  assert.equal(employeeView.choices, undefined);
+  // No live-poll-capable conversation (e.g. a group reply) -- conversationKey
+  // absent -- degrades to the existing text-only reply, never throws.
+  const noKey = inTx(() => handleAgentIntent({ ...base, kind: "approvals" }, { ...ctx(owner), conversationKey: undefined }));
+  assert.equal(noKey.choices, undefined);
+  assert.match(noKey.reply, /بانتظار قرارك|طلب/);
+  // Beyond the 12-option/6-approval cap, fall back to text-only rather than
+  // failing createSecretaryChoices' own option-count guard. project_create
+  // requests have no entity yet, so they can pile up freely (no dedup) --
+  // a convenient way to pad the count past 6 without juggling ownership rules.
+  for (let i = 0; i < 5; i++) requestProjectCreate(db, khaled, { name: `مشروع تجريبي ${i}` }, { now: T0 + 10 + i });
+  assert.ok(listApprovals(db, owner, { status: "pending" }).length > 6);
+  const tooMany = inTx(() => handleAgentIntent({ ...base, kind: "approvals" }, ctx(owner)));
+  assert.equal(tooMany.choices, undefined);
 });
 
 test("project_draft parses task lines, previews for owner, and bundle creation is atomic + audited", t => {

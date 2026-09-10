@@ -209,10 +209,14 @@ export function requestTaskCreate(db: DatabaseSync, claimed: ManagementActor, in
   const dueDate = input.dueDate ? dateOnly(input.dueDate, "الموعد") : null;
   const ownerId = input.ownerId ?? actor.id;
   const ownerName = snapshot.users.find(user => user.id === ownerId && user.active === 1)?.name ?? actor.name;
-  const summary = `فتح مهمة «${title}» بمشروع «${project.name}»`;
+  // Basim never sees which project a task landed under (see secretary-service.ts's
+  // display sweep) -- summary/ownerMessage stay project-free even though the
+  // task still needs a real projectId under the hood (payload.projectName is
+  // kept only for internal bookkeeping, never rendered to him).
+  const summary = `فتح مهمة «${title}»`;
   const approval = insert(db, actor, { type: "task_create", entityType: "task", entityId: null, summary,
     payload: { projectId: project.id, projectName: project.name, title, details, priority: input.priority, dueDate, ownerId, ownerName } }, now(options));
-  const ownerMessage = `${actor.name} يقترح فتح مهمة «${title}» بمشروع «${project.name}»${details ? `\nالتفاصيل: ${details}` : ""}\nالمسؤول: ${ownerName}\nالأولوية: ${PRIORITY_ARABIC[input.priority]}\nالموعد: ${dueDate ?? "بدون موعد"}${APPROVAL_CHOICE_HINT}\n(تقدر كمان تصحح قبل ما توافق، مثلاً: «اعتمد بس خلها حمراء ومدتها يومين»)`;
+  const ownerMessage = `${actor.name} يقترح فتح مهمة «${title}»${details ? `\nالتفاصيل: ${details}` : ""}\nالمسؤول: ${ownerName}\nالأولوية: ${PRIORITY_ARABIC[input.priority]}\nالموعد: ${dueDate ?? "بدون موعد"}${APPROVAL_CHOICE_HINT}\n(تقدر كمان تصحح قبل ما توافق، مثلاً: «اعتمد بس خلها حمراء ومدتها يومين»)`;
   return { approval, ownerMessage };
 }
 
@@ -293,7 +297,10 @@ export function decideApproval(db: DatabaseSync, claimed: ManagementActor, input
           effect = executeManagementAction(db, actor, { action: "add_task", projectId: String(approval.payload.projectId), title: String(approval.payload.title),
             ...(approval.payload.details ? { details: String(approval.payload.details) } : {}), priority: approval.payload.priority as "red" | "yellow" | "green",
             dueDate: approval.payload.dueDate as string | null, ownerId: approval.payload.ownerId as string | null }, { now: at, source: "approval", auditContext: { origin: "approval", confirmedBy: actor.id } });
-          notifyGroup = `🆕 مهمة جديدة: ${approval.payload.title} — ${approval.payload.projectName}${approval.payload.ownerName ? ` — ${approval.payload.ownerName}` : ""}`;
+          // Same project-free wording as formatManagementNotice's "create"
+          // case in secretary-service.ts for a directly-created task -- an
+          // employee's request, once approved, must read identically.
+          notifyGroup = `🆕 مهمة جديدة: ${approval.payload.title}${approval.payload.ownerName ? ` — ${approval.payload.ownerName}` : ""}`;
           break;
         }
         case "project_create": {

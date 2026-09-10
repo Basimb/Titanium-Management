@@ -2,7 +2,7 @@ import { randomBytes } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 
 export type SecretaryChoices = { id: string; title: string; options: Array<{ id: string; label: string }>; expiresAt: number };
-export type SecretaryChoiceField = "projectId" | "ownerId" | "priority" | "dueDate";
+export type SecretaryChoiceField = "projectId" | "ownerId" | "priority" | "dueDate" | "approvalDecision";
 type Option = { id: string; label: string; value: string | null };
 type Binding = { conversationKey: string; actorId: string; draftVersion: string; catalogHash: string; now: number };
 type Row = { question_id: string; actor_id: string; draft_version: string; catalog_hash: string; field: SecretaryChoiceField; title: string; options_json: string; expires_at: number };
@@ -39,9 +39,14 @@ export function consumeSecretaryChoice(db: DatabaseSync, binding: Binding, choic
   if (!row || row.question_id !== choice.questionId || row.actor_id !== binding.actorId || row.draft_version !== binding.draftVersion
     || row.catalog_hash !== binding.catalogHash || row.expires_at <= binding.now) throw new SecretaryChoiceError();
   const option = (JSON.parse(row.options_json) as Option[]).find(item => item.id === choice.optionId);
-  if (!option || !["projectId", "ownerId", "priority", "dueDate"].includes(row.field)) throw new SecretaryChoiceError();
+  if (!option || !["projectId", "ownerId", "priority", "dueDate", "approvalDecision"].includes(row.field)) throw new SecretaryChoiceError();
   clearSecretaryChoices(db, binding.conversationKey);
   return { field: row.field, value: option.value, label: option.label };
+}
+/** Read-only peek so callers can dispatch on which kind of choice (task-draft field vs. approval decision) is currently live before binding/validating it. */
+export function peekSecretaryChoiceField(db: DatabaseSync, conversationKey: string): SecretaryChoiceField | undefined {
+  const row = db.prepare("SELECT field FROM secretary_choices WHERE conversation_key=?").get(conversationKey) as { field: SecretaryChoiceField } | undefined;
+  return row?.field;
 }
 
 export function secretaryChoiceOptions(field: SecretaryChoiceField, catalog: {
