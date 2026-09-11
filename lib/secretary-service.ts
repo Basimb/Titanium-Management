@@ -23,6 +23,12 @@ type Snapshot = { tasks: Task[]; projects: Project[]; users: Array<ChatUser>; co
 type Event = TeamChatEnvelope & { replyToMessageId?: string | null; responseMessageId?: string | null };
 type Result = { status: string; reply: string; taskId?: string; batchId?: string; choices?: SecretaryChoices };
 type Pending = { token: string; command_json: string; snapshot_hash: string; original_text: string; source_message_id: string; expires_at: number };
+// A typed close_request/task_transfer_request/comment/submit whose OWN task
+// turned out ambiguous (see legendCandidates reuse below) -- holds just
+// enough of the original command to finish it once a poll tap names which
+// task, mirroring secretary_pending's shape but keyed to a task CHOICE
+// instead of a yes/no confirmation.
+type TaskChoiceRow = { token: string; kind: string; candidate_ids: string; fields_json: string; original_text: string; source_message_id: string; expires_at: number };
 type ConfirmationView = { token: string; preview_event_key: string; requires_restatement: number };
 type HistoryRow = { original_text: string; result_json: string; scope_json: string };
 // newProjectName holds a project name the user gave that doesn't match any
@@ -79,6 +85,28 @@ const LEGEND_NO_TASK: Record<string, string> = {
   LGDTRANSFER: "ما عندك مهمة مفتوحة أو قيد التنفيذ حاليًا لتحويلها.",
 };
 const LEGEND_MANY_TASK = "عندك أكثر من مهمة تنطبق، أي وحدة بالضبط؟";
+// Basim: typing "انهاء المهمة"/"تحويل المهمة"/"اضافة ملاحظة" (close_request/
+// task_transfer_request/comment, below) without clearly naming which task let
+// the model silently guess one of several eligible tasks on its own -- "على
+// الاغلب البوت بيختار اول مهمه قيد التفيذ". legendCandidates already solves
+// exactly this ambiguity for the TAPPED legend reminder (auto-resolve a
+// single candidate, otherwise ask); this poll is the same idea applied to a
+// person's own TYPED command instead of a stale model guess: a real tappable
+// choice among the SAME eligible tasks, holding the rest of that command
+// (a note's text, a transfer's target owner, ...) in secretary_task_choice
+// until the tap says which task it was about all along.
+function taskChoicePoll(token: string, candidates: Task[], now: number): SecretaryChoices {
+  return { id: `TDQ${token}`, title: LEGEND_MANY_TASK, expiresAt: now + CONFIRM_MS,
+    options: candidates.map((task, index) => ({ id: `TDQ${token}_${index}`, label: clean(task.title, 90) })) };
+}
+function parseTaskChoicePollChoice(event: Event): { token: string; index: number } | null {
+  const choice = event.choice;
+  if (!choice || !choice.questionId.startsWith("TDQ")) return null;
+  const token = choice.questionId.slice(3);
+  if (!/^[0-9A-F]{6}$/.test(token)) return null;
+  const match = new RegExp(`^TDQ${token}_(\\d+)$`).exec(choice.optionId);
+  return match ? { token, index: Number(match[1]) } : null;
+}
 function legendRewriteText(optionId: string, title: string): string {
   return optionId === "LGDFINISH" ? `خلصت مهمة «${title}»`
     : optionId === "LGDNOTE" ? `بدي أضيف ملاحظة على مهمة «${title}»`
@@ -178,6 +206,7 @@ export function migrateSecretary(db: DatabaseSync) {
   db.exec(`CREATE TABLE IF NOT EXISTS secretary_events (event_key TEXT PRIMARY KEY,payload_hash TEXT NOT NULL,actor_id TEXT NOT NULL,conversation_key TEXT NOT NULL,original_text TEXT NOT NULL,result_json TEXT NOT NULL,scope_json TEXT NOT NULL,created_at INTEGER NOT NULL,response_message_id TEXT);
     CREATE INDEX IF NOT EXISTS secretary_history ON secretary_events(conversation_key,created_at);
     CREATE TABLE IF NOT EXISTS secretary_pending (conversation_key TEXT PRIMARY KEY,token TEXT NOT NULL,command_json TEXT NOT NULL,snapshot_hash TEXT NOT NULL,original_text TEXT NOT NULL,source_message_id TEXT NOT NULL,expires_at INTEGER NOT NULL);
+    CREATE TABLE IF NOT EXISTS secretary_task_choice (conversation_key TEXT PRIMARY KEY,token TEXT NOT NULL,kind TEXT NOT NULL,candidate_ids TEXT NOT NULL,fields_json TEXT NOT NULL,original_text TEXT NOT NULL,source_message_id TEXT NOT NULL,expires_at INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS secretary_confirmation_views (conversation_key TEXT PRIMARY KEY,token TEXT NOT NULL,preview_event_key TEXT NOT NULL,requires_restatement INTEGER NOT NULL DEFAULT 0);
     CREATE TABLE IF NOT EXISTS secretary_task_intake (conversation_key TEXT PRIMARY KEY,draft_json TEXT NOT NULL,last_event_key TEXT NOT NULL,expires_at INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS secretary_reminders (id TEXT PRIMARY KEY,actor_id TEXT NOT NULL,sender_number TEXT NOT NULL,group_id TEXT,task_id TEXT NOT NULL,due_at INTEGER NOT NULL,state TEXT NOT NULL DEFAULT 'pending',created_at INTEGER NOT NULL,sent_at INTEGER,sending_at INTEGER,responded_at INTEGER,reply_message_id TEXT NOT NULL);
@@ -1126,6 +1155,48 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
       return save(db, event, fresh, { status: "clarify", reply }, [], now);
     });
   }
+  // A tap on taskChoicePoll (see the close_request/task_transfer_request/
+  // comment/submit branches further below): the tapped option already names
+  // which of the exact candidates offered a moment earlier was meant, so it
+  // finishes the original command right now with the rest of what the actor
+  // already typed (a note's text, a transfer's target owner, ...), exactly
+  // as if that one task had been the only candidate all along -- same trust
+  // level as every other direct poll resolution above.
+  const taskChoicePick = parseTaskChoicePollChoice(event);
+  if (taskChoicePick && actor.active === 1 && event.groupId === null && !event.replyToMessageId) {
+    return transaction(db, () => {
+      const fresh = actorFor(db, event, config);
+      if (!config.enabled || !fresh || JSON.stringify(fresh) !== JSON.stringify(actor)) return { status: "denied", reply: "" };
+      const duplicate = lookup(db, event, fresh, stateFor(db, fresh)); if (duplicate) return duplicate;
+      const row = db.prepare("SELECT * FROM secretary_task_choice WHERE conversation_key=?").get(key) as TaskChoiceRow | undefined;
+      db.prepare("DELETE FROM secretary_task_choice WHERE conversation_key=?").run(key);
+      if (!row || row.token !== taskChoicePick.token || row.expires_at <= now) return save(db, event, fresh, { status: "clarify", reply: "هذا الاختيار ما عاد صالحًا؛ أعد كتابة طلبك." }, [], now);
+      const candidateIds = JSON.parse(row.candidate_ids) as string[];
+      const taskId = candidateIds[taskChoicePick.index];
+      const state = stateFor(db, fresh);
+      const task = taskId ? state.tasks.find(t => t.id === taskId) : undefined;
+      if (!task) return save(db, event, fresh, { status: "clarify", reply: "هاي المهمة ما عادت متاحة." }, [], now);
+      const stashedFields = JSON.parse(row.fields_json) as Record<string, unknown>;
+      try {
+        if (row.kind === "comment" || row.kind === "submit") {
+          return perform(db, event, fresh, state, { action: row.kind, taskId: task.id, ...(row.kind === "comment" ? { comment: stashedFields.comment } : {}) }, now, { originalText: row.original_text, sourceMessageId: row.source_message_id, confirmationRequired: false });
+        }
+        const base = emptySecretaryIntent(row.kind as "close_request" | "task_transfer_request");
+        const syntheticPlan: SecretaryIntent = row.kind === "close_request"
+          ? { ...base, taskId: task.id, message: (stashedFields.message as string | null) ?? null, fields: { ...base.fields, details: (stashedFields.details as string | null) ?? null } }
+          : { ...base, taskId: task.id, fields: { ...base.fields, ownerId: (stashedFields.ownerId as string | null) ?? null, reason: (stashedFields.reason as string | null) ?? null } };
+        const result = handleAgentIntent(syntheticPlan, { db, actor: fresh, now, inputKind: event.inputKind, text: row.original_text, suppressNotices: event.groupId === null && /(?:لا|ما)\s+(?:تبعت|تبعث|ترسل)|بدون\s+(?:رسائل|إشعارات|اشعارات)/u.test(row.original_text), users: state.users, tasks: state.tasks, projects: state.projects,
+          conversationKey: event.groupId === null ? key : undefined,
+          stash: command => { const stashToken = "T" + randomBytes(3).toString("hex").toUpperCase(); db.prepare("INSERT INTO secretary_pending VALUES(?,?,?,?,?,?,?)").run(key, stashToken, JSON.stringify(command), initialHash, row.original_text, row.source_message_id, now + CONFIRM_MS); log(db, fresh, event, "secretary_proposal", { summary: "عرض تغييرًا ينتظر التأكيد", proposedCommand: command, confirmationRequired: true }, now); return stashToken; } });
+        if (!result) return save(db, event, fresh, { status: "clarify", reply: "ما قدرت أكمل هذا الطلب." }, [], now);
+        deliverAgentSideEffects(db, fresh, result, now);
+        return save(db, event, fresh, { status: result.status, reply: result.reply, ...(result.taskId ? { taskId: result.taskId } : {}), ...(result.choices ? { choices: result.choices } : {}) }, [...(result.taskId ? ["t:" + result.taskId] : [])], now);
+      } catch (error) {
+        if (!(error instanceof ManagementActionError)) throw error;
+        return save(db, event, fresh, { status: "clarify", reply: error.message }, [], now);
+      }
+    });
+  }
   const pending = db.prepare("SELECT * FROM secretary_pending WHERE conversation_key=?").get(key) as Pending | undefined;
   const storedIntake = intakeRow(db, key);
   const pendingDraft = pendingTaskDraft(pending, initialHash, now);
@@ -1528,6 +1599,26 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
       return save(db, event, freshActor, { status: "confirmation", reply: `رح أنشر هالنص على جروب الفريق من رقم الإدارة (مو على الخاص):\n\n${text}\n\nلم أنشر شيئًا بعد. اكتب «موافق ${token}» أو رد بالموافقة مباشرة على هذه المعاينة؛ وللتراجع اكتب «إلغاء». التأكيد صالح 10 دقائق.` }, [], now);
     }
     if (plan.kind === "project_draft" && event.groupId !== null && !(freshActor.id === "basem" && freshActor.role === "admin")) return save(db, event, freshActor, { status: "denied", reply: "فتح مشروع جديد لازم يكون من رسالة خاصة معي، مش من الجروب. راسلني عالخاص." }, [], now);
+    // Basim's report: "انهاء المهمة"/"تحويل المهمة" typed with more than one
+    // eligible task open let the model's own taskId guess through untested --
+    // close_request and task_transfer_request are exactly the employee
+    // self-service kinds legendCandidates' LGDFINISH/LGDTRANSFER filters were
+    // built for (never applied to Basim's own admin flows, hence freshActor.id
+    // !== "basem" here), so reuse them: one real candidate silently corrects
+    // whatever taskId the model returned (no guess left standing even when it
+    // happened to be right), several candidates stop here for a real tappable
+    // choice instead of ever trusting that guess.
+    if ((plan.kind === "close_request" || plan.kind === "task_transfer_request") && freshActor.id !== "basem" && plan.taskId) {
+      const candidates = legendCandidates(state, freshActor.name, plan.kind === "close_request" ? "LGDFINISH" : "LGDTRANSFER");
+      if (candidates.length === 1) plan = { ...plan, taskId: candidates[0].id };
+      else if (candidates.length > 1) {
+        const token = randomBytes(3).toString("hex").toUpperCase();
+        const fields = plan.kind === "close_request" ? { details: plan.fields.details, message: plan.message } : { ownerId: plan.fields.ownerId, reason: plan.fields.reason };
+        db.prepare("INSERT INTO secretary_task_choice VALUES(?,?,?,?,?,?,?,?)").run(key, token, plan.kind, JSON.stringify(candidates.map(t => t.id)), JSON.stringify(fields), event.text, event.messageId, now + CONFIRM_MS);
+        log(db, freshActor, event, "secretary_task_choice", { summary: "عرض اختيار المهمة قبل التنفيذ", kind: plan.kind, candidateIds: candidates.map(t => t.id) }, now);
+        return save(db, event, freshActor, { status: "clarify", reply: `${LEGEND_MANY_TASK}\n${candidates.map(t => `• ${clean(t.title, 150)}`).join("\n")}`, choices: taskChoicePoll(token, candidates, now) }, candidates.map(t => "t:" + t.id), now);
+      }
+    }
     if (AGENT_KINDS.has(plan.kind)) {
       db.prepare("DELETE FROM secretary_pending WHERE conversation_key=?").run(key);
       const result = handleAgentIntent(plan, { db, actor: freshActor, now, inputKind: event.inputKind, text: event.text, suppressNotices: event.groupId === null && /(?:لا|ما)\s+(?:تبعت|تبعث|ترسل)|بدون\s+(?:رسائل|إشعارات|اشعارات)/u.test(event.text), users: state.users, tasks: state.tasks, projects: state.projects,
@@ -1541,6 +1632,21 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
     if (plan.kind === "command") {
       const command = commandFrom(plan, state);
       if (freshActor.id !== "basem" && !["claim", "cancel_claim", "comment", "submit"].includes(String(command.action))) return save(db, event, freshActor, { status: "denied", reply: "هذا القرار من صلاحيات باسم. أقدر أساعدك بتحديث مهامك أو إرسالها للمراجعة." }, [], now);
+      // Same fix as the close_request/task_transfer_request branch above,
+      // for "اضافة ملاحظة"/comment (LGDNOTE) and a typed "submit" that still
+      // reaches here as a plain command action (close_request is the normal
+      // path for employees now, but nothing stops the model from emitting a
+      // bare submit instead) -- both are the other two commands Basim named.
+      if (freshActor.id !== "basem" && (command.action === "comment" || command.action === "submit") && typeof command.taskId === "string") {
+        const candidates = legendCandidates(state, freshActor.name, command.action === "comment" ? "LGDNOTE" : "LGDFINISH");
+        if (candidates.length === 1) command.taskId = candidates[0].id;
+        else if (candidates.length > 1) {
+          const token = randomBytes(3).toString("hex").toUpperCase();
+          db.prepare("INSERT INTO secretary_task_choice VALUES(?,?,?,?,?,?,?,?)").run(key, token, command.action, JSON.stringify(candidates.map(t => t.id)), JSON.stringify(command.action === "comment" ? { comment: command.comment } : {}), event.text, event.messageId, now + CONFIRM_MS);
+          log(db, freshActor, event, "secretary_task_choice", { summary: "عرض اختيار المهمة قبل التنفيذ", kind: command.action, candidateIds: candidates.map(t => t.id) }, now);
+          return save(db, event, freshActor, { status: "clarify", reply: `${LEGEND_MANY_TASK}\n${candidates.map(t => `• ${clean(t.title, 150)}`).join("\n")}`, choices: taskChoicePoll(token, candidates, now) }, candidates.map(t => "t:" + t.id), now);
+        }
+      }
       if (SENSITIVE.has(String(command.action)) || event.inputKind === "voice") {
         const token = "T" + randomBytes(3).toString("hex").toUpperCase();
         db.prepare("INSERT INTO secretary_pending VALUES(?,?,?,?,?,?,?)").run(key, token, JSON.stringify(command), initialHash, event.text, event.messageId, now + CONFIRM_MS);
