@@ -13,7 +13,7 @@ import { GROUP_EVENT_ALLOWLIST, groupBudgetRemaining } from "./team-chat-policy.
 import type { SecretaryChoices } from "./secretary-choices.ts";
 
 export type FollowupConfig = { enabled: boolean; contacts: Array<{ userId: string; number: string }>; groupId?: string | null; workStartHour?: number; workEndHour?: number; timezoneOffsetMinutes?: number; publicUrl?: string };
-type Planned = { id: string; kind: "overdue_task" | "silent_task" | "stale_approval" | "daily_digest" | "auto_reminder_morning" | "auto_reminder_evening" | "unclaimed_task" | "stale_unclaimed"; targetUser: string; entityId: string | null; to: string; text: string; choices?: SecretaryChoices };
+type Planned = { id: string; kind: "overdue_task" | "silent_task" | "stale_approval" | "daily_digest" | "auto_reminder_morning" | "auto_reminder_evening" | "unclaimed_task" | "stale_unclaimed" | "unowned_task"; targetUser: string; entityId: string | null; to: string; text: string; choices?: SecretaryChoices };
 const DAY = 24 * 60 * 60_000, SILENT_AFTER = 3 * DAY, STALE_APPROVAL_AFTER = 2 * DAY, STALE_UNCLAIMED_AFTER = DAY, HOUR = 60 * 60_000;
 const newMessageId = () => "3EB0" + randomBytes(18).toString("hex").toUpperCase();
 const clean = (value: string) => value.replace(/[\x00-\x1f\u202a-\u202e\u2066-\u2069]/g, " ").slice(0, 200);
@@ -132,6 +132,49 @@ export function planFollowups(db: DatabaseSync, config: FollowupConfig, at: numb
     }
   }
 
+  // Basim asked for unclaimed (still "open", never rejected/transferred) tasks
+  // to keep nudging their suggested owner every hour, AROUND THE CLOCK (not
+  // just during working hours) until they respond in any accepted way --
+  // claim it ("استلمت"), or ask to transfer/decline it (which files a pending
+  // approval and moves the decision to Basim, so the employee-facing nag
+  // stops right away rather than waiting for Basim's decision). Deliberately
+  // computed and returned BEFORE the work-hours gate below, same reason the
+  // twice-daily auto-reminder block above is. A task with NO suggested owner
+  // at all can never be "received" by anyone -- Basim's own follow-up request
+  // was to have those come back to him directly instead, same always-on
+  // hourly cadence, until he assigns someone. Applies uniformly to old and
+  // newly created open tasks alike, since this scans the live snapshot fresh
+  // every time rather than tracking task age.
+  const ownerNumber = numberOf(owner.id);
+  for (const task of snapshot.tasks) {
+    if (task.archivedAt || task.status !== "open" || task.owner) continue;
+    const responsible = task.suggestedOwner;
+    if (responsible) {
+      const userId = userIdByName.get(responsible); const number = userId ? numberOf(userId) : null;
+      if (!userId || !number) continue;
+      if (alreadySent(db, "unclaimed_task", userId, task.id, at - HOUR)) continue;
+      if (db.prepare("SELECT id FROM approvals WHERE status='pending' AND entity_id=?").get(task.id)) continue;
+      const choices = autoReminderPoll([task], responsible, at);
+      // This nudge repeats hourly (Basim's own request) and each resend
+      // supersedes the previous WhatsApp poll bubble server-side -- but the
+      // WhatsApp app itself never marks an old poll bubble as expired, so
+      // several look-alike, still-tappable bubbles for the same task pile up
+      // in the chat and only the newest is actually live. Tapping an older one
+      // is silently dropped (see services/whatsapp-bridge/src/polls.mjs
+      // acceptVote's superseded/expired checks) with zero feedback, which is
+      // exactly what looked like "the tap isn't registering" for Khaled. Spell
+      // out which bubble is live rather than silently relying on the reader to
+      // guess.
+      const staleNote = choices ? "\n⚠️ إذا في استطلاع تصويت أقدم من هذه الرسالة لنفس المهمة، هو منتهي الصلاحية — رد من استطلاع هذه الرسالة تحديدًا." : "";
+      plans.push({ id: randomBytes(8).toString("hex"), kind: "unclaimed_task", targetUser: userId, entityId: task.id, to: `${number}@s.whatsapp.net`,
+        text: `⏳ يا ${clean(responsible)}، مهمة «${clean(task.title)}» لسا بانتظار ردك.${staleNote}`, ...(choices ? { choices } : {}) });
+    } else if (ownerNumber) {
+      if (alreadySent(db, "unowned_task", owner.id, task.id, at - HOUR)) continue;
+      plans.push({ id: randomBytes(8).toString("hex"), kind: "unowned_task", targetUser: owner.id, entityId: task.id, to: `${ownerNumber}@s.whatsapp.net`,
+        text: `⚠️ يا باسم، مهمة «${clean(task.title)}» ما إلها موظف مسؤول. حددلها موظف أو تولاها بنفسك.` });
+    }
+  }
+
   if (hour < (config.workStartHour ?? 9) || hour >= (config.workEndHour ?? 18)) return plans;
   const overdueTasks: ManagementTask[] = [];
   for (const task of snapshot.tasks) {
@@ -155,38 +198,6 @@ export function planFollowups(db: DatabaseSync, config: FollowupConfig, at: numb
         text: `👋 يا ${clean(task.owner)}، ما وصلني تحديث على «${clean(task.title)}» من 3 أيام. وين وصلت؟ أو سجّل صوت وأنا أحدّثها.`, ...(choices ? { choices } : {}) });
     }
   }
-  // Basim asked for unclaimed (still "open", never rejected/transferred) tasks
-  // to keep nudging their suggested owner every hour, during working hours
-  // only, until they respond in any accepted way -- claim it ("استلمت"),
-  // or ask to transfer/decline it (which files a pending approval and moves
-  // the decision to Basim, so the employee-facing nag stops right away
-  // rather than waiting for Basim's decision). Applies uniformly to old and
-  // newly created open tasks alike, since this scans the live snapshot fresh
-  // every time rather than tracking task age.
-  for (const task of snapshot.tasks) {
-    if (task.archivedAt || task.status !== "open" || task.owner) continue;
-    const responsible = task.suggestedOwner;
-    if (!responsible) continue;
-    const userId = userIdByName.get(responsible); const number = userId ? numberOf(userId) : null;
-    if (!userId || !number) continue;
-    if (alreadySent(db, "unclaimed_task", userId, task.id, at - HOUR)) continue;
-    if (db.prepare("SELECT id FROM approvals WHERE status='pending' AND entity_id=?").get(task.id)) continue;
-    const choices = autoReminderPoll([task], responsible, at);
-    // This nudge repeats hourly (Basim's own request) and each resend
-    // supersedes the previous WhatsApp poll bubble server-side -- but the
-    // WhatsApp app itself never marks an old poll bubble as expired, so
-    // several look-alike, still-tappable bubbles for the same task pile up
-    // in the chat and only the newest is actually live. Tapping an older one
-    // is silently dropped (see services/whatsapp-bridge/src/polls.mjs
-    // acceptVote's superseded/expired checks) with zero feedback, which is
-    // exactly what looked like "the tap isn't registering" for Khaled. Spell
-    // out which bubble is live rather than silently relying on the reader to
-    // guess.
-    const staleNote = choices ? "\n⚠️ إذا في استطلاع تصويت أقدم من هذه الرسالة لنفس المهمة، هو منتهي الصلاحية — رد من استطلاع هذه الرسالة تحديدًا." : "";
-    plans.push({ id: randomBytes(8).toString("hex"), kind: "unclaimed_task", targetUser: userId, entityId: task.id, to: `${number}@s.whatsapp.net`,
-      text: `⏳ يا ${clean(responsible)}، مهمة «${clean(task.title)}» لسا بانتظار ردك.${staleNote}`, ...(choices ? { choices } : {}) });
-  }
-  const ownerNumber = numberOf(owner.id);
   if (ownerNumber && !alreadySent(db, "stale_approval", owner.id, null, at - DAY)) {
     const stale = staleApprovals(db, at, STALE_APPROVAL_AFTER);
     if (stale.length) plans.push({ id: randomBytes(8).toString("hex"), kind: "stale_approval", targetUser: owner.id, entityId: null, to: `${ownerNumber}@s.whatsapp.net`, text: `يا باسم، هذه الطلبات معلّقة من أكثر من يومين:\n${formatPendingList(stale)}` });

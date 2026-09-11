@@ -513,26 +513,35 @@ test("follow-ups: overdue owner nudge once per day, stale approval to owner, dig
   const at = Date.UTC(2026, 8, 10, 7, 0); // 10:00 Amman, Thursday
   const config = { enabled: true, contacts: [{ userId: "basem", number: "966500000000" }, { userId: "khaled", number: "962770000000" }], groupId: "123@g.us" };
   let plans = planFollowups(db, config, at);
-  assert.deepEqual(plans.map(plan => plan.kind).sort(), ["daily_digest", "overdue_task"]);
+  // t2 (open, no owner, no suggested_owner either) is exactly the "no
+  // employee at all" case Basim later asked to escalate straight to him
+  // (unowned_task) -- present alongside the pre-existing overdue/digest kinds.
+  assert.deepEqual(plans.map(plan => plan.kind).sort(), ["daily_digest", "overdue_task", "unowned_task"]);
   const overdueNudge = plans.find(plan => plan.kind === "overdue_task");
   assert.equal(overdueNudge.to, "962770000000@s.whatsapp.net");
   assert.doesNotMatch(overdueNudge.text, /https?:\/\//, "Basim: never put the dashboard link in an employee-facing task message");
   assert.ok(overdueNudge.choices, "an overdue nudge must offer tappable options too");
   assert.deepEqual(overdueNudge.choices.options.map(o => o.id), ["TSKt1FINISH", "TSKt1NOTE", "TSKt1TRANSFER", "TSKt1EDIT", "TSKt1EXTEND"]);
-  assert.equal(planFollowups(db, { ...config }, Date.UTC(2026, 8, 10, 20, 0)).length, 0, "outside working hours");
+  // unowned_task escalates to Basim around the clock (Basim's own request),
+  // unlike overdue_task/daily_digest which still stop outside working hours.
+  const outsideHours = planFollowups(db, { ...config }, Date.UTC(2026, 8, 10, 20, 0));
+  assert.deepEqual(outsideHours.map(plan => plan.kind), ["unowned_task"], "outside working hours -- only the always-on no-owner escalation survives");
   const sent = [];
   const jobs = createFollowupJobs({ db, config, now: () => at });
+  // Three pending plans at this instant: overdue_task, daily_digest, and the
+  // always-on unowned_task escalation for t2.
+  assert.equal((await jobs.deliverNext(async message => { sent.push(message); })).status, "sent");
   assert.equal((await jobs.deliverNext(async message => { sent.push(message); })).status, "sent");
   assert.equal((await jobs.deliverNext(async message => { sent.push(message); })).status, "sent");
   assert.equal((await jobs.deliverNext(async message => { sent.push(message); })).status, "idle", "no duplicates within a day");
-  assert.equal(sent.length, 2);
+  assert.equal(sent.length, 3);
   requestDeadlineExtension(db, khaled, { taskId: "t1", newDueDate: "2026-09-12", reason: "x" }, { now: at - 3 * 86_400_000 });
   enqueueAgentMessage(db, { toUser: "basem", text: "إشعار مباشر" }, at);
   const later = createFollowupJobs({ db, config, now: () => at + 60_000 });
   await later.deliverNext(async message => { sent.push(message); });
-  assert.equal(sent[2].text, "إشعار مباشر", "queued notification is delivered before planned nudges");
+  assert.equal(sent[3].text, "إشعار مباشر", "queued notification is delivered before planned nudges");
   await later.deliverNext(async message => { sent.push(message); });
-  assert.match(sent[3].text, /معلّقة من أكثر من يومين/);
+  assert.match(sent[4].text, /معلّقة من أكثر من يومين/);
   assert.ok(groupBudgetRemaining(db, at + 60_000) < GROUP_DAILY_BUDGET);
   assert.ok(isGroupWorthy("create", "project") && !isGroupWorthy("comment", "task"));
 });
@@ -558,7 +567,9 @@ test("unclaimed task: hourly nudge to its suggested owner during work hours, sto
   assert.ok(plans[0].choices, "an unclaimed task's nudge must offer tappable options, not ask the employee to type");
   assert.deepEqual(plans[0].choices.options.map(o => o.id), ["TSKt6CLAIM", "TSKt6TRANSFER", "TSKt6EDIT"]);
 
-  assert.equal(planFollowups(db, config, Date.UTC(2026, 8, 10, 20, 0)).filter(plan => plan.kind === "unclaimed_task").length, 0, "outside working hours");
+  // Basim's later follow-up request: this nag must keep repeating even
+  // outside working hours, unlike the reactive overdue_task/daily_digest kinds.
+  assert.equal(planFollowups(db, config, Date.UTC(2026, 8, 10, 20, 0)).filter(plan => plan.kind === "unclaimed_task").length, 1, "unclaimed_task now nags around the clock, including outside working hours");
 
   // Once delivered, no duplicate within the same hour -- but it fires again an hour later if still unclaimed.
   db.prepare("INSERT INTO agent_followups (id,kind,target_user,entity_id,sent_at,response) VALUES ('nudge1','unclaimed_task','shadi','t6',?,'sent')").run(at);
@@ -649,16 +660,24 @@ test("twice-daily auto reminder fires at local 8am/8pm regardless of work hours,
   assert.match(groupKhaled.text, /🔴 \*خالد\*/); assert.match(groupKhaled.text, /متابعة عقد الإيجار/); assert.doesNotMatch(groupKhaled.text, /دراسة الموقع/);
   const groupShadi = auto.find(plan => plan.targetUser === "group" && plan.entityId === "shadi");
   assert.match(groupShadi.text, /🔴 \*شادي\*/); assert.match(groupShadi.text, /دراسة الموقع/); assert.doesNotMatch(groupShadi.text, /متابعة عقد الإيجار/);
-  assert.equal(plans.filter(plan => plan.kind !== "auto_reminder_morning").length, 0, "outside 9-18 window, no reactive follow-ups mixed in");
+  // The always-on unclaimed_task (t3, suggested to شادي) and unowned_task
+  // (t2, no employee at all) escalations run around the clock regardless of
+  // the 8am/8pm slot -- only the OTHER reactive kinds (overdue_task,
+  // stale_approval, stale_unclaimed, daily_digest) stay gated to 9-18.
+  const others = plans.filter(plan => plan.kind !== "auto_reminder_morning");
+  assert.deepEqual(others.map(plan => plan.kind).sort(), ["unclaimed_task", "unowned_task"], "outside 9-18 window, no OTHER reactive follow-ups mixed in");
   assert.equal(planFollowups(db, config, other).filter(plan => plan.kind.startsWith("auto_reminder")).length, 0, "no auto reminder outside the 8am/8pm slots");
 
   // planFollowups is pure (it only reads); the dedup only takes effect once
   // a plan is actually recorded via deliverNext, exactly like overdue_task.
+  // 6 pending plans this slot: the 4 auto_reminder_morning (private+group for
+  // خالد and شادي) plus the always-on unclaimed_task (t3) and unowned_task
+  // (t2) escalations, which are also still undelivered at this exact instant.
   const sent = [];
   const jobs = createFollowupJobs({ db, config, now: () => morning });
-  for (let i = 0; i < 4; i++) assert.equal((await jobs.deliverNext(async message => { sent.push(message); })).status, "sent");
-  assert.equal((await jobs.deliverNext(async () => assert.fail("no fifth message this slot"))).status, "idle");
-  assert.equal(sent.length, 4);
+  for (let i = 0; i < 6; i++) assert.equal((await jobs.deliverNext(async message => { sent.push(message); })).status, "sent");
+  assert.equal((await jobs.deliverNext(async () => assert.fail("no seventh message this slot"))).status, "idle");
+  assert.equal(sent.length, 6);
 
   assert.equal(planFollowups(db, config, morning + 5 * 60_000).filter(plan => plan.kind === "auto_reminder_morning").length, 0, "no duplicate within the same morning slot once delivered");
 

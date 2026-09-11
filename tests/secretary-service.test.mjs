@@ -245,7 +245,7 @@ test('an employee finishing/claiming/commenting on a task gets the standalone co
  await f.run(command('submit'),{text:'خلصت اللوحة بالكامل'});
  const token=pending(f.db).token;
  await f.run(undefined,{text:`موافق ${token}`});
- const legend=outbox(f.db).filter(r=>r.toUser==='member'&&/تذكير بأوامر المهام/.test(r.text));
+ const legend=outbox(f.db).filter(r=>r.toUser==='member'&&/أوامر المهام السريعة/.test(r.text));
  assert.equal(legend.length,1,'the employee gets exactly one legend message after finishing their task');
  assert.match(legend[0].text,/تحويل المهمة/);assert.match(legend[0].text,/انهاء المهمة/);assert.match(legend[0].text,/اضافة ملاحظة/);assert.match(legend[0].text,/اضافة مهمة/);
  // Basim now gets every task update privately too (see dispatchManagementNotice)
@@ -253,7 +253,7 @@ test('an employee finishing/claiming/commenting on a task gets the standalone co
  // it never doubles as the employee-facing legend, and never fires for
  // Basim's own actions (no self-notice).
  assert.ok(outbox(f.db).some(r=>r.toUser==='basem'&&/📤/.test(r.text)&&/لوحة/.test(r.text)),'Basim gets a private notice of the employee finishing their task');
- assert.equal(outbox(f.db).filter(r=>r.toUser==='basem'&&/تذكير بأوامر المهام/.test(r.text)).length,0,'Basim never gets the employee-facing legend');
+ assert.equal(outbox(f.db).filter(r=>r.toUser==='basem'&&/أوامر المهام السريعة/.test(r.text)).length,0,'Basim never gets the employee-facing legend');
  const admin={senderNumber:'12025550103'};
  const before=outbox(f.db).filter(r=>r.toUser==='basem').length;
  await f.run(command('comment',{body:'تحديث بسيط'}),{...admin,text:'علّق: تحديث بسيط'});
@@ -731,7 +731,7 @@ test('admin adding a task directly for someone else broadcasts to the group and 
  const group=rows.find(r=>r.toUser==='group');
  assert.ok(group,'a new task must broadcast to the group');assert.match(group.text,/🆕/);assert.doesNotMatch(group.text,/مشروع/);assert.match(group.text,/شادي/);
  assert.ok(rows.some(r=>r.toUser==='other'),'the assigned owner must get a private heads-up');
- assert.ok(rows.some(r=>r.toUser==='other'&&/تذكير بأوامر المهام/.test(r.text)),'the newly assigned employee also gets the standalone command legend');
+ assert.ok(rows.some(r=>r.toUser==='other'&&/أوامر المهام السريعة/.test(r.text)),'the newly assigned employee also gets the standalone command legend');
  assert.ok(!rows.some(r=>r.toUser==='basem'));
  // The legend used to follow the task-specific CLAIM/TRANSFER poll as a
  // SECOND poll to the same new owner one millisecond later, which silently
@@ -743,7 +743,7 @@ test('admin adding a task directly for someone else broadcasts to the group and 
  const taskPoll=toOther.find(r=>r.choicesJson&&/تحديث على مهمتك/.test(r.text));
  assert.ok(taskPoll,'the new owner must get a real tappable task poll, not just plain text');
  assert.ok(JSON.parse(taskPoll.choicesJson).options.some(o=>/CLAIM$/.test(o.id)),'a brand-new, unclaimed task must offer CLAIM');
- const legendRow=toOther.find(r=>/تذكير بأوامر المهام/.test(r.text));
+ const legendRow=toOther.find(r=>/أوامر المهام السريعة/.test(r.text));
  assert.equal(legendRow.choicesJson,null,'the legend must never compete with the task poll just sent to the same person');
 });
 test('an employee proposing a new task files it for Basim and gets the command legend, never Basim',async t=>{
@@ -754,8 +754,8 @@ test('an employee proposing a new task files it for Basim and gets the command l
  assert.match(result.reply,/رفعت طلبك لباسم/);
  const rows=outbox(f.db);
  assert.ok(rows.some(r=>r.toUser==='basem'),'Basim gets the actual request to decide on');
- assert.ok(rows.some(r=>r.toUser==='member'&&/تذكير بأوامر المهام/.test(r.text)),'the employee who filed it gets the command legend as its own message');
- assert.ok(!rows.some(r=>r.toUser==='basem'&&/تذكير بأوامر المهام/.test(r.text)),'Basim never gets the employee-facing legend');
+ assert.ok(rows.some(r=>r.toUser==='member'&&/أوامر المهام السريعة/.test(r.text)),'the employee who filed it gets the command legend as its own message');
+ assert.ok(!rows.some(r=>r.toUser==='basem'&&/أوامر المهام السريعة/.test(r.text)),'Basim never gets the employee-facing legend');
 });
 // Basim's complaint (a screenshot of a plain-text task-close approval prompt):
 // "give me tappable options like everything else already has". A proactive
@@ -792,7 +792,7 @@ test('a member claiming their own open task broadcasts to the group, gets the co
  assert.ok(group,'claiming must broadcast to the group');assert.match(group.text,/👋/);assert.match(group.text,/خالد/);
  const toMember=rows.filter(r=>r.toUser==='member');
  assert.ok(!toMember.some(r=>/تحديث على مهمتك/.test(r.text)),'a member claiming for himself is never privately notified about his own claim');
- assert.ok(toMember.some(r=>/تذكير بأوامر المهام/.test(r.text)),'an employee acting on a task still gets the standalone command legend');
+ assert.ok(toMember.some(r=>/أوامر المهام السريعة/.test(r.text)),'an employee acting on a task still gets the standalone command legend');
 });
 // executeManagementAction only blocks a non-manager from claiming a task
 // suggested to someone else -- an admin/manager can claim ANY open task,
@@ -811,7 +811,7 @@ test('an admin claiming a task suggested to someone else privately warns that co
  const toColleague=rows.find(r=>r.toUser==='member'&&/استلم مهمة/.test(r.text));
  assert.ok(toColleague,'خالد must be privately warned his suggested task was taken by someone else');
  assert.match(toColleague.text,/استلم مهمة/);
- assert.ok(rows.some(r=>r.toUser==='member'&&/تذكير بأوامر المهام/.test(r.text)),'خالد also gets the standalone command legend alongside the warning');
+ assert.ok(rows.some(r=>r.toUser==='member'&&/أوامر المهام السريعة/.test(r.text)),'خالد also gets the standalone command legend alongside the warning');
  assert.ok(!rows.some(r=>r.toUser==='basem'),'the admin never notifies himself about his own action');
 });
 test('closeDirect on a never-claimed task broadcasts one final approval notice, and privately notifies a non-admin owner it closes on behalf of',async t=>{
@@ -868,7 +868,7 @@ test('help reply answers employees with the actual task-command legend, and drop
  const f=fixture(t);
  const member=await f.run(emptySecretaryIntent('help'),{text:'اسسلي دليل لطريقة الاستخدام للموظف علشان يفهم كيفية التعامل معك بأوامر المهام'}); // default sender is خالد (member)
  assert.equal(member.status,'summary');
- assert.match(member.reply,/تذكير بأوامر المهام/);
+ assert.match(member.reply,/أوامر المهام السريعة/);
  assert.match(member.reply,/تحويل المهمة/);
  assert.match(member.reply,/انهاء المهمة/);
  assert.match(member.reply,/اضافة ملاحظة/);
@@ -877,7 +877,7 @@ test('help reply answers employees with the actual task-command legend, and drop
  assert.doesNotMatch(member.reply,/جوابك غلط/);
  const admin=await f.run(emptySecretaryIntent('help'),{senderNumber:'12025550103',text:'كيف بتشتغل معي؟'});
  assert.equal(admin.status,'summary');
- assert.doesNotMatch(admin.reply,/تذكير بأوامر المهام/,'Basim never gets the employee-facing legend, in help replies either');
+ assert.doesNotMatch(admin.reply,/أوامر المهام السريعة/,'Basim never gets the employee-facing legend, in help replies either');
  assert.doesNotMatch(admin.reply,/جوابك غلط/);
  assert.match(admin.reply,/management\.titanium-pharmacy\.com/);
 });

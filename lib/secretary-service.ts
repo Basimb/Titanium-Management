@@ -38,11 +38,17 @@ const HISTORY_MS = 24 * 60 * 60_000;
 const HISTORY_CHARS = 6000;
 const INTAKE_MS = 30 * 60_000;
 const SENSITIVE = new Set(["edit_task", "cancel_claim", "submit", "approve", "reject", "reopen", "reassign", "archive_task", "restore_task", "delete_task"]);
-// Basim's "شرح الأوامر" footer: a short standalone reminder of the four
-// WhatsApp commands an EMPLOYEE (never Basim -- he doesn't need this) can
-// type about a task, sent as a SEPARATE follow-up message right after any
-// task-related message reaches that employee. See notifyTaskLegend below.
-const TASK_COMMANDS_LEGEND = "🧭 تذكير بأوامر المهام:\n• لتحويل المهمة: اكتب «تحويل المهمة»\n• لاعتماد إنهاء المهمة: اكتب «انهاء المهمة»\n• لإضافة ملاحظة: اكتب «اضافة ملاحظة» مع رقم المهمة\n• لإضافة مهمة جديدة: اكتب «اضافة مهمة»";
+// Basim's "شرح الأوامر" footer, redesigned into a numbered 1-5 quick menu per
+// his own explicit request ("اضافة مهمه ارسل رقم 1 و..."): a short standalone
+// reminder of the five WhatsApp actions an EMPLOYEE (never Basim -- he
+// doesn't need this) can trigger about a task, sent as a SEPARATE follow-up
+// message right after any task-related message reaches that employee. Each
+// line carries a colored circle purely for quick visual scanning (no meaning
+// tied to the color itself, unlike the priority icons elsewhere). Sending the
+// bare digit works exactly like tapping the matching option in
+// taskCommandsLegendPoll below -- see legendDigitOptionId's own comment for
+// why a bare digit only resolves this way sometimes.
+const TASK_COMMANDS_LEGEND = "🧭 أوامر المهام السريعة — ارسل الرقم مباشرة:\n\n1️⃣ 🟢 اضافة مهمة\n2️⃣ 🔵 اضافة ملاحظة\n3️⃣ 🟣 تحويل المهمة\n4️⃣ 🟠 تمديد التاريخ\n5️⃣ 🔴 انهاء المهمة";
 // Basim: "بدي هذه تتحول تصويت للكل وفي كل مكان" -- the legend above is plain
 // text everywhere it's sent, so attach a poll alongside it (same trick as
 // resolveTaskActionTextChoice's NOTE/TRANSFER/EDIT/EXTEND below) whose four
@@ -56,8 +62,9 @@ const TASK_COMMANDS_LEGEND = "🧭 تذكير بأوامر المهام:\n• ل
 // identical everywhere it's attached, so it needs no task/actor context.
 function taskCommandsLegendPoll(now: number): SecretaryChoices {
   return { id: "LGDQ", title: "🧭 أو اضغط أي أمر مباشرة:", expiresAt: now + 60 * 60_000, options: [
-    { id: "LGDTRANSFER", label: "🔄 تحويل المهمة" }, { id: "LGDFINISH", label: "✅ انهاء المهمة" },
-    { id: "LGDNOTE", label: "📝 اضافة ملاحظة" }, { id: "LGDADD", label: "🆕 اضافة مهمة" }] };
+    { id: "LGDADD", label: "1️⃣ 🟢 اضافة مهمة" }, { id: "LGDNOTE", label: "2️⃣ 🔵 اضافة ملاحظة" },
+    { id: "LGDTRANSFER", label: "3️⃣ 🟣 تحويل المهمة" }, { id: "LGDEXTEND", label: "4️⃣ 🟠 تمديد التاريخ" },
+    { id: "LGDFINISH", label: "5️⃣ 🔴 انهاء المهمة" }] };
 }
 // Candidate tasks for one of the legend's FINISH/TRANSFER/NOTE options,
 // using the exact same eligibility taskActionPoll already applies for a
@@ -73,6 +80,13 @@ const LEGEND_NO_TASK: Record<string, string> = {
   LGDNOTE: "ما عندك مهمة قيد التنفيذ حاليًا لإضافة ملاحظة عليها.",
   LGDTRANSFER: "ما عندك مهمة مفتوحة أو قيد التنفيذ حاليًا لتحويلها.",
 };
+// LGDEXTEND deliberately isn't in the map above: an extension always needs a
+// new date the person hasn't given yet, so unlike FINISH/NOTE/TRANSFER's
+// zero/multiple-candidate cases it never enters the deterministic
+// taskChoicePoll branch below (see resolveTaskCommandsLegendChoice) --
+// zero/several eligible tasks both just fall back to the plain, already-
+// working "بدي أمدد موعد مهمة" sentence, which the normal model-driven flow
+// already knows how to ask a clarifying "أي مهمة؟" about on its own.
 const LEGEND_MANY_TASK = "عندك أكثر من مهمة تنطبق، أي وحدة بالضبط؟";
 // Basim: typing "انهاء المهمة"/"تحويل المهمة"/"اضافة ملاحظة" (close_request/
 // task_transfer_request/comment, below) without clearly naming which task let
@@ -99,6 +113,7 @@ function parseTaskChoicePollChoice(event: Event): { token: string; index: number
 function legendRewriteText(optionId: string, title: string): string {
   return optionId === "LGDFINISH" ? `خلصت مهمة «${title}»`
     : optionId === "LGDNOTE" ? `بدي أضيف ملاحظة على مهمة «${title}»`
+    : optionId === "LGDEXTEND" ? `بدي أمدد موعد مهمة «${title}»`
     : `بدي أحول مهمة «${title}» لحدا غيري`;
 }
 // Basim: "خلصت المهمة"/"حوّل المهمة"/"بدي أضيف ملاحظة" typed out on their
@@ -125,11 +140,35 @@ const LEGEND_TYPED_PHRASES: Record<string, RegExp> = {
   LGDFINISH: /^(?:انهاء (?:ال)?مهمه|انهيت (?:ال)?مهمه|خلصت (?:ال)?مهمه|خلصت من (?:ال)?مهمه|خلصت مهمتي|خلصتها|انتهيت من (?:ال)?مهمه|انتهيت منها)$/,
   LGDTRANSFER: /^(?:تحويل (?:ال)?مهمه|حول (?:ال)?مهمه|حولها لحدا غيري|حولها لشخص غيري|مش مسؤوليتي|ما بقدر اعملها|ما بقدر اسويها)$/,
   LGDNOTE: /^(?:اضافه (?:ال)?ملاحظه|بدي اضيف ملاحظه|بدي اضيف تحديث|عندي تحديث|بدي احدث (?:ال)?مهمه)$/,
+  LGDEXTEND: /^(?:تمديد (?:ال)?تاريخ|تمديد (?:ال)?موعد|بدي امدد (?:ال)?موعد|مدد (?:ال)?موعد|تمديد (?:ال)?مهمه)$/,
 };
 function legendTypedPhraseOption(text: string): string | null {
   const normalized = text.normalize("NFKC").replace(/[أإآ]/g, "ا").replace(/[ً-ٰٟـ؟?!.،,]/g, "").replace(/ة/g, "ه").replace(/\s+/g, " ").trim();
   for (const optionId of Object.keys(LEGEND_TYPED_PHRASES)) if (LEGEND_TYPED_PHRASES[optionId].test(normalized)) return optionId;
   return null;
+}
+// Basim's own wording for the numbered menu ("اضافة مهمه ارسل رقم 1"...
+// "كل ما يضغط رقم يطلعلو التصويت المناسب") -- a bare typed digit "1".."5"
+// mirrors the same five options taskCommandsLegendPoll offers, so someone
+// who types the digit instead of tapping the poll option still lands on the
+// exact same result. Deliberately narrower than legendTypedPhraseOption's
+// word phrases above: a bare 1-3 digit number is ALREADY a heavily-tested,
+// deterministic shortcut for picking a task straight off a just-shown "شو
+// مهامي؟" list by its position (bareOwnershipOrdinal, further down this
+// file, keyed on ownershipCandidates) -- rewriting "1" here unconditionally
+// would silently hijack that picker (typing "1" to open task #1 would
+// instead start "اضافة مهمة" every time). resolveTaskCommandsLegendChoice
+// below only ever treats a bare digit this way once it has confirmed
+// ownershipCandidates is empty for that actor -- i.e. only when there is no
+// task at all for the ordinal picker to compete over. Everyone else still
+// has two fully collision-free ways to reach the same five actions: tapping
+// the real poll option (a WhatsApp vote, never confused with typed text) or
+// typing the full phrase above (LEGEND_TYPED_PHRASES) -- neither of which
+// bareOwnershipOrdinal's purely-numeric regex ever matches.
+const LEGEND_DIGIT_OPTIONS: Record<string, string> = { "1": "LGDADD", "2": "LGDNOTE", "3": "LGDTRANSFER", "4": "LGDEXTEND", "5": "LGDFINISH" };
+function legendDigitOptionId(text: string): string | null {
+  const normalized = text.normalize("NFKC").replace(/[٠-٩]/g, digit => String(digit.charCodeAt(0) - 0x660)).replace(/[۰-۹]/g, digit => String(digit.charCodeAt(0) - 0x6f0)).replace(/[\s.!؟?]+$/u, "").trim();
+  return LEGEND_DIGIT_OPTIONS[normalized] ?? null;
 }
 // Basim: the model itself sometimes gives up with a plain "which task"
 // clarify for a short private message that plainly names one of the same
@@ -147,6 +186,7 @@ const LEGEND_FUZZY_KEYWORDS: Record<string, RegExp> = {
   LGDFINISH: /(?:^| )(?:خلص|خلصت|خلصنا|انهيت|انتهيت|سكرت|سكرها)(?:$| )/,
   LGDTRANSFER: /(?:^| )(?:حول|تحويل|حولها)(?:$| )/,
   LGDNOTE: /(?:^| )(?:ملاحظه|تحديث|تعليق)(?:$| )/,
+  LGDEXTEND: /(?:^| )(?:تمديد|مدد|تأجيل|اجل)(?:$| )/,
 };
 function legendFuzzyPhraseOption(text: string): string | null {
   const normalized = text.normalize("NFKC").replace(/[أإآ]/g, "ا").replace(/[ً-ٰٟـ؟?!.،,]/g, "").replace(/ة/g, "ه").replace(/\s+/g, " ").trim();
@@ -170,16 +210,31 @@ function legendFuzzyPhraseOption(text: string): string | null {
 // same LGDQ choice shape so a typed command converges onto the exact same
 // resolution as a tap -- including its own dedicated branch below for the
 // 0/2+ leftover cases.
-function resolveTaskCommandsLegendChoice(db: DatabaseSync, event: Event, config: TeamChatConfig): Event {
-  const typedOptionId = !event.choice && event.groupId === null && !event.replyToMessageId && event.inputKind !== "voice" ? legendTypedPhraseOption(event.text) : null;
-  const choice = event.choice ?? (typedOptionId ? { questionId: "LGDQ", optionId: typedOptionId } : undefined);
+function resolveTaskCommandsLegendChoice(db: DatabaseSync, event: Event, config: TeamChatConfig, now: number): Event {
+  const isBareCommand = !event.choice && event.groupId === null && !event.replyToMessageId && event.inputKind !== "voice";
+  const typedOptionId = isBareCommand ? legendTypedPhraseOption(event.text) : null;
+  const digitOptionId = isBareCommand && !typedOptionId ? legendDigitOptionId(event.text) : null;
+  // Only fetched/used when a bare digit might apply -- see legendDigitOptionId's
+  // own comment for why this must confirm ownershipCandidates is empty (and
+  // the actor is a real employee, never Basim/admin, same as bareOwnershipOrdinal)
+  // before a typed "1".."5" is allowed to preempt the ordinal task picker.
+  const digitActor = digitOptionId ? actorFor(db, event, config) : null;
+  const digitIsSafe = digitOptionId !== null && digitActor !== null && digitActor.id !== "basem" && digitActor.role !== "admin"
+    && ownershipCandidates(stateFor(db, digitActor), now).length === 0;
+  const choice = event.choice ?? (typedOptionId ? { questionId: "LGDQ", optionId: typedOptionId }
+    : digitIsSafe ? { questionId: "LGDQ", optionId: digitOptionId as string } : undefined);
   if (!choice || choice.questionId !== "LGDQ") return event;
   if (choice.optionId === "LGDADD") return { ...event, text: "اضافة مهمة", choice: undefined };
-  if (!["LGDFINISH", "LGDTRANSFER", "LGDNOTE"].includes(choice.optionId)) return event;
-  const actor = actorFor(db, event, config);
+  if (!["LGDFINISH", "LGDTRANSFER", "LGDNOTE", "LGDEXTEND"].includes(choice.optionId)) return event;
+  const actor = digitActor ?? actorFor(db, event, config);
   if (!actor) return { ...event, choice: undefined };
   const candidates = legendCandidates(stateFor(db, actor), actor.name, choice.optionId);
-  return candidates.length === 1 ? { ...event, text: legendRewriteText(choice.optionId, candidates[0].title), choice: undefined } : { ...event, choice };
+  if (candidates.length === 1) return { ...event, text: legendRewriteText(choice.optionId, candidates[0].title), choice: undefined };
+  // LGDEXTEND never carries the leftover `choice` forward (unlike FINISH/
+  // TRANSFER/NOTE just below) -- see LEGEND_NO_TASK's own comment for why an
+  // extension can't reuse that deterministic multi-candidate poll machinery.
+  if (choice.optionId === "LGDEXTEND") return { ...event, text: "بدي أمدد موعد مهمة", choice: undefined };
+  return { ...event, choice };
 }
 /** Queues the command legend as its own WhatsApp message (never in the same
  * bubble as the task message itself) for a real employee recipient only --
@@ -939,7 +994,7 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
 }): Promise<Result> {
   migrateSecretary(db); const now = (dependencies.now || Date.now)();
   event = resolveConfirmChoice(event);
-  event = resolveTaskCommandsLegendChoice(db, event, config);
+  event = resolveTaskCommandsLegendChoice(db, event, config, now);
   event = resolveTaskActionTextChoice(db, event);
   event = resolveTaskCloseDecisionRejectChoice(db, event);
   const actor = actorFor(db, event, config); if (!actor) return { status: "denied", reply: "" };

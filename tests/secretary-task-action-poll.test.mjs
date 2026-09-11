@@ -72,7 +72,7 @@ test('tapping CLAIM resolves the claim directly, never asking the model, and bro
   assert.equal(task.status, 'progress'); assert.equal(task.owner, 'خالد');
   const rows = outbox(f.db);
   assert.ok(rows.some(r => r.toUser === 'group' && /👋/.test(r.text)), 'a claim tap must broadcast to the group exactly like a typed claim');
-  assert.ok(rows.some(r => r.toUser === 'member' && /تذكير بأوامر المهام/.test(r.text)), 'the tapping employee still gets the command legend');
+  assert.ok(rows.some(r => r.toUser === 'member' && /أوامر المهام السريعة/.test(r.text)), 'the tapping employee still gets the command legend');
 });
 // Basim's explicit rule: nobody closes a task without a note. FINISH itself
 // stays a tap (his original "بدهم بس يختاروا، ما بدي حد يكتب" design), so this
@@ -224,15 +224,18 @@ test('a NOTE/TRANSFER/EXTEND tap for a task removed since the poll was sent fall
 // Basim: "بدي هذه تتحول تصويت للكل وفي كل مكان" -- the standalone command
 // legend (see notifyTaskLegend/TASK_COMMANDS_LEGEND/taskCommandsLegendPoll in
 // lib/secretary-service.ts) must now carry its own tappable poll of the same
-// four bare commands it already tells people to type, everywhere it's sent.
-test('the standalone command legend carries a tappable poll of its own four commands', async t => {
+// five bare commands it already tells people to type, everywhere it's sent.
+// Redesigned per Basim's later, more specific request into a numbered 1-5
+// menu (اضافة مهمة=1, اضافة ملاحظة=2, تحويل المهمة=3, تمديد التاريخ=4,
+// انهاء المهمة=5) -- see secretary-legend-menu.test.mjs for that behavior.
+test('the standalone command legend carries a tappable poll of its own five numbered commands', async t => {
   const f = fixture(t);
   await f.run(undefined, tap(`TSKQ${OPEN}`, `TSK${OPEN}CLAIM`), async () => { throw Error('must not ask the model'); });
-  const legend = outbox(f.db).find(r => r.toUser === 'member' && /تذكير بأوامر المهام/.test(r.text));
+  const legend = outbox(f.db).find(r => r.toUser === 'member' && /أوامر المهام السريعة/.test(r.text));
   assert.ok(legend?.choicesJson, 'the legend message must carry a poll, not go out as plain text alone');
   const choices = JSON.parse(legend.choicesJson);
   assert.equal(choices.id, 'LGDQ');
-  assert.deepEqual(choices.options.map(o => o.id), ['LGDTRANSFER', 'LGDFINISH', 'LGDNOTE', 'LGDADD']);
+  assert.deepEqual(choices.options.map(o => o.id), ['LGDADD', 'LGDNOTE', 'LGDTRANSFER', 'LGDEXTEND', 'LGDFINISH']);
   assert.equal(choices.expiresAt - f.now, 60 * 60_000, 'a WhatsApp poll cannot outlive a 1-hour expiry');
 });
 // Basim hit this for real: he tapped the legend's generic "انهاء المهمة" on
@@ -291,7 +294,7 @@ test('a task newly reassigned through chat privately notifies the new owner with
   // so "استلمت المهمة" looked like it was offered but never actually worked.
   // The legend must still reach him as plain text, just never as a
   // competing poll when a task-specific one was already attached.
-  const legend = toNewOwnerRows.find(r => /تذكير بأوامر المهام/.test(r.text));
+  const legend = toNewOwnerRows.find(r => /أوامر المهام السريعة/.test(r.text));
   assert.ok(legend, 'the newly assigned owner still gets the plain-text command legend');
   assert.equal(legend.choicesJson, null, 'the legend must never carry its own poll here -- it would silently invalidate the CLAIM/TRANSFER/EDIT poll just sent to the same person');
 });
@@ -313,7 +316,7 @@ test('nudge resends the current owner/suggested-owner their exact claim poll, ri
   const choices = JSON.parse(poll.choicesJson);
   assert.equal(choices.id, `TSKQ${OPEN}`);
   assert.deepEqual(choices.options.map(o => o.id), [`TSK${OPEN}CLAIM`, `TSK${OPEN}TRANSFER`, `TSK${OPEN}EDIT`], 'the exact same poll the task is already offering, not a new/different one');
-  const legend = toMemberRows.find(row => /تذكير بأوامر المهام/.test(row.text));
+  const legend = toMemberRows.find(row => /أوامر المهام السريعة/.test(row.text));
   assert.ok(legend, 'خالد still gets the plain-text command legend');
   assert.equal(legend.choicesJson, null, 'the legend must never carry its own poll here -- it would silently invalidate the CLAIM/TRANSFER/EDIT poll just sent to the same person');
 });
