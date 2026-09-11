@@ -16,6 +16,7 @@ import { executeManagementAction, getManagementSnapshot, isManagementAction, Man
 import { listApprovals, decideApproval } from "@/lib/approvals";
 import { activeRules } from "@/lib/rules";
 import { enqueueAgentMessage } from "@/lib/agent-followups";
+import { dispatchManagementNotice, type Snapshot } from "@/lib/secretary-service";
 
 /** DASHBOARD_READONLY=1 turns the site into a monitoring screen: only the owner may write, and only approvals decisions. */
 function dashboardReadonly() { return (readTeamChatSettings().DASHBOARD_READONLY ?? process.env.DASHBOARD_READONLY) === "1"; }
@@ -143,8 +144,19 @@ export async function POST(request: Request) {
       const result = executeManagementAction(chatDatabase(), user, parseManagementCommand(body), { source: "site", now });
       // The database transaction has committed; object storage operations must stay outside it.
       await Promise.allSettled(result.deletedObjectKeys.map(objectKey => bucket().delete(objectKey)));
-      // Dashboard actions stay dashboard-only: information lives in the WhatsApp
-      // secretary's own conversation and group notices, not relayed here too.
+      // Basim: a task opened/approved on the dashboard must reach the employee
+      // directly, the same way one created through the WhatsApp secretary
+      // already does -- a group notice plus a private claim/reject-with-
+      // comment/transfer poll -- instead of staying dashboard-only. Snapshot
+      // is read fresh AFTER the action so dispatchManagementNotice sees the
+      // task's just-updated owner/suggestedOwner.
+      if (result.notification) {
+        const snapshot = getManagementSnapshot(chatDatabase(), user) as unknown as Snapshot;
+        dispatchManagementNotice(chatDatabase(), user, snapshot, result, {
+          projectId: typeof body.projectId === "string" ? body.projectId : null,
+          ownerId: typeof body.ownerId === "string" ? body.ownerId : null,
+        }, now);
+      }
     } else if (action === "add_user") {
       const denied = requireAdmin(user); if (denied) return denied;
       const name = text(body.name).trim(); if (!name) return bad("اسم المستخدم مطلوب");

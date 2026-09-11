@@ -178,8 +178,19 @@ export function planFollowups(db: DatabaseSync, config: FollowupConfig, at: numb
     if (alreadySent(db, "unclaimed_task", userId, task.id, at - HOUR)) continue;
     if (db.prepare("SELECT id FROM approvals WHERE status='pending' AND entity_id=?").get(task.id)) continue;
     const choices = autoReminderPoll([task], responsible, at);
+    // This nudge repeats hourly (Basim's own request) and each resend
+    // supersedes the previous WhatsApp poll bubble server-side -- but the
+    // WhatsApp app itself never marks an old poll bubble as expired, so
+    // several look-alike, still-tappable bubbles for the same task pile up
+    // in the chat and only the newest is actually live. Tapping an older one
+    // is silently dropped (see services/whatsapp-bridge/src/polls.mjs
+    // acceptVote's superseded/expired checks) with zero feedback, which is
+    // exactly what looked like "the tap isn't registering" for Khaled. Spell
+    // out which bubble is live rather than silently relying on the reader to
+    // guess.
+    const staleNote = choices ? "\n⚠️ إذا في استطلاع تصويت أقدم من هذه الرسالة لنفس المهمة، هو منتهي الصلاحية — رد من استطلاع هذه الرسالة تحديدًا." : "";
     plans.push({ id: randomBytes(8).toString("hex"), kind: "unclaimed_task", targetUser: userId, entityId: task.id, to: `${number}@s.whatsapp.net`,
-      text: `⏳ يا ${clean(responsible)}، مهمة «${clean(task.title)}» لسا بانتظار ردك.`, ...(choices ? { choices } : {}) });
+      text: `⏳ يا ${clean(responsible)}، مهمة «${clean(task.title)}» لسا بانتظار ردك.${staleNote}`, ...(choices ? { choices } : {}) });
   }
   const ownerNumber = numberOf(owner.id);
   if (ownerNumber && !alreadySent(db, "stale_approval", owner.id, null, at - DAY)) {

@@ -19,7 +19,7 @@ import { migrateSecretaryChoices, createSecretaryChoices, consumeSecretaryChoice
 
 type Task = { id: string; projectId: string; title: string; details: string; status: string; priority: string; owner: string | null; suggestedOwner: string | null; dueDate: string | null; updatedAt: number | null; archivedAt: number | null };
 type Project = { id: string; name: string; status: string; updatedAt?: number | null; archivedAt?: number | null };
-type Snapshot = { tasks: Task[]; projects: Project[]; users: Array<ChatUser>; comments: Array<{ taskId: string; author: string; body: string; createdAt: number }> };
+export type Snapshot = { tasks: Task[]; projects: Project[]; users: Array<ChatUser>; comments: Array<{ taskId: string; author: string; body: string; createdAt: number }> };
 type Event = TeamChatEnvelope & { replyToMessageId?: string | null; responseMessageId?: string | null };
 type Result = { status: string; reply: string; taskId?: string; batchId?: string; choices?: SecretaryChoices };
 type Pending = { token: string; command_json: string; snapshot_hash: string; original_text: string; source_message_id: string; expires_at: number };
@@ -1699,18 +1699,20 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
     const read = readReply(plan, freshActor, state, now, event.groupId === null); return save(db, event, freshActor, read.result, read.scope, now);
   });
 }
-// The web dashboard (app/api/state/route.ts) already relays
-// executeManagementAction()'s result.notification to the WhatsApp group for
-// every action it exposes, using lib/whatsapp.ts's taskNotification(). The
-// chat-driven paths below (perform/closeDirect/claimMultiple) call the exact
-// same engine but used to discard result.notification entirely, so a task
-// created/claimed/submitted/approved/rejected/reassigned/archived directly
-// through the secretary chat produced no group broadcast and no heads-up to
-// the task's own owner. formatManagementNotice + dispatchManagementNotice
-// close that gap, reusing the group's existing emoji/wording conventions
-// (see lib/secretary-agent.ts and lib/approvals.ts's notifyGroup strings)
-// rather than lib/whatsapp.ts's format, since group delivery here goes
-// through the chat outbox (enqueueAgentMessage), not the Meta Cloud API.
+// lib/whatsapp.ts's taskNotification() (the old Meta Cloud API text-only
+// formatter) has had zero callers for a while -- the dashboard used to relay
+// through it but that call site was removed, leaving task creation/approval
+// on the website silently notifying no one. formatManagementNotice +
+// dispatchManagementNotice below are the real, current mechanism: reused by
+// BOTH the chat-driven paths here (perform/closeDirect/claimMultiple, so a
+// task created/claimed/submitted/approved/rejected/reassigned/archived
+// directly through the secretary chat produces a group broadcast and a
+// heads-up + fresh claim/reject/transfer poll to the task's own owner) AND,
+// per Basim's explicit request, app/api/state/route.ts's dashboard action
+// branch, so a task opened/approved on the website reaches the employee the
+// same way. Delivery goes through the chat outbox (enqueueAgentMessage), not
+// the Meta Cloud API, reusing the group's existing emoji/wording conventions
+// (see lib/secretary-agent.ts and lib/approvals.ts's notifyGroup strings).
 function formatManagementNotice(notification: NonNullable<ManagementResult["notification"]>, projectName: string | null): string {
   const title = clean(notification.title, 200);
   const who = clean(notification.actor, 100);
@@ -1730,7 +1732,7 @@ function formatManagementNotice(notification: NonNullable<ManagementResult["noti
 /** Broadcasts result.notification to the group and privately heads-up the
  * task's CURRENT owner (freshly read from the DB, since the action just
  * changed it for add_task/reassign) -- never the actor about his own action. */
-function dispatchManagementNotice(db: DatabaseSync, actor: ChatUser, state: Snapshot, result: ManagementResult, context: { projectId?: string | null; ownerId?: string | null }, now: number) {
+export function dispatchManagementNotice(db: DatabaseSync, actor: ChatUser, state: Snapshot, result: ManagementResult, context: { projectId?: string | null; ownerId?: string | null }, now: number) {
   if (!result.notification) return;
   const taskId = result.entityType === "task" ? result.entityId : null;
   const projectId = context.projectId ?? (taskId ? state.tasks.find(t => t.id === taskId)?.projectId ?? null : null);

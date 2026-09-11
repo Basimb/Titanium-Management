@@ -373,3 +373,20 @@ test("state route uses the shared engine/snapshot and preserves private response
   assert.doesNotMatch(source, /whatsappLoginSettings|whatsapp-login-settings/);
   assert.match(source, /entity_type = 'project' LIMIT 1/);
 });
+
+// A task opened/approved on the website dashboard used to notify no one --
+// executeManagementAction()'s result.notification was silently discarded
+// there ("Dashboard actions stay dashboard-only"). Basim asked that it reach
+// the employee the same way a WhatsApp-driven action already does: a group
+// notice plus a private claim/reject-with-comment/transfer poll. Locks in
+// that the dashboard route now relays through the same dispatchManagementNotice
+// the chat paths use, gated on result.notification, with a fresh post-action
+// snapshot and the request body's ownerId/projectId carried through.
+test("state route relays website task actions to the employee via dispatchManagementNotice, not just dashboard-local", () => {
+  const source = readFileSync(new URL("../app/api/state/route.ts", import.meta.url), "utf8");
+  assert.match(source, /import\s*\{\s*dispatchManagementNotice.*\}\s*from\s*"@\/lib\/secretary-service"/);
+  assert.match(source, /if\s*\(result\.notification\)\s*\{[\s\S]{0,400}dispatchManagementNotice\(/);
+  assert.match(source, /getManagementSnapshot\(chatDatabase\(\), user\) as unknown as Snapshot/);
+  assert.match(source, /ownerId:\s*typeof body\.ownerId === "string" \? body\.ownerId : null/);
+  assert.match(source, /projectId:\s*typeof body\.projectId === "string" \? body\.projectId : null/);
+});
