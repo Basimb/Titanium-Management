@@ -204,7 +204,8 @@ export function createBridgeRuntime({ config, store, auth, makeWASocket, jidNorm
           if (polls?.isPollVote(message)) {
             await polls.acceptVote(message, event, { identity, activatedAt,
               authorize: async sender => ready && !stopped && current === socket && config.tasksEnabled !== false
-                && await isActiveNumber(sender) && ready && !stopped && current === socket });
+                && await isActiveNumber(sender) && ready && !stopped && current === socket,
+              log: reason => output.info(`Titanium choices (vote): rejected, reason=${reason}.`) });
             continue;
           }
           let incoming = await selectIncoming(message, event, config, identity, now(), activatedAt);

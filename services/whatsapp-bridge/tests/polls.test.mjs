@@ -197,6 +197,43 @@ test('duplicate, simultaneous and changed votes consume one question atomically 
   assert.equal(await f.accept(changed), false);
 });
 
+test('a rejected vote logs a fixed, non-sensitive reason -- Basim tapping a real poll option that never reached the server was previously silent with nothing to diagnose', async t => {
+  const f = fixture(t); await f.send();
+  const KNOWN = new Set(['envelope_invalid', 'unexpected_participant', 'unexpected_content_fields', 'creation_key_invalid',
+    'poll_not_found_or_consumed', 'timestamp_out_of_range', 'sender_unauthorized', 'creation_sender_mismatch',
+    'creator_participant_mismatch', 'voter_or_payload_invalid', 'poll_proto_decode_failed', 'poll_secret_invalid',
+    'vote_decrypt_failed', 'selected_option_invalid', 'option_not_matched', 'sender_reauthorize_failed',
+    'poll_state_changed', 'enqueue_failed']);
+  let reasons = [];
+  const log = reason => reasons.push(reason);
+  // An unknown poll id: never found in choice_polls.
+  assert.equal(await f.accept(f.vote({ creation: { id: 'UNKNOWN_POLL' } }), { type: 'notify' }, { log }), false);
+  assert.deepEqual(reasons, ['poll_not_found_or_consumed']);
+  // A stray participant field on what should be a private-chat vote -- the
+  // leading suspect behind a real WhatsApp tap that never surfaces here at all.
+  reasons = [];
+  assert.equal(await f.accept(f.vote({ key: { participant: `${MEMBER}@s.whatsapp.net` } }), { type: 'notify' }, { log }), false);
+  assert.deepEqual(reasons, ['unexpected_participant']);
+  // Every other rejection path still logs exactly one known, PII-free reason
+  // (never a phone number, message text/label or raw transport exception).
+  const cases = [f.vote({ creation: { fromMe: false } }), f.vote({ key: { fromMe: true } }),
+    f.vote({ key: { remoteJid: '12345@g.us' } }), f.vote({ creation: { remoteJid: '12345@g.us' } }),
+    f.vote({ voter: `${OTHER}@s.whatsapp.net` }), f.vote({ key: { remoteJidAlt: `${OTHER}@s.whatsapp.net` } }),
+    f.vote({ creation: { participant: `${OTHER}@s.whatsapp.net` } }),
+    (() => { const v = f.vote(); v.message.pollUpdateMessage.vote.encPayload[0] ^= 1; return v; })()];
+  for (const message of cases) {
+    reasons = [];
+    assert.equal(await f.accept(message, { type: 'notify' }, { log }), false);
+    assert.equal(reasons.length, 1);
+    assert.ok(KNOWN.has(reasons[0]), `unexpected reason: ${reasons[0]}`);
+    assert.doesNotMatch(reasons[0], new RegExp(`${MEMBER}|${OTHER}|SYNTHETIC`));
+  }
+  // A genuinely accepted vote logs nothing at all.
+  reasons = [];
+  assert.equal(await f.accept(f.vote(), { type: 'notify' }, { log }), true);
+  assert.deepEqual(reasons, []);
+});
+
 test('unknown poll, groups, history, outgoing votes, other recipients and mismatched private keys never queue', async t => {
   const f = fixture(t); await f.send();
   const cases = [f.vote({ creation: { id: 'UNKNOWN_POLL' } }), f.vote({ creation: { fromMe: false } }),

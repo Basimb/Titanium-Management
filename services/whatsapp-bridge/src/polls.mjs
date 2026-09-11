@@ -122,54 +122,64 @@ export function createPollChoices({ store, config, proto, generateWAMessageConte
     }
   }
 
-  async function acceptVote(message, event, { identity, activatedAt, authorize }) {
+  // log(reason) mirrors sendQuestion's own diagnostics hook (default no-op):
+  // every rejection here used to return bare `false` with nothing recorded
+  // anywhere about *why*, which made a real tap that WhatsApp delivered but
+  // this function silently dropped unfixable to diagnose from the field --
+  // Basim tapping a real poll option and the task just never closing, with
+  // zero trace of the tap anywhere. reason is always one of the fixed
+  // category strings below, never a raw transport exception, phone number,
+  // message text/label or other secret -- same rule sendQuestion's log already follows.
+  async function acceptVote(message, event, { identity, activatedAt, authorize, log = () => {} }) {
     cleanup();
     const key = message?.key, content = pollContent(message), update = content?.pollUpdateMessage;
     if (event?.type !== 'notify' || event.requestId != null || !key || key.fromMe !== false || !update
-      || !identifier(key.id) || !privateJid(key.remoteJid) || key.participant || key.participantAlt) return false;
-    if (Object.keys(content).some(field => content[field] != null && !['pollUpdateMessage', 'messageContextInfo'].includes(field))) return false;
+      || !identifier(key.id) || !privateJid(key.remoteJid)) { log('envelope_invalid'); return false; }
+    if (key.participant || key.participantAlt) { log('unexpected_participant'); return false; }
+    if (Object.keys(content).some(field => content[field] != null && !['pollUpdateMessage', 'messageContextInfo'].includes(field))) { log('unexpected_content_fields'); return false; }
     const creation = update.pollCreationMessageKey;
-    if (!creation || creation.fromMe !== true || !identifier(creation.id) || !privateJid(creation.remoteJid)) return false;
+    if (!creation || creation.fromMe !== true || !identifier(creation.id) || !privateJid(creation.remoteJid)) { log('creation_key_invalid'); return false; }
     const row = db.prepare('SELECT * FROM choice_polls WHERE id=?').get(creation.id);
-    if (!row || !['sent', 'uncertain'].includes(row.state) || row.consumed_message_id || !row.message_proto || row.expires_at <= now()) return false;
+    if (!row || !['sent', 'uncertain'].includes(row.state) || row.consumed_message_id || !row.message_proto || row.expires_at <= now()) { log('poll_not_found_or_consumed'); return false; }
     const sentAt = Number(message.messageTimestamp) * 1000, votedAt = Number(update.senderTimestampMs);
     // Timestamp is supplementary: it is not authenticated by poll GCM. Server question
     // expiry/current version plus the persisted one-use poll are the authority.
     for (const time of [sentAt, votedAt]) if (!Number.isSafeInteger(time) || time < row.created_at - 1000
-      || time < activatedAt - 1000 || time < now() - 300_000 || time > now() + 60_000) return false;
+      || time < activatedAt - 1000 || time < now() - 300_000 || time > now() + 60_000) { log('timestamp_out_of_range'); return false; }
     const sender = await resolvePhone(key.remoteJid, key.remoteJidAlt, identity);
     if (!sender || sender !== row.sender || sender === config.botNumber || !config.allowedNumbers.has(sender)
-      || !await authorize(sender)) return false;
-    if (await resolvePhone(creation.remoteJid, key.remoteJidAlt, identity) !== sender) return false;
+      || !await authorize(sender)) { log('sender_unauthorized'); return false; }
+    if (await resolvePhone(creation.remoteJid, key.remoteJidAlt, identity) !== sender) { log('creation_sender_mismatch'); return false; }
     const creators = JSON.parse(row.creator_jids);
     // rc14 cleanMessage fills a missing direct-chat participant with ''.
-    if (creation.participant && (!privateJid(creation.participant) || !creators.includes(identity.normalizeJid(creation.participant)))) return false;
+    if (creation.participant && (!privateJid(creation.participant) || !creators.includes(identity.normalizeJid(creation.participant)))) { log('creator_participant_mismatch'); return false; }
     const voters = [...new Set([key.remoteJid, key.remoteJidAlt, `${sender}@s.whatsapp.net`].filter(privateJid).map(identity.normalizeJid))];
     if (!voters.length || voters.length > 2 || !update.vote?.encPayload || !update.vote.encIv
-      || update.vote.encIv.length !== 12 || update.vote.encPayload.length < 17 || update.vote.encPayload.length > 4096) return false;
+      || update.vote.encIv.length !== 12 || update.vote.encPayload.length < 17 || update.vote.encPayload.length > 4096) { log('voter_or_payload_invalid'); return false; }
     let creationContent;
-    try { creationContent = proto.Message.decode(Buffer.from(row.message_proto)); } catch { return false; }
+    try { creationContent = proto.Message.decode(Buffer.from(row.message_proto)); } catch { log('poll_proto_decode_failed'); return false; }
     const secret = creationContent.messageContextInfo?.messageSecret;
-    if (secret?.length !== 32) return false;
+    if (secret?.length !== 32) { log('poll_secret_invalid'); return false; }
     let vote;
     for (const pollCreatorJid of creators) for (const voterJid of voters) {
       if (vote) break;
       try { vote = decryptPollVote(update.vote, { pollCreatorJid, voterJid, pollMsgId: row.id, pollEncKey: secret }); } catch { /* Reject unauthenticated aliases/ciphertext. */ }
     }
-    if (!vote || !Array.isArray(vote.selectedOptions) || vote.selectedOptions.length !== 1) return false;
+    if (!vote || !Array.isArray(vote.selectedOptions) || vote.selectedOptions.length !== 1) { log('vote_decrypt_failed'); return false; }
     const selected = Buffer.from(vote.selectedOptions[0]);
-    if (selected.length !== 32) return false;
+    if (selected.length !== 32) { log('selected_option_invalid'); return false; }
     const choices = JSON.parse(row.choices_json);
     const matches = choices.options.filter(option => timingSafeEqual(selected, digest(Buffer.from(option.label, 'utf8'))));
-    if (matches.length !== 1 || !await authorize(sender)) return false;
+    if (matches.length !== 1) { log('option_not_matched'); return false; }
+    if (!await authorize(sender)) { log('sender_reauthorize_failed'); return false; }
     const option = matches[0];
     return store.transaction(() => {
       const current = db.prepare('SELECT state,consumed_message_id,expires_at FROM choice_polls WHERE id=?').get(row.id);
-      if (!current || !['sent', 'uncertain'].includes(current.state) || current.consumed_message_id || current.expires_at <= now()) return false;
+      if (!current || !['sent', 'uncertain'].includes(current.state) || current.consumed_message_id || current.expires_at <= now()) { log('poll_state_changed'); return false; }
       const queued = store.enqueue({ chatJid: row.chat_jid, body: { messageId: key.id, senderNumber: sender,
         groupId: null, text: option.label, receivedAt: now(), inputKind: 'text',
         choice: { questionId: row.question_id, optionId: option.id } } });
-      if (!queued) return false;
+      if (!queued) { log('enqueue_failed'); return false; }
       db.prepare("UPDATE choice_polls SET consumed_message_id=?,state='consumed',message_proto=NULL WHERE id=?").run(key.id, row.id);
       return true;
     });
