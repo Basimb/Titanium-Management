@@ -1788,8 +1788,14 @@ export function dispatchManagementNotice(db: DatabaseSync, actor: ChatUser, stat
   const notice = formatManagementNotice(result.notification, projectName);
   enqueueAgentMessage(db, { toUser: "group", text: notice }, now);
   // create/reassign hand the task to a NEW suggested owner (it stays "open",
-  // never actually claimed yet) -- context.ownerId already carries that
-  // userId straight from the command that was just executed. Every other
+  // never actually claimed yet). context.ownerId carries that userId when the
+  // command assigned a hard owner directly, but "add_task" can just as
+  // legitimately set a plain-name suggestedOwner instead (e.g. the model, or
+  // Basim himself over WhatsApp, naming the person rather than resolving an
+  // id) -- in that case context.ownerId is never populated, so fall back to
+  // the task's own suggested_owner column, re-read fresh (this is a
+  // brand-new row for "create", not in `state` at all yet) and resolved to a
+  // userId the same way "claim" below already resolves one. Every other
   // notifying action (submit/approve/reject/archive/comment/blocker) leaves
   // an EXISTING owner unchanged; tasks.owner stores that owner as a NAME,
   // never a userId, so resolve it back through state.users. "claim" usually
@@ -1800,13 +1806,24 @@ export function dispatchManagementNotice(db: DatabaseSync, actor: ChatUser, stat
   // caught here. `state` still holds the PRE-claim suggestedOwner (it was
   // read before this action executed), so that colleague can be resolved and
   // notified the same way reassign's new owner already is.
-  const targetId = result.notification.action === "create" || result.notification.action === "reassign" ? context.ownerId ?? null
+  const isHandoff = result.notification.action === "create" || result.notification.action === "reassign";
+  const targetId = isHandoff
+    ? context.ownerId ?? (() => {
+        const suggested = taskId ? (db.prepare("SELECT suggested_owner AS suggestedOwner FROM tasks WHERE id=?").get(taskId) as { suggestedOwner: string | null } | undefined)?.suggestedOwner ?? null : null;
+        return suggested ? state.users.find(u => u.name === suggested)?.id ?? null : null;
+      })()
     : result.notification.action === "claim"
       ? (() => { const suggested = taskId ? state.tasks.find(t => t.id === taskId)?.suggestedOwner ?? null : null; return suggested && suggested !== actor.name ? state.users.find(u => u.name === suggested)?.id ?? null : null; })()
     : taskId
       ? (() => { const ownerName = state.tasks.find(t => t.id === taskId)?.owner ?? null; return ownerName ? state.users.find(u => u.name === ownerName)?.id ?? null : null; })()
       : null;
-  if (targetId && targetId !== actor.id) {
+  // A handoff's whole point is delivering the tap-to-claim poll to whoever
+  // was just suggested -- unlike every other action here, that still holds
+  // even when the suggested owner turns out to be the actor himself (Basim,
+  // or anyone, assigning a task to themselves by name): without this
+  // exception he'd have created a task he can never see a CLAIM button for,
+  // silently stuck "open" forever.
+  if (targetId && (targetId !== actor.id || isHandoff)) {
     const targetName = state.users.find(u => u.id === targetId)?.name;
     // A fresh read, not `state` (this action just changed this exact task),
     // so create/reassign correctly offers CLAIM/TRANSFER on the now-open

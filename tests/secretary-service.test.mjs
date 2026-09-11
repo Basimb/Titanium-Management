@@ -237,6 +237,32 @@ test('manager create task and project use real authorized IDs; delete needs conf
  assert.equal((await f.run(undefined,{...e,text:`موافق ${pending(f.db).token}`})).status,'applied');
  assert.equal((await f.run(command('delete_task',{},'private'),{...e,text:'احذف مهمة شادي'})).status,'confirmation');assert.ok(f.db.prepare("SELECT id FROM tasks WHERE id='private'").get());
 });
+// Basim reported creating a task assigned to himself over WhatsApp (task
+// #28, live) and never getting the claim/transfer poll -- it just sat
+// "open" awaiting a claim that had no tap button. Root cause: a fresh
+// add_task always lands the new task on "open"/suggested_owner (never
+// straight to "progress"/owner, even with a real ownerId -- see
+// executeManagementAction), so dispatchManagementNotice's old blanket
+// self-suppression (`targetId !== actor.id`) silently dropped the one
+// private message that would have carried the actual CLAIM button, since
+// the admin who just created it IS the suggested owner. Confirms the
+// isHandoff exception fixes exactly this, without reviving the unrelated
+// self-notice suppression for every other action.
+test('an admin assigning a new task to himself still gets the private claim poll, not silence',async t=>{
+ const f=fixture(t);const e={senderNumber:'12025550103',text:'افتح لنفسي مهمة جديدة'};
+ const proposed=await f.run(command('add_task',{title:'ربط دواء تك مع السكرتير',ownerId:'basem',priority:'red',dueDate:'2026-09-11'},null,'p'),e);
+ assert.equal(proposed.status,'confirmation');
+ const applied=await f.run(undefined,{...e,text:`موافق ${pending(f.db).token}`});
+ assert.equal(applied.status,'applied');
+ const task=f.db.prepare("SELECT status,owner,suggested_owner AS suggestedOwner FROM tasks WHERE title='ربط دواء تك مع السكرتير'").get();
+ assert.equal(task.status,'open');assert.equal(task.owner,null);assert.equal(task.suggestedOwner,'باسم');
+ const rows=f.db.prepare("SELECT to_user AS toUser, text, choices_json AS choicesJson FROM agent_outbox ORDER BY id").all();
+ const toBasem=rows.find(r=>r.toUser==='basem'&&/تحديث على مهمتك/.test(r.text));
+ assert.ok(toBasem,'Basim must be privately told his new task is his to claim, not left to notice it went silent');
+ assert.ok(toBasem.choicesJson,'the private message must carry a real tappable poll, not just text');
+ const choices=JSON.parse(toBasem.choicesJson);
+ assert.ok(choices.options.some(o=>/استلمت المهمة/.test(o.label)),'the poll must offer a CLAIM option for the task he just created for himself');
+});
 test('Basim can tap موافق/إلغاء instead of typing them, and a stale poll never lands on the wrong proposal',async t=>{
  const f=fixture(t);const e={senderNumber:'12025550103',text:'ضيف مهمة جديدة لخالد بأولوية متوسطة وبدون موعد'};
  const proposed=await f.run(command('add_task',{title:'مهمة جديدة',ownerId:'member',priority:'yellow',dueDate:'unscheduled'},null,'p'),e);
