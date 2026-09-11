@@ -99,15 +99,34 @@ test('task card colors are actual priority, never completion or lateness',()=>{
  assert.ok(secretaryTaskCard({id:'t',priority:'invalid'},state,1788580000000).startsWith('⚪'));
 });
 test('explicit color lists use DB without inference, exclude archive, and never mutate tasks',async t=>{
- const f=fixture(t);f.db.exec("UPDATE tasks SET status='completed' WHERE id='t'; UPDATE tasks SET priority='green',due_date='2020-01-01' WHERE id='private'");
+ const f=fixture(t);
+ // 'approval' (not 'completed'): a completed-but-unarchived row is no longer
+ // a state current code can leave lying around (approve archives the same
+ // moment, see migrateManagementActions' legacy backfill below) -- 'approval'
+ // is a real, still-reachable non-open/non-progress status that exercises the
+ // same point, that a color list is gated on archival alone, not status.
+ f.db.exec("UPDATE tasks SET status='approval' WHERE id='t'; UPDATE tasks SET priority='green',due_date='2020-01-01' WHERE id='private'");
  const before=JSON.stringify(f.db.prepare('SELECT * FROM tasks ORDER BY id').all());
  const run=text=>f.run(undefined,{text,senderNumber:'12025550103'},async()=>{throw Error('color read must not ask model');});
- const red=await run('اعطيني المهام الحمراء');assert.match(red.reply,/🔴 لوحة/);assert.match(red.reply,/مكتملة/);assert.doesNotMatch(red.reply,/مهمة شادي/);
+ const red=await run('اعطيني المهام الحمراء');assert.match(red.reply,/🔴 لوحة/);assert.match(red.reply,/بانتظار اعتماد باسم/);assert.doesNotMatch(red.reply,/مهمة شادي/);
  const green=await run('وريني المهام الخضراء');assert.match(green.reply,/🟢 مهمة شادي الخاصة/);assert.match(green.reply,/متأخرة عن الموعد/);assert.doesNotMatch(green.reply,/\*لوحة\*/);
  const yellow=await run('بدي المهام الصفراء');assert.match(yellow.reply,/المطابق ضمن صلاحياتك \(دون الأرشيف\): 0/);assert.match(yellow.reply,/ما في مهام تطابق/);
  assert.equal(JSON.stringify(f.db.prepare('SELECT * FROM tasks ORDER BY id').all()),before);
  assert.equal(f.db.prepare('SELECT count(*) n FROM audit_logs').get().n,0);
  f.db.exec("UPDATE tasks SET archived_at=1 WHERE id='t'");assert.match((await run('المهام الحمراء')).reply,/ما في مهام تطابق/);
+});
+// Basim: "فيه مهمة ادابتر كهرباء كمان مكتمله وما تارشفت اتوماتيك" -- a task
+// that reached status='completed' before auto-archive-on-approve shipped
+// (so archived_at never got stamped) is stuck visible forever otherwise,
+// since nothing else ever revisits an already-completed task. The very next
+// request that touches management state must quietly self-heal it.
+test('a legacy completed-but-unarchived task self-heals to archived on the very next request, and then behaves like any other archived task',async t=>{
+ const f=fixture(t);
+ f.db.exec("UPDATE tasks SET status='completed',completed_at=1 WHERE id='t'");
+ const red=await f.run(undefined,{text:'اعطيني المهام الحمراء',senderNumber:'12025550103'});
+ assert.match(red.reply,/ما في مهام تطابق/);assert.doesNotMatch(red.reply,/لوحة/);
+ const healed=f.db.prepare('SELECT archived_at AS archivedAt, archived_by AS archivedBy FROM tasks WHERE id=?').get('t');
+ assert.equal(healed.archivedAt,1);assert.equal(healed.archivedBy,'باسم');
 });
 test('priority lists retain member scope and fresh DB facts over incorrect history',async t=>{
  const f=fixture(t);
@@ -144,9 +163,14 @@ test('model catalog includes priority without task details or contact numbers',a
  });
 });
 test('explicit status filters are separate from color and extra qualifiers never disappear',async t=>{
- const f=fixture(t);f.db.exec("UPDATE tasks SET priority='red',status='completed' WHERE id='private'");
+ // 'approval', not 'completed': a completed task is archived the same moment
+ // it completes now (migrateManagementActions' legacy backfill self-heals any
+ // that aren't), and an archived task is excluded from every color list
+ // regardless of the explicit status word -- 'approval' still exercises an
+ // explicit non-open/non-progress status filter without hitting that.
+ const f=fixture(t);f.db.exec("UPDATE tasks SET priority='red',status='approval' WHERE id='private'");
  const run=text=>f.run(undefined,{text,senderNumber:'12025550103'},async()=>{throw Error('must not infer');});
- const done=await run('المهام الحمراء المعتمدة');assert.match(done.reply,/مهمة شادي/);assert.doesNotMatch(done.reply,/\*لوحة\*/);
+ const pending=await run('المهام الحمراء بانتظار اعتماد');assert.match(pending.reply,/مهمة شادي/);assert.doesNotMatch(pending.reply,/\*لوحة\*/);
  const late=await run('المهام الحمراء المتأخرة');assert.match(late.reply,/لوحة/);assert.doesNotMatch(late.reply,/مهمة شادي/);
  for(const text of ['المهام الحمراء والصفراء','المهام الحمراء بدون مهام خالد','المهام الحمراء اليوم'])assert.equal((await run(text)).status,'clarify');
 });

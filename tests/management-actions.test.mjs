@@ -56,6 +56,33 @@ test("additive migration is repeatable and the snapshot carries flat tasks with 
   assert.ok(!JSON.stringify(snapshot).includes("private-hash"));
 });
 
+test("migration backfills archived_at/archived_by on tasks completed before auto-archive-on-approve shipped, once, and leaves everything else alone", t => {
+  const db = fixture(t);
+  // "أدابتر كهرباء لتليفون أفايا": finished under the old code, before the
+  // approve action started stamping archived_at/archived_by itself -- stuck
+  // status='completed' with archived_at NULL forever with no code path ever
+  // revisiting it, exactly what Basim found via "شو مهامي؟".
+  db.exec("INSERT INTO tasks (id,title,status,owner,completed_at,created_at,updated_at) VALUES ('legacy-done','أدابتر كهرباء لتليفون أفايا','completed','باسم',150,100,150)");
+  // A task completed with no completed_at at all (older still) must still get
+  // a real timestamp, not NULL.
+  db.exec("INSERT INTO tasks (id,title,status,owner,created_at,updated_at) VALUES ('legacy-done-no-completed-at','مهمة قديمة بلا تاريخ إنجاز','completed','باسم',100,120)");
+  // A task the new code already archived on approval must be left exactly as is.
+  db.exec("INSERT INTO tasks (id,title,status,owner,completed_at,created_at,updated_at,archived_at,archived_by) VALUES ('already-archived','مهمة أرشفت حديثًا','completed','باسم',150,100,150,151,'باسم')");
+  migrateManagementActions(db);
+  assert.equal(row(db, "legacy-done").archived_at, 150);
+  assert.equal(row(db, "legacy-done").archived_by, "باسم");
+  assert.equal(row(db, "legacy-done-no-completed-at").archived_at, 120);
+  assert.equal(row(db, "legacy-done-no-completed-at").archived_by, "باسم");
+  // A task the new code already archived on approval must be left exactly as is.
+  assert.equal(row(db, "already-archived").archived_at, 151);
+  // A still-open/in-progress task is never touched by this backfill.
+  assert.equal(row(db, "own").archived_at, null);
+  // Re-running (every request does) must be a no-op: nothing left to backfill.
+  const before = row(db, "legacy-done");
+  migrateManagementActions(db);
+  assert.deepEqual(row(db, "legacy-done"), before);
+});
+
 // Neither the action engine nor its command parser knows any project action
 // anymore, so a stale client (or a replayed old WhatsApp confirmation) asking
 // for one is rejected outright rather than half-applied.

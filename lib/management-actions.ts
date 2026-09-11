@@ -92,6 +92,20 @@ export function migrateManagementActions(sqlite: DatabaseSync): void {
     for (const [column, type] of [["updated_at", "INTEGER"], ["archived_at", "INTEGER"], ["archived_by", "TEXT"]]) {
       if (!columns.has(column)) sqlite.exec(`ALTER TABLE tasks ADD COLUMN ${column} ${type}`);
     }
+    // One-time backfill, safe to re-run forever: auto-archive-on-approve only
+    // started stamping archived_at/archived_by the day it shipped (the
+    // "approve" action below). A task that finished BEFORE that day is stuck
+    // status='completed' with archived_at NULL for good, since nothing else
+    // ever revisits an already-completed task -- Basim found "أدابتر كهرباء
+    // لتليفون أفايا" stuck like this via "شو مهامي؟" (plus 5 sibling tasks
+    // from the same pre-fix era). The WHERE clause only ever touches rows
+    // still NULL, so once applied this is a no-op on every later request.
+    // Guarded on status/completed_at/created_at existing: some callers (the
+    // Odoo report job) run this same migration against a minimal stand-in
+    // tasks table that only ever has id, with no completion concept at all.
+    if (["status", "completed_at", "created_at"].every(column => columns.has(column))) {
+      sqlite.prepare("UPDATE tasks SET archived_at=COALESCE(completed_at,updated_at,created_at,?),archived_by='باسم' WHERE status='completed' AND archived_at IS NULL").run(Date.now());
+    }
   });
   migrateAgentSchema(sqlite);
 }
