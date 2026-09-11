@@ -632,11 +632,19 @@ function parseApprovalPollChoice(event: Event): { approvalId: string; decision: 
 // reaches dispatchManagementNotice without ever going through requestTaskClose
 // (lib/approvals.ts), which already attaches its own approvalDecisionPoll and
 // so never needs this one. Mirrors approvalDecisionPoll/parseApprovalPollChoice's
-// exact shape (same 🟢/🔴 labels, same one-hour poll lifetime) but keyed by
-// taskId instead of an approval id, since no approval row exists to key off
-// of on this path.
+// exact shape (same 🟢/🔴 labels) but keyed by taskId instead of an approval
+// id, since no approval row exists to key off of on this path.
+// Basim runs a pharmacy business and doesn't always open WhatsApp within the
+// hour a task is submitted -- a poll that died in 60 minutes with no resend
+// (see nudgeOwner's "approval" branch for the resend, added after his report
+// "تجربة نسخة سكرتير مطور بانتظار اعتماد باسم مع اني اقفلتها") was the actual
+// mechanism behind an approval that "arrives" but never closes the task. 24
+// hours is a realistic window for a decision that can wait; the whatsapp-
+// bridge's own normalizePollChoices caps every poll at the same new ceiling
+// (see MAX_POLL_LIFETIME_MS there), so this value must never exceed it.
+const TASK_CLOSE_POLL_LIFETIME_MS = 24 * 60 * 60_000;
 function taskCloseDecisionPoll(taskId: string, at: number): SecretaryChoices {
-  return { id: `TCLQ${taskId}`, title: "قرارك على إنجاز المهمة؟", expiresAt: at + 60 * 60_000,
+  return { id: `TCLQ${taskId}`, title: "قرارك على إنجاز المهمة؟", expiresAt: at + TASK_CLOSE_POLL_LIFETIME_MS,
     options: [{ id: `TCL${taskId}Y`, label: "🟢 اعتماد" }, { id: `TCL${taskId}N`, label: "🔴 رفض" }] };
 }
 function parseTaskCloseDecisionPollChoice(event: Event): { taskId: string; decision: "approved" | "rejected" } | null {
@@ -886,6 +894,23 @@ function reminder(db: DatabaseSync, event: Event, actor: ChatUser, state: Snapsh
 function nudgeOwner(db: DatabaseSync, event: Event, actor: ChatUser, state: Snapshot, taskId: string, now: number): Result {
   const task = state.tasks.find(t => t.id === taskId);
   if (!task || task.archivedAt) return save(db, event, actor, { status: "clarify", reply: "هاي المهمة ما عادت متاحة." }, [], now);
+  // Basim: "تجربة نسخة سكرتير مطور بانتظار اعتماد باسم مع اني اقفلتها" -- a
+  // task pending his own close decision has no "current owner" to nudge at
+  // all; the decision always waits on Basim, whoever owns the task. Its
+  // taskCloseDecisionPoll (unlike a formal approvals-table request) has no
+  // periodic stale-approval nudge behind it and, until now, no way to get a
+  // fresh copy once the poll passed its own expiry -- a tap after that point
+  // (or a later "اعتمد" typed as plain text, which only ever resolves against
+  // the formal approvals table, never this task-close path) both silently do
+  // nothing, so the request could get permanently stuck with zero recourse
+  // from WhatsApp. nudge already exists, is already Basim-only, and already
+  // means "resend the live poll for this task right now" -- this is that,
+  // pointed at the one poll that is actually his to resend.
+  if (task.status === "approval") {
+    enqueueAgentMessage(db, { toUser: "basem", text: `⏳ تذكير: بانتظار قرارك على إنجاز المهمة: ${clean(task.title)}`, choices: taskCloseDecisionPoll(task.id, now) }, now);
+    log(db, actor, event, "secretary_nudge", { summary: "أعاد إرسال استطلاع القرار على إنجاز المهمة لباسم", taskId: task.id, targetUserId: "basem" }, now);
+    return save(db, event, actor, { status: "applied", reply: `✅ بعتّلك من جديد طلب القرار على: ${clean(task.title)}` }, ["t:" + task.id], now);
+  }
   const responsible = task.owner || task.suggestedOwner;
   if (!responsible) return save(db, event, actor, { status: "clarify", reply: "هاي المهمة ما إلها مسؤول حاليًا لتذكيره." }, ["t:" + task.id], now);
   if (responsible === actor.name) return save(db, event, actor, { status: "clarify", reply: "هاي مهمتك انت -- ما في حدا غيرك لتذكيره فيها." }, ["t:" + task.id], now);

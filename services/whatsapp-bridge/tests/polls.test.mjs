@@ -93,6 +93,18 @@ test('poll questions have exact bounded unique IDs/labels and 2..12 choices; uns
     assert.equal(normalizePollChoices(question, CLOCK), null);
   }
 });
+// Basim runs a pharmacy business and doesn't always open WhatsApp within an
+// hour of a task being submitted for his approval -- the old 60-minute
+// ceiling here (shared by every poll this bridge sends, task-close decision
+// included) meant a late tap silently did nothing, with no resend, which was
+// the real mechanism behind an approval that "arrives" but never closes the
+// task. The ceiling is now 24 hours; this pins that exact boundary so it
+// cannot silently drift back down (or up) without a test noticing.
+test('a poll may ask for up to 24 hours of validity, never more', () => {
+  const DAY = 24 * 60 * 60_000;
+  assert.deepEqual(normalizePollChoices(choices('Q_LONG', CLOCK + DAY), CLOCK), choices('Q_LONG', CLOCK + DAY));
+  assert.equal(normalizePollChoices(choices('Q_TOO_LONG', CLOCK + DAY + 1), CLOCK), null);
+});
 
 test('poll proto and random secret are persisted before a single relay with required creation metadata', async t => {
   const f = fixture(t);

@@ -324,6 +324,40 @@ test('nudge on a task already in progress resends the FINISH/NOTE/TRANSFER/EDIT/
   const poll = f.db.prepare("SELECT choices_json AS choicesJson FROM agent_outbox WHERE to_user='member' AND choices_json IS NOT NULL ORDER BY id DESC LIMIT 1").get();
   assert.deepEqual(JSON.parse(poll.choicesJson).options.map(o => o.id), [`TSK${PROGRESS}FINISH`, `TSK${PROGRESS}NOTE`, `TSK${PROGRESS}TRANSFER`, `TSK${PROGRESS}EDIT`, `TSK${PROGRESS}EXTEND`]);
 });
+// Basim's report: "تجربة نسخة سكرتير مطور بانتظار اعتماد باسم مع اني اقفلتها"
+// -- a task pending HIS OWN close decision has no "current owner" to nudge;
+// the decision always waits on Basim, whoever owns the task (including when
+// he owns/submitted it himself, exactly like this real case). Its poll
+// (taskCloseDecisionPoll) has no periodic stale-approval nudge behind it the
+// way a formal approvals-table request does, and no plain-text fallback
+// either -- once it passed its own expiry there was no way at all to decide
+// it from WhatsApp. nudge on a task in "approval" status must resend exactly
+// that decision poll to Basim, never the claim/action poll, and never refuse
+// just because Basim also happens to be the task's owner.
+test('nudge on a task pending Basim\'s own approval resends his 🟢/🔴 decision poll, even when he owns the task himself', async t => {
+  const f = fixture(t); const admin = { senderNumber: '12025550103' };
+  f.db.prepare("UPDATE tasks SET status='approval', owner='باسم', suggested_owner='باسم' WHERE id=?").run(PROGRESS);
+  const before = f.db.prepare('SELECT status,owner,suggested_owner AS suggestedOwner FROM tasks WHERE id=?').get(PROGRESS);
+  const r = await f.run(nudge(PROGRESS), { ...admin, text: 'ابعتلي القرار من جديد على مهمة لوحة' });
+  assert.equal(r.status, 'applied', 'must resolve immediately, never blocked by "هاي مهمتك انت"');
+  const after = f.db.prepare('SELECT status,owner,suggested_owner AS suggestedOwner FROM tasks WHERE id=?').get(PROGRESS);
+  assert.deepEqual(after, before, 'nudge must never change the task record itself');
+  const toBasemRows = f.db.prepare("SELECT text, choices_json AS choicesJson FROM agent_outbox WHERE to_user='basem' ORDER BY id").all();
+  const poll = toBasemRows.find(row => row.choicesJson);
+  assert.ok(poll, 'Basim must get a real tappable decision poll, not just plain text');
+  const choices = JSON.parse(poll.choicesJson);
+  assert.equal(choices.id, `TCLQ${PROGRESS}`);
+  assert.deepEqual(choices.options.map(o => o.id), [`TCL${PROGRESS}Y`, `TCL${PROGRESS}N`]);
+});
+test('nudge on a task pending approval but owned by someone else still resends Basim his decision poll, not a poll to the owner', async t => {
+  const f = fixture(t); const admin = { senderNumber: '12025550103' };
+  f.db.prepare("UPDATE tasks SET status='approval' WHERE id=?").run(PROGRESS); // owner stays 'خالد' from the fixture
+  const r = await f.run(nudge(PROGRESS), { ...admin, text: 'ابعتلي القرار من جديد على مهمة لوحة' });
+  assert.equal(r.status, 'applied');
+  assert.equal(f.db.prepare("SELECT choices_json AS choicesJson FROM agent_outbox WHERE to_user='member'").get(), undefined, 'خالد gets nothing -- the pending decision is Basim\'s alone');
+  const poll = f.db.prepare("SELECT choices_json AS choicesJson FROM agent_outbox WHERE to_user='basem' AND choices_json IS NOT NULL").get();
+  assert.equal(JSON.parse(poll.choicesJson).id, `TCLQ${PROGRESS}`);
+});
 test('nudge on a task with no owner or suggested owner at all is refused cleanly instead of nudging nobody', async t => {
   const f = fixture(t); const admin = { senderNumber: '12025550103' };
   f.db.prepare('UPDATE tasks SET suggested_owner=NULL WHERE id=?').run(OPEN);

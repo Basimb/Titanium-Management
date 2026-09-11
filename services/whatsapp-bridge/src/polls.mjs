@@ -8,11 +8,24 @@ const digest = value => createHash('sha256').update(value).digest();
 const cleanLabel = value => typeof value === 'string' && value.length > 0 && value.length <= 100
   && value === value.trim() && value === boundedPlainText(value) && !/[\r\n\t]/u.test(value);
 
+// Basim: a task submitted for his approval sits behind a real WhatsApp poll
+// (taskCloseDecisionPoll) that used to be capped at 60 minutes here -- a hard
+// ceiling this file enforces on every poll regardless of what secretary-
+// service.ts asks for. He runs a pharmacy business and doesn't always open
+// WhatsApp within the hour a task is submitted; once that hour passed the
+// poll was permanently dead with no resend, and his later tap silently did
+// nothing -- this was the actual mechanism behind "المهمة ما بتقفل" (the
+// approval message arrives but never closes the task). 24 hours is a much
+// more realistic window for a decision that can wait; the TTL is pure
+// staleness hygiene, never a security control (acceptVote independently
+// re-authenticates and re-authorizes every vote no matter how fresh the poll
+// is), so raising it costs nothing but a longer-lived local DB row.
+const MAX_POLL_LIFETIME_MS = 24 * 60 * 60_000;
 // Invalid/unsupported questions retain the ordinary text reply, never a partial poll.
 export function normalizePollChoices(value, now = Date.now()) {
   if (!value || typeof value !== 'object' || Array.isArray(value) || !identifier(value.id)
     || !cleanLabel(value.title) || !Number.isSafeInteger(value.expiresAt) || value.expiresAt <= now
-    || value.expiresAt > now + 60 * 60_000 || !Array.isArray(value.options)
+    || value.expiresAt > now + MAX_POLL_LIFETIME_MS || !Array.isArray(value.options)
     || value.options.length < 2 || value.options.length > 12) return null;
   if (value.options.some(option => !option || !identifier(option.id) || !cleanLabel(option.label))) return null;
   if (new Set(value.options.map(option => option.id)).size !== value.options.length
