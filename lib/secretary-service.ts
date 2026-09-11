@@ -1169,8 +1169,12 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
       if (!config.enabled || !fresh || JSON.stringify(fresh) !== JSON.stringify(actor)) return { status: "denied", reply: "" };
       const duplicate = lookup(db, event, fresh, stateFor(db, fresh)); if (duplicate) return duplicate;
       const row = db.prepare("SELECT * FROM secretary_task_choice WHERE conversation_key=?").get(key) as TaskChoiceRow | undefined;
-      db.prepare("DELETE FROM secretary_task_choice WHERE conversation_key=?").run(key);
+      // Only a tap that actually matches the CURRENT row consumes it -- a
+      // stale tap (an old poll, superseded by retyping the same ambiguous
+      // command again) must not wipe out a fresh, still-valid choice for the
+      // same conversation.
       if (!row || row.token !== taskChoicePick.token || row.expires_at <= now) return save(db, event, fresh, { status: "clarify", reply: "هذا الاختيار ما عاد صالحًا؛ أعد كتابة طلبك." }, [], now);
+      db.prepare("DELETE FROM secretary_task_choice WHERE conversation_key=?").run(key);
       const candidateIds = JSON.parse(row.candidate_ids) as string[];
       const taskId = candidateIds[taskChoicePick.index];
       const state = stateFor(db, fresh);
@@ -1614,7 +1618,14 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
       else if (candidates.length > 1) {
         const token = randomBytes(3).toString("hex").toUpperCase();
         const fields = plan.kind === "close_request" ? { details: plan.fields.details, message: plan.message } : { ownerId: plan.fields.ownerId, reason: plan.fields.reason };
-        db.prepare("INSERT INTO secretary_task_choice VALUES(?,?,?,?,?,?,?,?)").run(key, token, plan.kind, JSON.stringify(candidates.map(t => t.id)), JSON.stringify(fields), event.text, event.messageId, now + CONFIRM_MS);
+        // Retyping the same ambiguous command again (e.g. never tapping the
+        // first poll) must replace that stale row, not collide with it --
+        // conversation_key is this table's primary key, so a second plain
+        // INSERT here throws a UNIQUE-constraint error that aborts the whole
+        // turn (Basim hit this for real: خالد's second "انهاء المهمة" came
+        // back broken instead of a fresh poll).
+        db.prepare("INSERT INTO secretary_task_choice VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(conversation_key) DO UPDATE SET token=excluded.token,kind=excluded.kind,candidate_ids=excluded.candidate_ids,fields_json=excluded.fields_json,original_text=excluded.original_text,source_message_id=excluded.source_message_id,expires_at=excluded.expires_at")
+          .run(key, token, plan.kind, JSON.stringify(candidates.map(t => t.id)), JSON.stringify(fields), event.text, event.messageId, now + CONFIRM_MS);
         log(db, freshActor, event, "secretary_task_choice", { summary: "عرض اختيار المهمة قبل التنفيذ", kind: plan.kind, candidateIds: candidates.map(t => t.id) }, now);
         return save(db, event, freshActor, { status: "clarify", reply: `${LEGEND_MANY_TASK}\n${candidates.map(t => `• ${clean(t.title, 150)}`).join("\n")}`, choices: taskChoicePoll(token, candidates, now) }, candidates.map(t => "t:" + t.id), now);
       }
@@ -1642,7 +1653,11 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
         if (candidates.length === 1) command.taskId = candidates[0].id;
         else if (candidates.length > 1) {
           const token = randomBytes(3).toString("hex").toUpperCase();
-          db.prepare("INSERT INTO secretary_task_choice VALUES(?,?,?,?,?,?,?,?)").run(key, token, command.action, JSON.stringify(candidates.map(t => t.id)), JSON.stringify(command.action === "comment" ? { comment: command.comment } : {}), event.text, event.messageId, now + CONFIRM_MS);
+          // Same upsert as the close_request/task_transfer_request branch
+          // above -- a stale unconsumed row for this conversation must be
+          // replaced, never collide with the new one.
+          db.prepare("INSERT INTO secretary_task_choice VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(conversation_key) DO UPDATE SET token=excluded.token,kind=excluded.kind,candidate_ids=excluded.candidate_ids,fields_json=excluded.fields_json,original_text=excluded.original_text,source_message_id=excluded.source_message_id,expires_at=excluded.expires_at")
+            .run(key, token, command.action, JSON.stringify(candidates.map(t => t.id)), JSON.stringify(command.action === "comment" ? { comment: command.comment } : {}), event.text, event.messageId, now + CONFIRM_MS);
           log(db, freshActor, event, "secretary_task_choice", { summary: "عرض اختيار المهمة قبل التنفيذ", kind: command.action, candidateIds: candidates.map(t => t.id) }, now);
           return save(db, event, freshActor, { status: "clarify", reply: `${LEGEND_MANY_TASK}\n${candidates.map(t => `• ${clean(t.title, 150)}`).join("\n")}`, choices: taskChoicePoll(token, candidates, now) }, candidates.map(t => "t:" + t.id), now);
         }

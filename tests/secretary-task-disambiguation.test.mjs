@@ -68,6 +68,29 @@ test('close_request ("انهاء المهمة") with two eligible in-progress ta
   // Nothing must have happened yet -- no approval filed, no task touched.
   assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM approvals').get().n, 0);
 });
+// Basim hit this for real: خالد got the poll once, never tapped it, then
+// retyped "انهاء المهمة" again -- the second attempt is a fresh INSERT into
+// secretary_task_choice (conversation_key is its primary key), which used to
+// collide with the still-unconsumed row from the first attempt and throw,
+// aborting the whole turn instead of just replacing it with a fresh poll.
+test('retyping the same ambiguous command again before tapping the first poll replaces it with a fresh poll instead of crashing', async t => {
+  const f = fixture(t);
+  const first = await f.run(closeRequest(A, 'خلصت التنفيذ'), { text: 'انهيت المهمة' });
+  assert.ok(first.choices, 'first attempt must offer a poll');
+  const second = await f.run(closeRequest(B, 'خلصت فعلا'), { text: 'انهيت المهمة' });
+  assert.equal(second.status, 'clarify');
+  assert.ok(second.choices, 'retyping the same ambiguous command must still offer a poll, never crash or fall back to plain text');
+  assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM secretary_task_choice').get().n, 1, 'the stale row must be replaced, not duplicated');
+  // The stale first poll must no longer resolve to anything (its row is gone).
+  const staleTap = await f.run(undefined, tap(first.choices.id, first.choices.options[0].id), async () => { throw Error('must not ask the model'); });
+  assert.equal(staleTap.status, 'clarify');
+  assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM approvals').get().n, 0, 'the stale tap must not have applied anything');
+  // The fresh (second) poll must still resolve correctly.
+  const freshTap = await f.run(undefined, tap(second.choices.id, second.choices.options[1].id), async () => { throw Error('must not ask the model'); });
+  assert.equal(freshTap.status, 'applied');
+  const approval = f.db.prepare("SELECT entity_id AS entityId FROM approvals WHERE type='task_close'").get();
+  assert.equal(approval.entityId, B);
+});
 test('tapping the disambiguation poll finishes the exact close_request that was typed, against the tapped task only', async t => {
   const f = fixture(t);
   const first = await f.run(closeRequest(A, 'خلصت التنفيذ بالكامل'), { text: 'انهيت المهمة' });
