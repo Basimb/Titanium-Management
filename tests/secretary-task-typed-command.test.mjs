@@ -69,6 +69,23 @@ test('natural variants of "finish" ("خلصت المهمة"/"خلصتها") reso
   const f2 = fixture(t); const r2 = await f2.run({ text: 'خلصتها' });
   assert.equal(r2.status, 'clarify'); assert.ok(r2.choices);
 });
+// Basim tested this fix himself right after it first shipped by typing
+// exactly these three messages, and every one of them MISSED (the model got
+// consulted and produced its own generic "أذكر اسم المهمة التي تود
+// إنهاءها" instead of the deterministic poll) -- casual WhatsApp typing
+// drops the definite article ("مهمه" instead of "المهمة") and spells the
+// tied-ta as a plain ه, and the first version of LEGEND_TYPED_PHRASES only
+// matched the fully-spelled formal forms. Locks in the fix (ة/ه folding +
+// optional "ال") against regressing on his own exact words.
+test('Basim\'s own casual phrasing ("انهاء مهمه"/"انهيت مهمه"/"خلصت مهمه", no "ال", ه instead of ة) is matched, not left for the model', async t => {
+  for (const text of ['انهاء مهمه', 'انهيت مهمه', 'خلصت مهمه']) {
+    const f = fixture(t);
+    const r = await f.run({ text });
+    assert.equal(r.status, 'clarify', `"${text}" must resolve deterministically`);
+    assert.ok(r.choices, `"${text}" must offer a real tappable poll`);
+    assert.equal(r.choices.id.slice(0, 3), 'TDQ');
+  }
+});
 test('tapping the deterministic finish poll resolves against the tapped task and asks for the missing result instead of guessing one', async t => {
   const f = fixture(t);
   const first = await f.run({ text: 'انهاء المهمة' });

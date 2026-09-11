@@ -123,13 +123,22 @@ function legendRewriteText(optionId: string, title: string): string {
 // bare-command check in this file (bareOwnershipOrdinal, directTaskList) --
 // a longer sentence that merely mentions one of these words is left alone
 // for the model exactly as before.
+//
+// Basim tested this himself right after it first shipped and it MISSED his
+// own messages ("انهاء مهمه", "انهيت مهمه", "خلصت مهمه") -- casual WhatsApp
+// typing routinely drops the definite article ("مهمة" instead of "المهمة")
+// and spells the tied-ta as a plain ه ("مهمه" instead of "مهمة"), and the
+// first version of this list only matched the fully-spelled formal forms.
+// legendTypedPhraseOption below now folds ة to ه before matching (so
+// "المهمة" and "مهمه" compare equal) and every pattern makes the "ال"
+// article optional, so the phrase list only needs to spell the ه form once.
 const LEGEND_TYPED_PHRASES: Record<string, RegExp> = {
-  LGDFINISH: /^(?:انهاء المهمة|انهيت المهمة|خلصت المهمة|خلصت من المهمة|خلصت مهمتي|خلصتها|انتهيت من المهمة|انتهيت منها)$/,
-  LGDTRANSFER: /^(?:تحويل المهمة|حول المهمة|حولها لحدا غيري|حولها لشخص غيري|مش مسؤوليتي|ما بقدر اعملها|ما بقدر اسويها)$/,
-  LGDNOTE: /^(?:اضافة ملاحظة|بدي اضيف ملاحظة|بدي اضيف تحديث|عندي تحديث|بدي احدث المهمة|بدي احدث مهمة)$/,
+  LGDFINISH: /^(?:انهاء (?:ال)?مهمه|انهيت (?:ال)?مهمه|خلصت (?:ال)?مهمه|خلصت من (?:ال)?مهمه|خلصت مهمتي|خلصتها|انتهيت من (?:ال)?مهمه|انتهيت منها)$/,
+  LGDTRANSFER: /^(?:تحويل (?:ال)?مهمه|حول (?:ال)?مهمه|حولها لحدا غيري|حولها لشخص غيري|مش مسؤوليتي|ما بقدر اعملها|ما بقدر اسويها)$/,
+  LGDNOTE: /^(?:اضافه (?:ال)?ملاحظه|بدي اضيف ملاحظه|بدي اضيف تحديث|عندي تحديث|بدي احدث (?:ال)?مهمه)$/,
 };
 function legendTypedPhraseOption(text: string): string | null {
-  const normalized = text.normalize("NFKC").replace(/[أإآ]/g, "ا").replace(/[ً-ٰٟـ؟?!.،,]/g, "").replace(/\s+/g, " ").trim();
+  const normalized = text.normalize("NFKC").replace(/[أإآ]/g, "ا").replace(/[ً-ٰٟـ؟?!.،,]/g, "").replace(/ة/g, "ه").replace(/\s+/g, " ").trim();
   for (const optionId of Object.keys(LEGEND_TYPED_PHRASES)) if (LEGEND_TYPED_PHRASES[optionId].test(normalized)) return optionId;
   return null;
 }
