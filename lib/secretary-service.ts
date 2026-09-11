@@ -131,6 +131,29 @@ function legendTypedPhraseOption(text: string): string | null {
   for (const optionId of Object.keys(LEGEND_TYPED_PHRASES)) if (LEGEND_TYPED_PHRASES[optionId].test(normalized)) return optionId;
   return null;
 }
+// Basim: the model itself sometimes gives up with a plain "which task"
+// clarify for a short private message that plainly names one of the same
+// three self-service actions by a bare keyword, without matching one of
+// LEGEND_TYPED_PHRASES' own exact wordings above (his own report: "ضيف
+// ملاحظه", not "بدي اضيف ملاحظة"). Unlike legendTypedPhraseOption, this is
+// ONLY ever consulted after the model already tried and answered "clarify"
+// on its own (see the call site in handleSecretaryEvent) -- it never
+// pre-empts the model, so a message the model resolved some other way, or
+// asked its own more specific question about, never reaches this at all.
+// Bounded to a short, non-negated message so a longer sentence that only
+// mentions one of these words in passing keeps whatever the model already
+// asked about it.
+const LEGEND_FUZZY_KEYWORDS: Record<string, RegExp> = {
+  LGDFINISH: /(?:^| )(?:خلص|خلصت|خلصنا|انهيت|انتهيت|سكرت|سكرها)(?:$| )/,
+  LGDTRANSFER: /(?:^| )(?:حول|تحويل|حولها)(?:$| )/,
+  LGDNOTE: /(?:^| )(?:ملاحظه|تحديث|تعليق)(?:$| )/,
+};
+function legendFuzzyPhraseOption(text: string): string | null {
+  const normalized = text.normalize("NFKC").replace(/[أإآ]/g, "ا").replace(/[ً-ٰٟـ؟?!.،,]/g, "").replace(/ة/g, "ه").replace(/\s+/g, " ").trim();
+  if (!normalized || normalized.split(" ").length > 8 || /(?:^| )(?:ما|مو|مش|لا|لم|لن)(?:$| )/.test(normalized)) return null;
+  for (const optionId of Object.keys(LEGEND_FUZZY_KEYWORDS)) if (LEGEND_FUZZY_KEYWORDS[optionId].test(normalized)) return optionId;
+  return null;
+}
 // Inverse of taskCommandsLegendPoll. LGDADD is always safe to rewrite
 // outright -- a brand-new task touches no existing record. FINISH/TRANSFER/
 // NOTE need an existing task identified first: unlike taskActionPoll's own
@@ -1051,8 +1074,29 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
       if (!row || row.token !== taskChoicePick.token || row.expires_at <= now) return save(db, event, fresh, { status: "clarify", reply: "هذا الاختيار ما عاد صالحًا؛ أعد كتابة طلبك." }, [], now);
       db.prepare("DELETE FROM secretary_task_choice WHERE conversation_key=?").run(key);
       const candidateIds = JSON.parse(row.candidate_ids) as string[];
-      const taskId = candidateIds[taskChoicePick.index];
       const state = stateFor(db, fresh);
+      // task_transfer_request's own employee-picker poll (see its case in
+      // secretary-agent.ts): candidateIds here are USER ids (plus the
+      // "__decline__" sentinel), never task ids -- the actual taskId and
+      // already-collected reason live in fields_json instead, stashed there
+      // when the poll was built. Handle this shape before the generic
+      // task-id lookup below, which candidateIds otherwise always feeds.
+      if (row.kind === "task_transfer_pick_owner") {
+        const stashed = JSON.parse(row.fields_json) as { taskId: string; reason: string };
+        const task = state.tasks.find(t => t.id === stashed.taskId);
+        if (!task) return save(db, event, fresh, { status: "clarify", reply: "هاي المهمة ما عادت متاحة." }, [], now);
+        const pickedId = candidateIds[taskChoicePick.index];
+        if (!pickedId) return save(db, event, fresh, { status: "clarify", reply: "هذا الاختيار ما عاد صالحًا؛ أعد كتابة طلبك." }, [], now);
+        const syntheticPlan: SecretaryIntent = { ...emptySecretaryIntent("task_transfer_request"), taskId: task.id,
+          fields: { ...emptySecretaryIntent().fields, ownerId: pickedId === "__decline__" ? "declined" : pickedId, reason: stashed.reason } };
+        const result = handleAgentIntent(syntheticPlan, { db, actor: fresh, now, inputKind: event.inputKind, text: row.original_text, messageId: row.source_message_id, suppressNotices: event.groupId === null && /(?:لا|ما)\s+(?:تبعت|تبعث|ترسل)|بدون\s+(?:رسائل|إشعارات|اشعارات)/u.test(row.original_text), users: state.users, tasks: state.tasks,
+          conversationKey: event.groupId === null ? key : undefined,
+          stash: command => { const stashToken = "T" + randomBytes(3).toString("hex").toUpperCase(); db.prepare("INSERT INTO secretary_pending VALUES(?,?,?,?,?,?,?)").run(key, stashToken, JSON.stringify(command), initialHash, row.original_text, row.source_message_id, now + CONFIRM_MS); log(db, fresh, event, "secretary_proposal", { summary: "عرض تغييرًا ينتظر التأكيد", proposedCommand: command, confirmationRequired: true }, now); return stashToken; } });
+        if (!result) return save(db, event, fresh, { status: "clarify", reply: "ما قدرت أكمل هذا الطلب." }, [], now);
+        deliverAgentSideEffects(db, fresh, result, now);
+        return save(db, event, fresh, { status: result.status, reply: result.reply, ...(result.taskId ? { taskId: result.taskId } : {}), ...(result.choices ? { choices: result.choices } : {}) }, [...(result.taskId ? ["t:" + result.taskId] : [])], now);
+      }
+      const taskId = candidateIds[taskChoicePick.index];
       const task = taskId ? state.tasks.find(t => t.id === taskId) : undefined;
       if (!task) return save(db, event, fresh, { status: "clarify", reply: "هاي المهمة ما عادت متاحة." }, [], now);
       const stashedFields = JSON.parse(row.fields_json) as Record<string, unknown>;
@@ -1064,7 +1108,7 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
         const syntheticPlan: SecretaryIntent = row.kind === "close_request"
           ? { ...base, taskId: task.id, message: (stashedFields.message as string | null) ?? null, fields: { ...base.fields, details: (stashedFields.details as string | null) ?? null } }
           : { ...base, taskId: task.id, fields: { ...base.fields, ownerId: (stashedFields.ownerId as string | null) ?? null, reason: (stashedFields.reason as string | null) ?? null } };
-        const result = handleAgentIntent(syntheticPlan, { db, actor: fresh, now, inputKind: event.inputKind, text: row.original_text, suppressNotices: event.groupId === null && /(?:لا|ما)\s+(?:تبعت|تبعث|ترسل)|بدون\s+(?:رسائل|إشعارات|اشعارات)/u.test(row.original_text), users: state.users, tasks: state.tasks,
+        const result = handleAgentIntent(syntheticPlan, { db, actor: fresh, now, inputKind: event.inputKind, text: row.original_text, messageId: row.source_message_id, suppressNotices: event.groupId === null && /(?:لا|ما)\s+(?:تبعت|تبعث|ترسل)|بدون\s+(?:رسائل|إشعارات|اشعارات)/u.test(row.original_text), users: state.users, tasks: state.tasks,
           conversationKey: event.groupId === null ? key : undefined,
           stash: command => { const stashToken = "T" + randomBytes(3).toString("hex").toUpperCase(); db.prepare("INSERT INTO secretary_pending VALUES(?,?,?,?,?,?,?)").run(key, stashToken, JSON.stringify(command), initialHash, row.original_text, row.source_message_id, now + CONFIRM_MS); log(db, fresh, event, "secretary_proposal", { summary: "عرض تغييرًا ينتظر التأكيد", proposedCommand: command, confirmationRequired: true }, now); return stashToken; } });
         if (!result) return save(db, event, fresh, { status: "clarify", reply: "ما قدرت أكمل هذا الطلب." }, [], now);
@@ -1501,7 +1545,7 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
     }
     if (AGENT_KINDS.has(plan.kind)) {
       db.prepare("DELETE FROM secretary_pending WHERE conversation_key=?").run(key);
-      const result = handleAgentIntent(plan, { db, actor: freshActor, now, inputKind: event.inputKind, text: event.text, suppressNotices: event.groupId === null && /(?:لا|ما)\s+(?:تبعت|تبعث|ترسل)|بدون\s+(?:رسائل|إشعارات|اشعارات)/u.test(event.text), users: state.users, tasks: state.tasks,
+      const result = handleAgentIntent(plan, { db, actor: freshActor, now, inputKind: event.inputKind, text: event.text, messageId: event.messageId, suppressNotices: event.groupId === null && /(?:لا|ما)\s+(?:تبعت|تبعث|ترسل)|بدون\s+(?:رسائل|إشعارات|اشعارات)/u.test(event.text), users: state.users, tasks: state.tasks,
         // Interactive choice-button storage is scoped to Basim's own private
         // chat only (see approvalDecisionChoices/createSecretaryChoices) --
         // same gate intakeChoices already uses for the task-intake polls.
@@ -1520,7 +1564,18 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
       // Also unguarded for Basim himself per his explicit request: LGDNOTE
       // and LGDFINISH both filter legendCandidates by task.owner===actorName,
       // so for him this only ever matches tasks HE personally owns.
-      if ((command.action === "comment" || command.action === "submit") && typeof command.taskId === "string") {
+      //
+      // Basim's "ضيف ملاحظه" report went further still: the model can also
+      // leave command.taskId unset entirely (never even a guess) while still
+      // correctly extracting the comment/submit action itself. commandFrom
+      // only ever assigns command.taskId when plan.taskId is truthy, so
+      // "not a string" here means exactly that -- never a real, wrongly-typed
+      // id -- and is safe to treat identically to the 0-candidates case
+      // below: fall through unchanged when a legitimate non-self-owned
+      // taskId was already resolved (a manager commenting on someone else's
+      // task never has any of THEIR OWN candidates here), only speak up when
+      // there is truly nothing to fall back on.
+      if (command.action === "comment" || command.action === "submit") {
         const candidates = legendCandidates(state, freshActor.name, command.action === "comment" ? "LGDNOTE" : "LGDFINISH");
         if (candidates.length === 1) command.taskId = candidates[0].id;
         else if (candidates.length > 1) {
@@ -1532,6 +1587,8 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
             .run(key, token, command.action, JSON.stringify(candidates.map(t => t.id)), JSON.stringify(command.action === "comment" ? { comment: command.comment } : {}), event.text, event.messageId, now + CONFIRM_MS);
           log(db, freshActor, event, "secretary_task_choice", { summary: "عرض اختيار المهمة قبل التنفيذ", kind: command.action, candidateIds: candidates.map(t => t.id) }, now);
           return save(db, event, freshActor, { status: "clarify", reply: `${LEGEND_MANY_TASK}\n${candidates.map(t => `• ${clean(t.title, 150)}`).join("\n")}`, choices: taskChoicePoll(token, candidates, now) }, candidates.map(t => "t:" + t.id), now);
+        } else if (typeof command.taskId !== "string") {
+          return save(db, event, freshActor, { status: "clarify", reply: LEGEND_NO_TASK[command.action === "comment" ? "LGDNOTE" : "LGDFINISH"] }, [], now);
         }
       }
       if (SENSITIVE.has(String(command.action)) || event.inputKind === "voice") {
@@ -1554,6 +1611,34 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
       return reminder(db, event, freshActor, state, task.id, due, now);
     }
     if (plan.kind === "nudge") return nudgeOwner(db, event, freshActor, state, String(plan.taskId), now);
+    // Basim: "قصدي ما فتح تصويت" -- give the SAME real tappable choice the
+    // exact typed phrase and the tapped legend reminder already get, instead
+    // of ever leaving a bare "which task" clarify with no buttons attached.
+    // See legendFuzzyPhraseOption above for why this only ever runs on a
+    // clarify the model itself already produced.
+    if (plan.kind === "clarify" && !review && event.groupId === null && !event.replyToMessageId && event.inputKind !== "voice") {
+      const fuzzyOptionId = legendFuzzyPhraseOption(event.text);
+      if (fuzzyOptionId) {
+        const candidates = legendCandidates(state, freshActor.name, fuzzyOptionId);
+        if (candidates.length === 0) return save(db, event, freshActor, { status: "clarify", reply: LEGEND_NO_TASK[fuzzyOptionId] }, [], now);
+        if (candidates.length === 1) {
+          const title = clean(candidates[0].title, 150);
+          const reply = fuzzyOptionId === "LGDNOTE" ? `تقصد مهمة «${title}»؟ اكتب نص الملاحظة.`
+            : fuzzyOptionId === "LGDFINISH" ? `تقصد مهمة «${title}»؟ شو نتيجتها بالضبط؟`
+            : `تقصد مهمة «${title}»؟ اذكر اسم الزميل المقصود، أو قل «مش مسؤوليتي» بدون تحديد حدا.`;
+          return save(db, event, freshActor, { status: "clarify", reply, taskId: candidates[0].id }, ["t:" + candidates[0].id], now);
+        }
+        const token = randomBytes(3).toString("hex").toUpperCase();
+        const kind = fuzzyOptionId === "LGDFINISH" ? "close_request" : fuzzyOptionId === "LGDTRANSFER" ? "task_transfer_request" : "comment";
+        // Same upsert as the exact-typed-phrase/tapped-legend branches
+        // above -- a stale unconsumed row for this conversation must be
+        // replaced, never collide with the new one.
+        db.prepare("INSERT INTO secretary_task_choice VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(conversation_key) DO UPDATE SET token=excluded.token,kind=excluded.kind,candidate_ids=excluded.candidate_ids,fields_json=excluded.fields_json,original_text=excluded.original_text,source_message_id=excluded.source_message_id,expires_at=excluded.expires_at")
+          .run(key, token, kind, JSON.stringify(candidates.map(t => t.id)), JSON.stringify({}), event.text, event.messageId, now + CONFIRM_MS);
+        log(db, freshActor, event, "secretary_task_choice", { summary: "عرض اختيار المهمة قبل التنفيذ (تخمين احتياطي)", kind, candidateIds: candidates.map(t => t.id) }, now);
+        return save(db, event, freshActor, { status: "clarify", reply: `${LEGEND_MANY_TASK}\n${candidates.map(t => `• ${clean(t.title, 150)}`).join("\n")}`, choices: taskChoicePoll(token, candidates, now) }, candidates.map(t => "t:" + t.id), now);
+      }
+    }
     if (plan.kind === "chat" || plan.kind === "clarify" || plan.kind === "search") {
       let reply = publicReply || plan.message || "أي مهمة تقصد، وشو المطلوب؟";
       if (plan.kind === "chat" || plan.kind === "clarify") reply = safeConversationalReply(reply);

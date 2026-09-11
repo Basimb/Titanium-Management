@@ -122,7 +122,7 @@ test('a bare "انهاء المهمة" with zero eligible tasks gets the legend\
   assert.match(r.reply, /ما عندك مهمة قيد التنفيذ حاليًا لإنهائها/);
   assert.ok(!r.choices);
 });
-test('a bare transfer phrase ("تحويل المهمة"/"مش مسؤوليتي") with several eligible tasks (including the still-open, suggested-to-him task) polls, and tapping it fully applies with no extra field required', async t => {
+test('a bare transfer phrase ("تحويل المهمة"/"مش مسؤوليتي") with several eligible tasks (including the still-open, suggested-to-him task) polls, and tapping it asks for the missing reason instead of filing blind', async t => {
   const f = fixture(t);
   const first = await f.run({ text: 'تحويل المهمة' });
   assert.equal(first.status, 'clarify'); assert.ok(first.choices);
@@ -133,9 +133,15 @@ test('a bare transfer phrase ("تحويل المهمة"/"مش مسؤوليتي")
   assert.deepEqual(first.choices.options.map(o => o.label), ['مهمة مقترحة', 'لوحة', 'تسليم التقرير']);
   const reportOption = first.choices.options.find(o => o.label === 'تسليم التقرير');
   const tapped = await f.run(tap(first.choices.id, reportOption.id), neverAsk);
-  assert.equal(tapped.status, 'applied', 'a transfer request needs no extra field, so the tap alone must be enough to file it');
-  const approval = f.db.prepare("SELECT entity_id AS entityId FROM approvals WHERE type='task_transfer'").get();
-  assert.equal(approval.entityId, B);
+  // Basim: a transfer must always carry a reason ("نعرف سبب التحويل"), so a
+  // bare tap that never said why is not enough to file anything -- exactly
+  // the same one-field-at-a-time shape close_request's own missing-result
+  // question already uses.
+  assert.equal(tapped.status, 'clarify');
+  assert.match(tapped.reply, /سبب/);
+  assert.match(tapped.reply, /تسليم التقرير/);
+  assert.equal(tapped.taskId, B);
+  assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM approvals').get().n, 0, 'nothing is filed before the reason is known');
   const f2 = fixture(t); const r2 = await f2.run({ text: 'مش مسؤوليتي' });
   assert.equal(r2.status, 'clarify'); assert.ok(r2.choices);
 });

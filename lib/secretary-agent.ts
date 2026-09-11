@@ -3,6 +3,7 @@
  * fields; everything here re-checks identity and permission on the server,
  * files durable approvals, and never mutates without the action engine.
  */
+import { randomBytes } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 import { decideApproval, findPendingApproval, formatApprovalChoice, formatPendingList, listApprovals, patchTaskCreateApproval, requestDeadlineExtension, requestPriorityChange, requestTasksCreate, requestTaskClose, requestTaskOwnership, requestTaskTransfer, approvalTypeLabel, type Approval } from "./approvals.ts";
 import { executeManagementAction, ManagementActionError, type ManagementActor, type ManagementResult } from "./management-actions.ts";
@@ -25,6 +26,14 @@ export type AgentContext = {
   // "no live poll possible here" and every choice-builder below degrades to
   // its existing text-only reply, exactly as it did before this field existed.
   conversationKey?: string;
+  // The triggering WhatsApp message id, when available -- only needed to
+  // stamp a real secretary_task_choice poll row (task_transfer_request's own
+  // employee-picker, see below) with the same source_message_id every other
+  // poll row in that table carries. Absent for a synthetic re-entry where no
+  // single message id applies; the poll row falls back to an empty string,
+  // exactly like the pre-existing close_request/task_transfer_request/
+  // comment poll rows already do from their own resolution path.
+  messageId?: string | null;
   users: Array<{ id: string; name: string; active?: number }>; tasks: Array<{ id: string; title: string; status: string; owner: string | null; dueDate: string | null; priority: string }>;
   /** Store a pending command for the existing confirmation flow (token returned). */
   stash: (command: Record<string, unknown>) => string;
@@ -262,8 +271,41 @@ export function handleAgentIntent(plan: SecretaryIntent, ctx: AgentContext): Age
       case "task_transfer_request": {
         if (owner) return { status: "clarify", reply: "أنت تقدر تعيد تعيين المهمة مباشرة. اذكر المهمة واسم الموظف الجديد." };
         if (!plan.taskId) return { status: "clarify", reply: "أي مهمة بدك تحوّل أو تعتذر عنها؟" };
-        const suggestedOwnerId = plan.fields.ownerId || null;
-        const request = requestTaskTransfer(db, actor, { taskId: plan.taskId, suggestedOwnerId, reason: clean(plan.fields.reason, 1000) }, { now });
+        const task = ctx.tasks.find(candidate => candidate.id === plan.taskId);
+        // Basim: a transfer must always carry a reason, so Basim's decision
+        // is never blind ("نعرف سبب التحويل"). Same one-field-at-a-time shape
+        // as close_request's own missing-result question just above.
+        const reason = clean(plan.fields.reason, 1000);
+        if (!reason) return { status: "clarify", reply: `شو سبب تحويل${task ? ` «${clean(task.title)}»` : " المهمة"} بالضبط؟ لازم نعرف السبب قبل ما أرفع الطلب لباسم.`, taskId: plan.taskId };
+        // "declined" is a local sentinel, never a real user id (secretary-
+        // intent.ts's own validation already rejects any model-produced
+        // ownerId that isn't a registered user, so the model can never
+        // produce this string itself) -- it marks "already asked, tapped the
+        // no-one option", so the poll below never re-fires on the second
+        // pass after that tap (see the task_transfer_pick_owner resolution
+        // in secretary-service.ts, which sets exactly this sentinel).
+        const explicitlyDeclined = plan.fields.ownerId === "declined";
+        const suggestedOwnerId = explicitlyDeclined ? null : plan.fields.ownerId || null;
+        if (!suggestedOwnerId && !explicitlyDeclined && ctx.conversationKey) {
+          // Basim: give a real tappable poll of colleagues instead of relying
+          // on free-text name parsing ("يعطيني تصويت بأسماء الموظفين"). Basim
+          // himself is excluded from the list (transfers never target him;
+          // he reassigns directly), and so is the actor's own id. Capped at
+          // 11 names + the decline option, matching secretaryChoiceOptions'
+          // own WhatsApp-poll-size cap for the same reason.
+          const colleagues = ctx.users.filter(user => user.active !== 0 && user.id !== actor.id && user.id !== "basem").slice(0, 11);
+          if (colleagues.length) {
+            const token = randomBytes(3).toString("hex").toUpperCase();
+            const candidateIds = [...colleagues.map(user => user.id), "__decline__"];
+            db.prepare("INSERT INTO secretary_task_choice VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(conversation_key) DO UPDATE SET token=excluded.token,kind=excluded.kind,candidate_ids=excluded.candidate_ids,fields_json=excluded.fields_json,original_text=excluded.original_text,source_message_id=excluded.source_message_id,expires_at=excluded.expires_at")
+              .run(ctx.conversationKey, token, "task_transfer_pick_owner", JSON.stringify(candidateIds), JSON.stringify({ taskId: plan.taskId, reason }), clean(ctx.text, 2000), ctx.messageId ?? "", now + 10 * 60_000);
+            const options = [...colleagues.map((user, index) => ({ id: `TDQ${token}_${index}`, label: clean(user.name, 90) })),
+              { id: `TDQ${token}_${colleagues.length}`, label: "بدون تحديد - مش مسؤوليتي" }];
+            return { status: "clarify", reply: `لمين بدك تحوّل «${task ? clean(task.title) : "المهمة"}»؟`, taskId: plan.taskId,
+              choices: { id: `TDQ${token}`, title: "لمين تحويل المهمة؟", expiresAt: now + 10 * 60_000, options } };
+          }
+        }
+        const request = requestTaskTransfer(db, actor, { taskId: plan.taskId, suggestedOwnerId, reason }, { now });
         const reply = suggestedOwnerId
           ? `📨 رفعت طلب التحويل لباسم: ${request.approval.summary}. ما تغير المسؤول قبل موافقته.`
           : `📨 رفعت لباسم إنها مش مسؤوليتك. ما تغير شي قبل قراره.`;

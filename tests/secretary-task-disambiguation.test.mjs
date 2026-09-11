@@ -46,9 +46,9 @@ function closeRequest(taskId, details) {
   const base = emptySecretaryIntent('close_request');
   return { ...base, taskId, fields: { ...base.fields, details } };
 }
-function transferRequest(taskId, ownerId) {
+function transferRequest(taskId, ownerId, reason = 'مشغول بمهمة ثانية') {
   const base = emptySecretaryIntent('task_transfer_request');
-  return { ...base, taskId, fields: { ...base.fields, ownerId } };
+  return { ...base, taskId, fields: { ...base.fields, ownerId, reason } };
 }
 function commentCommand(taskId, body) {
   const base = emptySecretaryIntent('command');

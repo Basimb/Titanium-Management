@@ -221,7 +221,7 @@ test("agent kinds: task_transfer_request files a request for a non-owner", t => 
   const db = fixture(t);
   const ctx = { db, actor: manager, now: T0, users: [owner, khaled, shadi, manager], tasks: [],
     stash: () => { throw new Error("must not stash"); } };
-  const transferResult = handleAgentIntent({ ...emptySecretaryIntent("task_transfer_request"), taskId: "t1", fields: { ...emptySecretaryIntent().fields, ownerId: "shadi" } }, { ...ctx, actor: khaled });
+  const transferResult = handleAgentIntent({ ...emptySecretaryIntent("task_transfer_request"), taskId: "t1", fields: { ...emptySecretaryIntent().fields, ownerId: "shadi", reason: "مشغول بمهمة ثانية" } }, { ...ctx, actor: khaled });
   assert.equal(transferResult.status, "applied");
   assert.match(transferResult.reply, /رفعت طلب التحويل/);
   assert.equal(transferResult.notify[0].userId, "basem");
