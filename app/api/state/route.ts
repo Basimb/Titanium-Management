@@ -48,51 +48,42 @@ function privateJson(body: unknown, init: ResponseInit = {}) {
 }
 
 
-const seedProjects = [
-  ["dabouq-setup", "تجهيز صيدلية دابوق"],
-  ["dabouq-license", "ترخيص ونقل ملكية دابوق"],
-  ["clinics-setup", "تجهيز وتشغيل العيادات"],
-  ["clinics-license", "ترخيص العيادات"],
-] as const;
-
 const seedTasks = [
-  ["ds-1","dabouq-setup","الديكور واللوحة وتعديل كونتر الاستقبال","أولوية قصوى","red"],
-  ["ds-2","dabouq-setup","أدابتر كهرباء لتليفون أفايا — تحويلة 110","أولوية قصوى","red"],
-  ["ds-3","dabouq-setup","رفع ملف الجرد وتأكيد الستوك وترحيل البضاعة","حوالي 800 صنف","red"],
-  ["ds-4","dabouq-setup","تأكيد موعد قدوم محمد من فرع الجمرك","بانتظار التأكيد","yellow"],
-  ["ds-5","dabouq-setup","تحديد جدول دوام الصيدلي والموظفين","لم يبدأ","yellow"],
-  ["dl-1","dabouq-license","براءة ذمة صندوق الأخطاء الطبية وكتاب الضمان","من 31/3/2025 حتى اليوم","red"],
-  ["dl-2","dabouq-license","حضور المزاول والمدير العام وتجهيز الهويات","أولوية قصوى","red"],
-  ["dl-3","dabouq-license","مزاولات جميع الصيادلة مجددة وسارية","قيد التجهيز","red"],
-  ["dl-4","dabouq-license","عقد إيجار باسم الشركة وختم فرع دابوق","أولوية قصوى","red"],
-  ["dl-5","dabouq-license","جدول الفروع والصيادلة المسؤولين","لم يبدأ","red"],
-  ["dl-6","dabouq-license","توثيق تنازلات الصيادلة المزاولين","المحامي أحمد","red"],
-  ["dl-7","dabouq-license","كتاب وزارة الصحة بالموافقة على إنشاء الشركة","مطلوب","red"],
-  ["cs-1","clinics-setup","حسم دوام دكتورة النسائية","أولوية قصوى","red"],
-  ["cs-2","clinics-setup","استكمال برنامج العيادات ودفع رسومه","أولوية قصوى","red"],
-  ["cs-3","clinics-setup","نقل السرير وتجهيز غرفة المنامة","قيد المتابعة","yellow"],
-  ["cs-4","clinics-setup","معالجة فتحات غرف المنامة والتخصصية","لم يبدأ","yellow"],
-  ["cs-5","clinics-setup","تركيب واقي شمس للغرف التي دون تكييف","التخصصية، الطب العام، الإدارة","yellow"],
-  ["cl-1","clinics-license","تحديد الطبيب المالك ونسبة ملكية الأطباء وعقودهم","نسبة الأطباء 51% على الأقل","red"],
-  ["cl-2","clinics-license","الاسم التجاري والسجل التجاري للمركز","أولوية قصوى","red"],
-  ["cl-3","clinics-license","مزاولات الأطباء وبراءات الذمة","صلاحية البراءة شهر واحد","red"],
-  ["cl-4","clinics-license","عقد إيجار موثق باسم المركز","مطلوب","red"],
-  ["cl-5","clinics-license","متطلبات الموقع والعقار وعقد النفايات الطبية","قيد التجهيز","red"],
-  ["cl-6","clinics-license","تعهد الأطباء بالتفرغ التام","يتطلب حضورهم شخصياً","red"],
-  ["cl-7","clinics-license","رسوم الترخيص بعد موافقة اللجنة","1,000 دينار","red"],
+  ["ds-1","الديكور واللوحة وتعديل كونتر الاستقبال","أولوية قصوى","red"],
+  ["ds-2","أدابتر كهرباء لتليفون أفايا — تحويلة 110","أولوية قصوى","red"],
+  ["ds-3","رفع ملف الجرد وتأكيد الستوك وترحيل البضاعة","حوالي 800 صنف","red"],
+  ["ds-4","تأكيد موعد قدوم محمد من فرع الجمرك","بانتظار التأكيد","yellow"],
+  ["ds-5","تحديد جدول دوام الصيدلي والموظفين","لم يبدأ","yellow"],
+  ["dl-1","براءة ذمة صندوق الأخطاء الطبية وكتاب الضمان","من 31/3/2025 حتى اليوم","red"],
+  ["dl-2","حضور المزاول والمدير العام وتجهيز الهويات","أولوية قصوى","red"],
+  ["dl-3","مزاولات جميع الصيادلة مجددة وسارية","قيد التجهيز","red"],
+  ["dl-4","عقد إيجار باسم الشركة وختم فرع دابوق","أولوية قصوى","red"],
+  ["dl-5","جدول الفروع والصيادلة المسؤولين","لم يبدأ","red"],
+  ["dl-6","توثيق تنازلات الصيادلة المزاولين","المحامي أحمد","red"],
+  ["dl-7","كتاب وزارة الصحة بالموافقة على إنشاء الشركة","مطلوب","red"],
+  ["cs-1","حسم دوام دكتورة النسائية","أولوية قصوى","red"],
+  ["cs-2","استكمال برنامج العيادات ودفع رسومه","أولوية قصوى","red"],
+  ["cs-3","نقل السرير وتجهيز غرفة المنامة","قيد المتابعة","yellow"],
+  ["cs-4","معالجة فتحات غرف المنامة والتخصصية","لم يبدأ","yellow"],
+  ["cs-5","تركيب واقي شمس للغرف التي دون تكييف","التخصصية، الطب العام، الإدارة","yellow"],
+  ["cl-1","تحديد الطبيب المالك ونسبة ملكية الأطباء وعقودهم","نسبة الأطباء 51% على الأقل","red"],
+  ["cl-2","الاسم التجاري والسجل التجاري للمركز","أولوية قصوى","red"],
+  ["cl-3","مزاولات الأطباء وبراءات الذمة","صلاحية البراءة شهر واحد","red"],
+  ["cl-4","عقد إيجار موثق باسم المركز","مطلوب","red"],
+  ["cl-5","متطلبات الموقع والعقار وعقد النفايات الطبية","قيد التجهيز","red"],
+  ["cl-6","تعهد الأطباء بالتفرغ التام","يتطلب حضورهم شخصياً","red"],
+  ["cl-7","رسوم الترخيص بعد موافقة اللجنة","1,000 دينار","red"],
 ] as const;
 
 async function bootstrap() {
   await ensureSeedUsers();
-  const count = await db().prepare("SELECT COUNT(*) AS count FROM projects").first<{ count: number }>();
+  const count = await db().prepare("SELECT COUNT(*) AS count FROM tasks").first<{ count: number }>();
   if ((count?.count ?? 0) > 0) return;
   // An intentionally emptied workspace is not a fresh installation.
-  const history = await db().prepare("SELECT id FROM audit_logs WHERE entity_type = 'project' LIMIT 1").first();
+  const history = await db().prepare("SELECT id FROM audit_logs WHERE entity_type = 'task' LIMIT 1").first();
   if (history) return;
   const now = Date.now();
-  const statements = seedProjects.map(([id, name]) => db().prepare("INSERT INTO projects (id, name, status, created_by, created_at) VALUES (?, ?, 'active', 'باسم', ?)").bind(id, name, now));
-  statements.push(...seedTasks.map(([id, projectId, title, details, priority]) => db().prepare("INSERT INTO tasks (id, project_id, title, details, priority, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 'open', ?, ?)").bind(id, projectId, title, details, priority, now, now)));
-  await db().batch(statements);
+  await db().batch(seedTasks.map(([id, title, details, priority]) => db().prepare("INSERT INTO tasks (id, title, details, priority, status, created_at, updated_at) VALUES (?, ?, ?, ?, 'open', ?, ?)").bind(id, title, details, priority, now, now)));
 }
 
 function loadState(user: TitaniumUser) {
@@ -153,7 +144,6 @@ export async function POST(request: Request) {
       if (result.notification) {
         const snapshot = getManagementSnapshot(chatDatabase(), user) as unknown as Snapshot;
         dispatchManagementNotice(chatDatabase(), user, snapshot, result, {
-          projectId: typeof body.projectId === "string" ? body.projectId : null,
           ownerId: typeof body.ownerId === "string" ? body.ownerId : null,
         }, now);
       }

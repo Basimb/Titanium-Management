@@ -4,15 +4,15 @@
  * files durable approvals, and never mutates without the action engine.
  */
 import type { DatabaseSync } from "node:sqlite";
-import { decideApproval, findPendingApproval, formatApprovalChoice, formatPendingList, listApprovals, patchTaskCreateApproval, requestDeadlineExtension, requestPriorityChange, requestProjectClose, requestProjectCreate, requestTaskClose, requestTaskOwnership, requestTaskTransfer, approvalTypeLabel, type Approval } from "./approvals.ts";
-import { executeManagementAction, ManagementActionError, type ManagementActor } from "./management-actions.ts";
+import { decideApproval, findPendingApproval, formatApprovalChoice, formatPendingList, listApprovals, patchTaskCreateApproval, requestDeadlineExtension, requestPriorityChange, requestTasksCreate, requestTaskClose, requestTaskOwnership, requestTaskTransfer, approvalTypeLabel, type Approval } from "./approvals.ts";
+import { executeManagementAction, ManagementActionError, type ManagementActor, type ManagementResult } from "./management-actions.ts";
 import { addKnowledge, formatKnowledgeHits, searchKnowledge } from "./knowledge.ts";
 import { activeRules, formatRules, policyViolations, proposeRuleFromStatement, recordCorrection, suggestOwner } from "./rules.ts";
 import { can, isOwner, type PermissionActor } from "./permissions.ts";
 import type { SecretaryIntent } from "./secretary-intent.ts";
 import { createSecretaryChoices, type SecretaryChoices } from "./secretary-choices.ts";
 
-export type AgentResult = { status: string; reply: string; taskId?: string; projectId?: string; groupNotice?: string | null; notify?: Array<{ userId: string; text: string; choices?: SecretaryChoices }>; choices?: SecretaryChoices };
+export type AgentResult = { status: string; reply: string; taskId?: string; groupNotice?: string | null; notify?: Array<{ userId: string; text: string; choices?: SecretaryChoices }>; choices?: SecretaryChoices };
 export type AgentContext = {
   db: DatabaseSync; actor: ManagementActor; now: number; inputKind?: string | null; suppressNotices?: boolean;
   // The admin's own raw WhatsApp text, when available -- see the "decide"
@@ -25,8 +25,7 @@ export type AgentContext = {
   // "no live poll possible here" and every choice-builder below degrades to
   // its existing text-only reply, exactly as it did before this field existed.
   conversationKey?: string;
-  users: Array<{ id: string; name: string; active?: number }>; tasks: Array<{ id: string; title: string; projectId: string; status: string; owner: string | null; dueDate: string | null; priority: string }>;
-  projects: Array<{ id: string; name: string; status: string }>;
+  users: Array<{ id: string; name: string; active?: number }>; tasks: Array<{ id: string; title: string; status: string; owner: string | null; dueDate: string | null; priority: string }>;
   /** Store a pending command for the existing confirmation flow (token returned). */
   stash: (command: Record<string, unknown>) => string;
 };
@@ -36,57 +35,61 @@ const ORDINALS: Record<string, number> = { "الاول": 1, "الأول": 1, "ا
 // take the plural, 11+ reverts to the singular after the number. Duplicated from
 // secretary-service.ts's taskCountPhrase to avoid a circular import between the two.
 const taskCountPhrase = (n: number) => n === 1 ? "مهمة واحدة" : n === 2 ? "مهمتين" : n <= 10 ? `${n} مهام` : `${n} مهمة`;
-export type ProjectDraftTask = { title: string; ownerId: string | null; priority: "red" | "yellow" | "green"; dueDate: string | null };
+export type TaskDraftTask = { title: string; ownerId: string | null; priority: "red" | "yellow" | "green"; dueDate: string | null };
 
-export function parseProjectTaskLines(message: string | null, users: AgentContext["users"]): { tasks: ProjectDraftTask[]; problems: string[] } {
-  const tasks: ProjectDraftTask[] = []; const problems: string[] = [];
+/** One task per line: "title | ownerId or - | red/yellow/green | YYYY-MM-DD or -". */
+export function parseTaskLines(message: string | null, users: AgentContext["users"]): { tasks: TaskDraftTask[]; problems: string[] } {
+  const tasks: TaskDraftTask[] = []; const problems: string[] = [];
   for (const raw of (message ?? "").split(/\r?\n/).map(line => line.trim()).filter(Boolean).slice(0, 40)) {
     const [title = "", owner = "-", priority = "yellow", due = "-"] = raw.split("|").map(part => part.trim());
     if (!title) continue;
     const ownerId = owner && owner !== "-" ? users.find(user => user.id === owner || user.name === owner)?.id ?? null : null;
     if (owner && owner !== "-" && !ownerId) problems.push(`ما عرفت الموظف «${clean(owner, 40)}» للمهمة «${clean(title, 60)}»`);
-    const level = ["red", "yellow", "green"].includes(priority) ? priority as ProjectDraftTask["priority"] : /احمر|أحمر|حمرا|red|عاجل/u.test(priority) ? "red" : /اخضر|أخضر|خضرا|green|عادي/u.test(priority) ? "green" : "yellow";
+    const level = ["red", "yellow", "green"].includes(priority) ? priority as TaskDraftTask["priority"] : /احمر|أحمر|حمرا|red|عاجل/u.test(priority) ? "red" : /اخضر|أخضر|خضرا|green|عادي/u.test(priority) ? "green" : "yellow";
     const dueDate = /^\d{4}-\d{2}-\d{2}$/.test(due) ? due : null;
     tasks.push({ title: clean(title, 240), ownerId, priority: level, dueDate });
   }
   return { tasks, problems };
 }
 
-export function describeProjectBundle(name: string, goal: string, tasks: ProjectDraftTask[], users: AgentContext["users"]): string {
+export function describeTaskBundle(details: string, tasks: TaskDraftTask[], users: AgentContext["users"]): string {
   const nameOf = (id: string | null) => id ? users.find(user => user.id === id)?.name ?? id : "غير معيّن";
   const level: Record<string, string> = { red: "🔴 عاجلة", yellow: "🟡 مهمة", green: "🟢 عادية" };
-  return `هذا ملخص المشروع قبل الإنشاء:\nالاسم: ${clean(name)}${goal ? `\nالهدف: ${clean(goal, 300)}` : ""}\nالمهام (${tasks.length}):\n${tasks.map((task, index) => `${index + 1}. ${task.title} — ${nameOf(task.ownerId)} — ${level[task.priority]}${task.dueDate ? ` — ${task.dueDate}` : ""}`).join("\n") || "لا توجد مهام بعد"}`;
+  return `هذا ملخص المهام قبل الإنشاء:${details ? `\nالهدف: ${clean(details, 300)}` : ""}\nالمهام (${tasks.length}):\n${tasks.map((task, index) => `${index + 1}. ${task.title} — ${nameOf(task.ownerId)} — ${level[task.priority]}${task.dueDate ? ` — ${task.dueDate}` : ""}`).join("\n") || "لا توجد مهام بعد"}`;
 }
 
-/** Execute a confirmed project bundle (owner) — called from the confirmation flow. */
-export function createProjectBundle(db: DatabaseSync, actor: ManagementActor, bundle: { name: string; goal: string; tasks: ProjectDraftTask[]; suppressNotices?: boolean }, now: number, context: Record<string, unknown>): AgentResult {
-  const created = executeManagementAction(db, actor, { action: "add_project", name: bundle.name }, { now, source: "whatsapp_secretary", auditContext: context });
-  let count = 0;
+/** The single "create one or several standalone tasks" path, called from the
+ * confirmation flow. It replaces the old createProjectBundle/createStandaloneTask
+ * pair: there is no wrapper entity to invent anymore, so both collapse into a
+ * plain loop over ordinary add_task actions.
+ *
+ * Every task goes through the SAME audited add_task the website and the
+ * single-task chat flow use, and -- this is the bug the old pair had -- each
+ * created task is handed to `notify` individually, so whoever it ended up
+ * assigned to gets their own normal claim/transfer poll and the group gets its
+ * normal notice. Callers pass dispatchManagementNotice (secretary-service.ts)
+ * as `notify`; it is optional only so the function stays directly testable.
+ * suppressNotices skips notification entirely ("بدون إشعارات للفريق"). */
+export function createTasks(db: DatabaseSync, actor: ManagementActor, bundle: { details?: string; tasks: TaskDraftTask[]; suppressNotices?: boolean }, now: number, context: Record<string, unknown>,
+  notify?: (result: ManagementResult, ownerId: string | null) => void): AgentResult {
+  const details = bundle.details ? String(bundle.details) : "";
+  const created: string[] = [];
+  let firstTaskId: string | undefined;
   for (const task of bundle.tasks) {
-    executeManagementAction(db, actor, { action: "add_task", projectId: created.entityId, title: task.title, details: bundle.goal ? `الهدف: ${bundle.goal}` : "", priority: task.priority, dueDate: task.dueDate, ownerId: task.ownerId }, { now: now + 1 + count, source: "whatsapp_secretary", auditContext: context });
-    count += 1;
+    const result = executeManagementAction(db, actor, { action: "add_task", title: task.title, ...(details ? { details } : {}),
+      priority: task.priority, dueDate: task.dueDate, ownerId: task.ownerId }, { now: now + created.length, source: "whatsapp_secretary", auditContext: context });
+    firstTaskId ??= result.entityId;
+    if (!bundle.suppressNotices) notify?.(result, task.ownerId);
+    created.push(task.title);
   }
   const nameOf = (id: string | null) => id ? String(db.prepare("SELECT name FROM users WHERE id=?").get(id)?.name ?? id) : null;
-  const lines = bundle.tasks.map(task => `${nameOf(task.ownerId) ?? "غير معيّن"}: ${task.title} — ${task.priority === "red" ? "أحمر" : task.priority === "yellow" ? "أصفر" : "أخضر"}${task.dueDate ? ` — ${task.dueDate}` : ""}`);
-  return { status: "applied", projectId: created.entityId,
-    reply: `✅ أنشأت مشروع «${clean(bundle.name)}»${count ? ` مع ${taskCountPhrase(count)}` : ""}.${bundle.suppressNotices ? " بدون إرسال إشعارات للفريق." : ""}\nاحكيلي أي مهمة كمان بمشروع «${clean(bundle.name)}» عادي وبربطها فيه تلقائيًا.`,
-    groupNotice: bundle.suppressNotices ? null : `📁 مشروع جديد: ${clean(bundle.name)}${lines.length ? `\n${lines.join("\n")}` : ""}` };
-}
-
-/** Execute a confirmed "بدون مشروع" task (owner only) — called from the
- * confirmation flow. Every task still needs a project row (project_id is
- * NOT NULL), so this creates a throwaway wrapper project named literally
- * "بدون مشروع" and marks it is_standalone (Feature: schema + auto-close in
- * management-actions.ts's "approve" case archives it invisibly once its one
- * task is done) -- from the user's side this reads as a plain standalone
- * task, never as "a project was created". Modeled closely on
- * createProjectBundle above but for exactly one task, and always silent
- * (no group notice) since there is no real project to announce. */
-export function createStandaloneTask(db: DatabaseSync, actor: ManagementActor, task: ProjectDraftTask & { details?: string }, now: number, context: Record<string, unknown>): AgentResult {
-  const created = executeManagementAction(db, actor, { action: "add_project", name: "بدون مشروع" }, { now, source: "whatsapp_secretary", auditContext: context });
-  db.prepare("UPDATE projects SET is_standalone=1 WHERE id=?").run(created.entityId);
-  const added = executeManagementAction(db, actor, { action: "add_task", projectId: created.entityId, title: task.title, details: task.details || "", priority: task.priority, dueDate: task.dueDate, ownerId: task.ownerId }, { now: now + 1, source: "whatsapp_secretary", auditContext: context });
-  return { status: "applied", taskId: added.entityId, projectId: created.entityId, reply: `✅ أضفت مهمة: ${clean(task.title)}.`, groupNotice: null };
+  const lines = bundle.tasks.map(task => `• ${clean(task.title)} — ${nameOf(task.ownerId) ?? "غير معيّن"}`);
+  const reply = created.length === 1
+    ? `✅ أضفت مهمة: ${clean(created[0])}.${bundle.suppressNotices ? " بدون إرسال إشعارات للفريق." : ""}`
+    : `✅ أضفت ${taskCountPhrase(created.length)}:\n${lines.join("\n")}${bundle.suppressNotices ? "\nبدون إرسال إشعارات للفريق." : ""}`;
+  // Group/owner notices are dispatched per task above, exactly like a plain
+  // add_task -- never a second, separate bundle-level broadcast.
+  return { status: "applied", ...(firstTaskId ? { taskId: firstTaskId } : {}), reply, groupNotice: null };
 }
 
 /** Execute a confirmed decision (owner, voice path) — called from the confirmation flow. */
@@ -266,13 +269,6 @@ export function handleAgentIntent(plan: SecretaryIntent, ctx: AgentContext): Age
           : `📨 رفعت لباسم إنها مش مسؤوليتك. ما تغير شي قبل قراره.`;
         return { status: "applied", reply, taskId: plan.taskId, notify: [{ userId: "basem", text: request.ownerMessage, choices: request.choices }], groupNotice: null };
       }
-      case "project_close_request": {
-        if (owner) return { status: "clarify", reply: "أنت تقدر تغلق المشروع مباشرة. اذكر اسمه." };
-        if (!plan.projectId) return { status: "clarify", reply: "أي مشروع بدك تغلق؟" };
-        const project = ctx.projects.find(candidate => candidate.id === plan.projectId);
-        const request = requestProjectClose(db, actor, { projectId: plan.projectId, reason: clean(plan.fields.reason, 1000) }, { now });
-        return { status: "applied", reply: `📨 رفعت طلب إغلاق مشروع «${clean(project?.name ?? "")}» لباسم. بخبرك بقراره.`, projectId: plan.projectId, notify: [{ userId: "basem", text: request.ownerMessage, choices: request.choices }], groupNotice: null };
-      }
       case "rule": {
         if (!owner) return { status: "denied", reply: "القواعد الدائمة يعتمدها باسم." };
         const statement = clean(plan.fields.body, 1000);
@@ -312,35 +308,30 @@ export function handleAgentIntent(plan: SecretaryIntent, ctx: AgentContext): Age
         if (!hits.length) return { status: "summary", reply: `ما لقيت شي عن «${query}» في قاعدة المعرفة الداخلية. إذا معلومة عامة قلّي «ابحث» وأبحث لك على الإنترنت.` };
         return { status: "summary", reply: `من قاعدة المعرفة:\n\n${formatKnowledgeHits(hits)}` };
       }
-      case "project_draft": {
-        // Any authenticated actor may propose a project (approval.request, which
+      case "tasks_draft": {
+        // Any authenticated actor may propose tasks (approval.request, which
         // every role has) -- only the DIRECT no-approval creation path below is
         // restricted, and that already only ever runs for the owner (Basim).
-        // A blanket project.create gate here used to block plain members from
-        // even filing the request, contradicting the intended design (DM-only
-        // project/task proposals from staff, same as task_draft).
-        const name = clean(plan.fields.name, 240); const goal = clean(plan.fields.details, 2000);
-        const parsed = parseProjectTaskLines(plan.message, ctx.users);
-        // Never ask a second question here (e.g. "what tasks go in it?") --
-        // project_draft has no saved state across turns, so a follow-up
-        // question here is exactly the loop bug reported live: the project
-        // name gets lost if the next message doesn't restate it. Finalize on
-        // this single turn (with whatever tasks were given, possibly none)
-        // and let further tasks come in one at a time through the normal,
-        // stateful task_draft flow, which remembers this project automatically.
+        const details = clean(plan.fields.details, 2000);
+        const parsed = parseTaskLines(plan.message, ctx.users);
+        if (!parsed.tasks.length) return { status: "clarify", reply: "شو المهام المطلوبة بالضبط؟ اذكر كل مهمة بسطر ومين مسؤول عنها." };
+        // Never ask a second question here -- tasks_draft has no saved state
+        // across turns, so a follow-up question loses everything already said
+        // if the next message doesn't restate it. Finalize on this single turn
+        // with the tasks that were given, and let further tasks come in one at
+        // a time through the normal, stateful task_draft flow.
         for (const task of parsed.tasks) {
           if (!task.ownerId) { const suggestion = suggestOwner(db, { text: task.title }); if (suggestion) task.ownerId = suggestion.ownerId; }
         }
         const violations = parsed.tasks.flatMap(task => policyViolations(db, { title: task.title, dueDate: task.dueDate, ownerId: task.ownerId }));
-        const preview = describeProjectBundle(name, goal, parsed.tasks, ctx.users);
+        const preview = describeTaskBundle(details, parsed.tasks, ctx.users);
         const warnings = [...parsed.problems, ...violations].map(problem => `⚠️ ${problem}`).join("\n");
-        const taskNote = parsed.tasks.length ? "" : `\n\nبعد ما ينفتح، احكيلي أي مهمة بمشروع «${name}» عادي وبربطها فيه تلقائيًا.`;
         if (owner) {
-          const token = ctx.stash({ action: "create_project_bundle", name, goal, tasks: parsed.tasks, suppressNotices: ctx.suppressNotices === true });
-          return { status: "confirmation", reply: `${voice ? "فهمت من الصوت:\n" : ""}${preview}${warnings ? `\n${warnings}` : ""}${ctx.suppressNotices ? "\nبدون إرسال إشعارات للفريق." : ""}${taskNote}\n\nأعتمد إنشاء المشروع؟ اكتب «موافق ${token}» أو صحّح أي بند.` };
+          const token = ctx.stash({ action: "create_tasks", details, tasks: parsed.tasks, suppressNotices: ctx.suppressNotices === true });
+          return { status: "confirmation", reply: `${voice ? "فهمت من الصوت:\n" : ""}${preview}${warnings ? `\n${warnings}` : ""}${ctx.suppressNotices ? "\nبدون إرسال إشعارات للفريق." : ""}\n\nأعتمد إنشاء المهام؟ اكتب «موافق ${token}» أو صحّح أي بند.` };
         }
-        const request = requestProjectCreate(db, actor, { name, goal, tasks: parsed.tasks }, { now });
-        return { status: "applied", reply: `📨 رفعت اقتراح المشروع «${name}» لباسم للاعتماد.${taskNote}`, notify: [{ userId: "basem", text: request.ownerMessage, choices: request.choices }], groupNotice: null };
+        const request = requestTasksCreate(db, actor, { details, tasks: parsed.tasks }, { now });
+        return { status: "applied", reply: `📨 رفعت اقتراح ${taskCountPhrase(parsed.tasks.length)} لباسم للاعتماد. بخبرك أول ما يقرر.`, notify: [{ userId: "basem", text: request.ownerMessage, choices: request.choices }], groupNotice: null };
       }
       default: return null;
     }

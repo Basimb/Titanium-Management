@@ -4,11 +4,11 @@ import { executeManagementAction, getManagementSnapshot, ManagementActionError, 
 import { can, isOwner, type PermissionActor } from "./permissions.ts";
 import type { SecretaryChoices } from "./secretary-choices.ts";
 
-export type ApprovalType = "deadline_extension" | "priority_change" | "task_close" | "task_ownership" | "task_transfer" | "task_create" | "project_create" | "project_close" | "rule" | "policy";
+export type ApprovalType = "deadline_extension" | "priority_change" | "task_close" | "task_ownership" | "task_transfer" | "task_create" | "tasks_create" | "rule" | "policy";
 export type ApprovalStatus = "pending" | "approved" | "rejected" | "expired";
 export type Approval = {
   id: string; type: ApprovalType; status: ApprovalStatus; requestedBy: string; requestedByName: string;
-  entityType: "task" | "project" | "rule"; entityId: string | null; summary: string; payload: Record<string, unknown>;
+  entityType: "task" | "rule"; entityId: string | null; summary: string; payload: Record<string, unknown>;
   decidedBy: string | null; decisionNote: string | null; createdAt: number; decidedAt: number | null; lastNudgedAt: number | null;
 };
 export type ApprovalDecision = { approval: Approval; effect: ManagementResult | null; notifyRequester: string; notifyGroup: string | null; notifyExtra: Array<{ userId: string; text: string }> };
@@ -16,7 +16,7 @@ export type ApprovalDecision = { approval: Approval; effect: ManagementResult | 
 export class ApprovalError extends ManagementActionError {}
 const fail = (status: number, code: string, message: string): never => { throw new ApprovalError(status, code, message); };
 const SELECT = "SELECT id,type,status,requested_by AS requestedBy,requested_by_name AS requestedByName,entity_type AS entityType,entity_id AS entityId,summary,payload,decided_by AS decidedBy,decision_note AS decisionNote,created_at AS createdAt,decided_at AS decidedAt,last_nudged_at AS lastNudgedAt FROM approvals";
-const TYPE_LABEL: Record<ApprovalType, string> = { deadline_extension: "تمديد موعد", priority_change: "تعديل أولوية", task_close: "اعتماد إغلاق مهمة", task_ownership: "طلب مسؤولية مهمة", task_transfer: "طلب تحويل مهمة", task_create: "فتح مهمة", project_create: "فتح مشروع", project_close: "اعتماد إغلاق مشروع", rule: "اعتماد قاعدة", policy: "اعتماد سياسة" };
+const TYPE_LABEL: Record<ApprovalType, string> = { deadline_extension: "تمديد موعد", priority_change: "تعديل أولوية", task_close: "اعتماد إغلاق مهمة", task_ownership: "طلب مسؤولية مهمة", task_transfer: "طلب تحويل مهمة", task_create: "فتح مهمة", tasks_create: "فتح عدة مهام", rule: "اعتماد قاعدة", policy: "اعتماد سياسة" };
 const PRIORITY_ARABIC: Record<string, string> = { red: "🔴 عاجلة", yellow: "🟡 متوسطة", green: "🟢 عادية" };
 export const APPROVAL_TTL_MS = 14 * 24 * 60 * 60_000;
 // Every approval request DM ends with this same explicit 🟢/🔴 choice, so
@@ -91,17 +91,6 @@ function visibleTask(db: DatabaseSync, actor: ManagementActor, taskId: string): 
   if (!task || task.archivedAt !== null) return fail(404, "task_missing", "المهمة غير موجودة أو غير متاحة لك");
   return task;
 }
-// Unscoped on purpose: proposing a brand-new task in a project doesn't require
-// the requester to already have a visible task there (getManagementSnapshot's
-// project list is scoped to projects the actor already has a task in), only
-// that the project itself exists and is open for work.
-function activeProject(db: DatabaseSync, projectId: string): { id: string; name: string } {
-  const project = db.prepare("SELECT id,name,status,archived_at AS archivedAt FROM projects WHERE id=?").get(projectId) as
-    { id: string; name: string; status: string; archivedAt: number | null } | undefined;
-  if (!project || project.status !== "active" || project.archivedAt !== null) return fail(404, "project_missing", "المشروع غير موجود أو غير نشط");
-  return { id: project.id, name: project.name };
-}
-
 /** Employee asks for more time. Nothing changes on the task until the owner decides. */
 export function requestDeadlineExtension(db: DatabaseSync, claimed: ManagementActor, input: { taskId: string; newDueDate: string; reason: string }, options: { now?: number } = {}): { approval: Approval; ownerMessage: string; choices: SecretaryChoices } {
   migrateManagementActions(db);
@@ -199,39 +188,22 @@ export function requestTaskTransfer(db: DatabaseSync, claimed: ManagementActor, 
   return { approval, ownerMessage, choices: approvalDecisionPoll(approval, at) };
 }
 
-/** Manager (or employee) asks to close/archive a whole project. Nothing changes
- * until Basim decides -- see project.archive moving to OWNER_ONLY in permissions.ts. */
-export function requestProjectClose(db: DatabaseSync, claimed: ManagementActor, input: { projectId: string; reason?: string }, options: { now?: number } = {}): { approval: Approval; ownerMessage: string; choices: SecretaryChoices } {
+/** Manager/employee proposes SEVERAL tasks in one go (the old "open a project
+ * with its tasks" bundle, minus the project: tasks are flat, standalone records
+ * now). Filed as one pending request; nothing exists until Basim decides, and
+ * on approval each task is created individually and its own owner notified --
+ * see decideApproval's "tasks_create" case and its notifyExtra entries. */
+export function requestTasksCreate(db: DatabaseSync, claimed: ManagementActor, input: { details?: string; tasks: Array<{ title: string; ownerId?: string | null; priority?: "red" | "yellow" | "green"; dueDate?: string | null }> }, options: { now?: number } = {}): { approval: Approval; ownerMessage: string; choices: SecretaryChoices } {
   migrateManagementActions(db);
   const actor = resolveManagementActor(db, claimed);
-  if (isOwner(actor as PermissionActor)) return fail(400, "employee_only", "أنت تقدر تغلق المشروع مباشرة");
-  const project = db.prepare("SELECT id,name,status,archived_at AS archivedAt FROM projects WHERE id=?").get(input.projectId) as
-    { id: string; name: string; status: string; archivedAt: number | null } | undefined;
-  if (!project || project.archivedAt !== null) return fail(404, "project_missing", "المشروع غير موجود أو مؤرشف بالفعل");
-  const reason = text(input.reason, "سبب الإغلاق", 1000, true);
-  // Archiving never blocks on open tasks (Basim can already do it directly),
-  // but he's now the one deciding requests he didn't initiate himself -- he
-  // needs to know what's still open before approving blind.
-  const openTasks = (db.prepare("SELECT count(*) AS n FROM tasks WHERE project_id=? AND archived_at IS NULL AND status!='completed'").get(project.id) as { n: number }).n;
-  const summary = `إغلاق مشروع «${project.name}»`;
-  const at = now(options);
-  const approval = insert(db, actor, { type: "project_close", entityType: "project", entityId: project.id, summary, payload: { projectName: project.name, reason, openTasks } }, at);
-  const ownerMessage = `${actor.name} يطلب إغلاق مشروع «${project.name}»${reason ? `\nالسبب: ${reason}` : ""}${openTasks ? `\n⚠️ لسا فيه ${taskCountPhrase(openTasks)} مفتوحة بالمشروع.` : "\nكل مهام المشروع منتهية."}${APPROVAL_CHOICE_HINT}`;
-  return { approval, ownerMessage, choices: approvalDecisionPoll(approval, at) };
-}
-
-/** Manager/employee proposes a project. Created as pending and filed as a request. */
-export function requestProjectCreate(db: DatabaseSync, claimed: ManagementActor, input: { name: string; goal?: string; tasks?: Array<{ title: string; ownerId?: string | null; priority?: "red" | "yellow" | "green"; dueDate?: string | null }> }, options: { now?: number } = {}): { approval: Approval; ownerMessage: string; choices: SecretaryChoices } {
-  migrateManagementActions(db);
-  const actor = resolveManagementActor(db, claimed);
-  const name = text(input.name, "اسم المشروع", 240);
-  const goal = text(input.goal, "الهدف", 2000, true);
+  const details = text(input.details, "التفاصيل", 2000, true);
   const tasks = (input.tasks ?? []).slice(0, 40).map(task => ({ title: text(task.title, "اسم المهمة", 240), ownerId: task.ownerId ?? null, priority: task.priority ?? "yellow", dueDate: task.dueDate ?? null }));
-  const summary = `فتح مشروع «${name}»${tasks.length ? ` مع ${taskCountPhrase(tasks.length)}` : ""}`;
+  if (!tasks.length) return fail(400, "no_tasks", "اذكر المهام المطلوبة، كل مهمة بسطر");
+  const summary = `فتح ${taskCountPhrase(tasks.length)}`;
   const at = now(options);
-  const approval = insert(db, actor, { type: "project_create", entityType: "project", entityId: null, summary, payload: { name, goal, tasks } }, at);
+  const approval = insert(db, actor, { type: "tasks_create", entityType: "task", entityId: null, summary, payload: { details, tasks } }, at);
   const lines = tasks.map((task, index) => `${index + 1}. ${task.title}${task.ownerId ? ` — ${task.ownerId}` : ""} — ${task.priority}${task.dueDate ? ` — ${task.dueDate}` : ""}`);
-  const ownerMessage = `${actor.name} يقترح فتح مشروع «${name}»${goal ? `\nالهدف: ${goal}` : ""}${lines.length ? `\nالمهام:\n${lines.join("\n")}` : ""}${APPROVAL_CHOICE_HINT}`;
+  const ownerMessage = `${actor.name} يقترح فتح ${taskCountPhrase(tasks.length)}${details ? `\nالتفاصيل: ${details}` : ""}\nالمهام:\n${lines.join("\n")}${APPROVAL_CHOICE_HINT}`;
   return { approval, ownerMessage, choices: approvalDecisionPoll(approval, at) };
 }
 
@@ -239,25 +211,20 @@ export function requestProjectCreate(db: DatabaseSync, claimed: ManagementActor,
  * proposes a single task. Filed as pending; nothing exists until Basim decides.
  * Basim may correct priority/dueDate in the same message he decides -- see
  * patchTaskCreateApproval, applied by the "decide" agent case before deciding. */
-export function requestTaskCreate(db: DatabaseSync, claimed: ManagementActor, input: { projectId: string; title: string; details?: string; priority: "red" | "yellow" | "green"; dueDate: string | null; ownerId?: string | null }, options: { now?: number } = {}): { approval: Approval; ownerMessage: string; choices: SecretaryChoices } {
+export function requestTaskCreate(db: DatabaseSync, claimed: ManagementActor, input: { title: string; details?: string; priority: "red" | "yellow" | "green"; dueDate: string | null; ownerId?: string | null }, options: { now?: number } = {}): { approval: Approval; ownerMessage: string; choices: SecretaryChoices } {
   migrateManagementActions(db);
   const actor = resolveManagementActor(db, claimed);
   const snapshot = getManagementSnapshot(db, actor);
-  const project = activeProject(db, input.projectId);
   const title = text(input.title, "اسم المهمة", 240);
   const details = text(input.details, "التفاصيل", 10_000, true);
   if (!["red", "yellow", "green"].includes(input.priority)) return fail(400, "invalid_priority", "حدد أولوية المهمة");
   const dueDate = input.dueDate ? dateOnly(input.dueDate, "الموعد") : null;
   const ownerId = input.ownerId ?? actor.id;
   const ownerName = snapshot.users.find(user => user.id === ownerId && user.active === 1)?.name ?? actor.name;
-  // Basim never sees which project a task landed under (see secretary-service.ts's
-  // display sweep) -- summary/ownerMessage stay project-free even though the
-  // task still needs a real projectId under the hood (payload.projectName is
-  // kept only for internal bookkeeping, never rendered to him).
   const summary = `فتح مهمة «${title}»`;
   const at = now(options);
   const approval = insert(db, actor, { type: "task_create", entityType: "task", entityId: null, summary,
-    payload: { projectId: project.id, projectName: project.name, title, details, priority: input.priority, dueDate, ownerId, ownerName } }, at);
+    payload: { title, details, priority: input.priority, dueDate, ownerId, ownerName } }, at);
   const ownerMessage = `${actor.name} يقترح فتح مهمة «${title}»${details ? `\nالتفاصيل: ${details}` : ""}\nالمسؤول: ${ownerName}\nالأولوية: ${PRIORITY_ARABIC[input.priority]}\nالموعد: ${dueDate ?? "بدون موعد"}${APPROVAL_CHOICE_HINT}\n(تقدر كمان تصحح قبل ما توافق، مثلاً: «اعتمد بس خلها حمراء ومدتها يومين»)`;
   return { approval, ownerMessage, choices: approvalDecisionPoll(approval, at) };
 }
@@ -265,7 +232,7 @@ export function requestTaskCreate(db: DatabaseSync, claimed: ManagementActor, in
 /** Basim corrects priority/dueDate on a still-pending task_create request, normally
  * in the same message as his decision ("اعتمد بس خلها حمراء"). Returns the patched
  * approval; the caller decides it (or not) right after. Never touches anything else
- * -- the requester, project and title stay exactly as proposed. */
+ * -- the requester and title stay exactly as proposed. */
 export function patchTaskCreateApproval(db: DatabaseSync, claimed: ManagementActor, input: { approvalId: string; priority?: "red" | "yellow" | "green"; dueDate?: string | null }, options: { now?: number } = {}): Approval {
   migrateManagementActions(db);
   const actor = resolveManagementActor(db, claimed);
@@ -310,6 +277,9 @@ export function decideApproval(db: DatabaseSync, claimed: ManagementActor, input
   try {
     let effect: ManagementResult | null = null;
     let notifyGroup: string | null = null;
+    // Owners to privately notify once the decision commits (each newly created
+    // task's own owner, for a multi-task "tasks_create" approval -- see below).
+    const createdTaskOwners: Array<{ userId: string; text: string }> = [];
     if (input.decision === "approved") {
       switch (approval.type) {
         case "deadline_extension": {
@@ -345,26 +315,28 @@ export function decideApproval(db: DatabaseSync, claimed: ManagementActor, input
           break;
         }
         case "task_create": {
-          effect = executeManagementAction(db, actor, { action: "add_task", projectId: String(approval.payload.projectId), title: String(approval.payload.title),
+          effect = executeManagementAction(db, actor, { action: "add_task", title: String(approval.payload.title),
             ...(approval.payload.details ? { details: String(approval.payload.details) } : {}), priority: approval.payload.priority as "red" | "yellow" | "green",
             dueDate: approval.payload.dueDate as string | null, ownerId: approval.payload.ownerId as string | null }, { now: at, source: "approval", auditContext: { origin: "approval", confirmedBy: actor.id } });
-          // Same project-free wording as formatManagementNotice's "create"
-          // case in secretary-service.ts for a directly-created task -- an
-          // employee's request, once approved, must read identically.
           notifyGroup = `🆕 مهمة جديدة: ${approval.payload.title}${approval.payload.ownerName ? ` — ${approval.payload.ownerName}` : ""}`;
           break;
         }
-        case "project_create": {
-          const created = executeManagementAction(db, actor, { action: "add_project", name: String(approval.payload.name) }, { now: at, source: "approval", auditContext: { origin: "approval", confirmedBy: actor.id } });
+        case "tasks_create": {
+          // One approval, several standalone tasks. Each one is created through
+          // the same audited add_task the single-task path uses, and each one's
+          // own owner gets their own private heads-up (collected here, sent as
+          // notifyExtra by both call sites) -- a bundle must never leave the
+          // people it was assigned to unaware.
           const tasks = Array.isArray(approval.payload.tasks) ? approval.payload.tasks as Array<{ title: string; ownerId: string | null; priority: "red" | "yellow" | "green"; dueDate: string | null }> : [];
-          for (const task of tasks) executeManagementAction(db, actor, { action: "add_task", projectId: created.entityId, title: task.title, priority: task.priority, dueDate: task.dueDate, ownerId: task.ownerId }, { now: at + 1, source: "approval" });
-          effect = created;
-          notifyGroup = `📁 مشروع جديد: ${approval.payload.name}${tasks.length ? `\n${tasks.map(task => `• ${task.title}${task.ownerId ? ` — ${task.ownerId}` : ""}`).join("\n")}` : ""}`;
-          break;
-        }
-        case "project_close": {
-          effect = executeManagementAction(db, actor, { action: "archive_project", projectId: approval.entityId! }, { now: at, source: "approval", auditContext: { origin: "approval", confirmedBy: actor.id } });
-          notifyGroup = `📁 اعتُمد إغلاق مشروع «${approval.payload.projectName}» (${approval.requestedByName})`;
+          const details = approval.payload.details ? String(approval.payload.details) : "";
+          let index = 0;
+          for (const task of tasks) {
+            effect = executeManagementAction(db, actor, { action: "add_task", title: task.title, ...(details ? { details } : {}),
+              priority: task.priority, dueDate: task.dueDate, ownerId: task.ownerId }, { now: at + index, source: "approval", auditContext: { origin: "approval", confirmedBy: actor.id, approvalId: approval.id } });
+            if (task.ownerId) createdTaskOwners.push({ userId: task.ownerId, text: `📌 عيّن لك باسم مهمة «${String(task.title).slice(0, 200)}». اكتب «استلمت» أو اسم المهمة لبدء التنفيذ.` });
+            index += 1;
+          }
+          notifyGroup = `🆕 مهام جديدة:\n${tasks.map(task => `• ${task.title}${task.ownerId ? ` — ${task.ownerId}` : ""}`).join("\n")}`;
           break;
         }
         case "rule": case "policy": {
@@ -393,7 +365,7 @@ export function decideApproval(db: DatabaseSync, claimed: ManagementActor, input
     // this, a named colleague would have a task land on them with zero
     // heads-up. Centralized here so every caller (WhatsApp decide, and the
     // website's own decide_approval action) sends it the same way.
-    const notifyExtra: Array<{ userId: string; text: string }> = [];
+    const notifyExtra: Array<{ userId: string; text: string }> = [...createdTaskOwners];
     if (decided.type === "task_transfer" && decided.status === "approved" && decided.payload.suggestedOwnerId) {
       notifyExtra.push({ userId: String(decided.payload.suggestedOwnerId), text: `📌 عيّن لك باسم مهمة «${String(decided.payload.taskTitle).slice(0, 200)}» (كانت مع ${String(decided.payload.fromOwnerName).slice(0, 100)}). اكتب «استلمت» أو اسم المهمة لبدء التنفيذ.` });
     }
@@ -413,11 +385,9 @@ export function findPendingApproval(db: DatabaseSync, claimed: ManagementActor, 
     const lower = normalize(hint.text);
     if (/تمديد|مهله|موعد/.test(lower)) candidates = candidates.filter(approval => approval.type === "deadline_extension");
     else if (/اولوي|أهمي|اهمي/.test(lower)) candidates = candidates.filter(approval => approval.type === "priority_change");
-    else if (/مشروع/.test(lower) && /اغلاق|سكر|ارشف|انهاء/.test(lower)) candidates = candidates.filter(approval => approval.type === "project_close");
     else if (/اغلاق|انهاء|خلص/.test(lower)) candidates = candidates.filter(approval => approval.type === "task_close");
     else if (/تحويل|حول/.test(lower)) candidates = candidates.filter(approval => approval.type === "task_transfer");
     else if (/مسؤول|مسئول|استلام|استلم/.test(lower)) candidates = candidates.filter(approval => approval.type === "task_ownership");
-    else if (/مشروع/.test(lower)) candidates = candidates.filter(approval => approval.type === "project_create");
     else if (/قاعده|سياسه/.test(lower)) candidates = candidates.filter(approval => approval.type === "rule" || approval.type === "policy");
   }
   return { approval: candidates.length === 1 ? candidates[0] : null, candidates };

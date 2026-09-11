@@ -12,51 +12,50 @@ import {
 
 const member = { id: "test-member", role: "member", active: 1 };
 const admin = { id: "basem", role: "admin", active: 1 };
-const projects = [{ id: "project-a", name: "المشروع المصرح", status: "active" }];
-const tasks = [{ id: "task-a", projectId: "project-a", title: "المهمة المصرح بها", archivedAt: null }];
+// Tasks are flat standalone records, so a deep link names exactly one task and
+// there is no parent entity to authorize alongside it.
+const tasks = [{ id: "task-a", title: "المهمة المصرح بها", archivedAt: null }];
 const read = relative => readFile(new URL(relative, import.meta.url), "utf8");
 
 test("deep links defer until authenticated active state, never trusting identity in URL", () => {
   for (const viewer of [null, { ...member, active: 0 }]) {
-    assert.deepEqual(resolveSecretaryDeepLink("?project=project-a&task=task-a&userId=basem&role=admin", viewer, projects, tasks), { status: "deferred" });
+    assert.deepEqual(resolveSecretaryDeepLink("?task=task-a&userId=basem&role=admin", viewer, tasks), { status: "deferred" });
   }
-  assert.equal(resolveSecretaryDeepLink("?unrelated=1", member, projects, tasks).status, "none");
-  const result = resolveSecretaryDeepLink("?project=project-a&task=task-a", member, projects, tasks);
+  assert.equal(resolveSecretaryDeepLink("?unrelated=1", member, tasks).status, "none");
+  const result = resolveSecretaryDeepLink("?task=task-a", member, tasks);
   assert.equal(result.status, "resolved");
-  assert.deepEqual(result.target, { projectId: "project-a", taskId: "task-a" });
+  assert.deepEqual(result.target, { taskId: "task-a" });
   assert.equal(result.archived, false);
 });
 
-test("unauthorized/missing project or task IDs and cross-project pairs are never opened", () => {
-  const permitted = [...projects, { id: "project-b", name: "ثانٍ مصرح" }];
+test("unauthorized, missing or malformed task IDs are never opened", () => {
   for (const query of [
-    "?project=foreign-project", "?project=project-a&task=foreign-task", "?project=project-b&task=task-a",
-    "?project=project-a&project=project-b", "?task=task-a&task=foreign-task", "?project=", "?task=",
-    "?project=..%2Fsecret", "?task=%3Cimg%20src%3Dx%3E", `?project=${"a".repeat(5000)}`,
-  ]) assert.equal(resolveSecretaryDeepLink(query, member, permitted, tasks).status, "unavailable", query);
-  assert.equal(resolveSecretaryDeepLink("?task=task-a", member, [], tasks).status, "unavailable");
-  assert.equal(resolveSecretaryDeepLink("?project=project-a&task=task-a", member, projects, []).status, "unavailable");
+    "?task=foreign-task", "?task=task-a&task=foreign-task", "?task=",
+    "?task=..%2Fsecret", "?task=%3Cimg%20src%3Dx%3E", `?task=${"a".repeat(5000)}`,
+  ]) assert.equal(resolveSecretaryDeepLink(query, member, tasks).status, "unavailable", query);
+  assert.equal(resolveSecretaryDeepLink("?task=task-a", member, []).status, "unavailable");
+  // A leftover project parameter carries no meaning and opens nothing by itself.
+  assert.equal(resolveSecretaryDeepLink("?project=project-a", member, tasks).status, "none");
 });
 
-test("task-only links derive the authorized parent and archived tasks open the archive", () => {
-  const result = resolveSecretaryDeepLink("?task=task-a", member, projects, [{ ...tasks[0], archivedAt: 100 }]);
+test("archived tasks open the archive", () => {
+  const result = resolveSecretaryDeepLink("?task=task-a", member, [{ ...tasks[0], archivedAt: 100 }]);
   assert.equal(result.status, "resolved");
-  assert.deepEqual(result.target, { projectId: "project-a", taskId: "task-a" });
+  assert.deepEqual(result.target, { taskId: "task-a" });
   assert.equal(result.archived, true);
   assert.match(result.announcement, /الأرشيف/);
-  assert.deepEqual(resolveSecretaryDeepLink("?project=project-a", member, projects, tasks).target, { projectId: "project-a" });
 });
 
 test("query titles, names and redirect instructions cannot replace trusted state content", () => {
   const params = new URLSearchParams({
-    project: "project-a", task: "task-a", title: "<img src=x onerror=alert(1)>",
-    name: "مشروع مزيف", action: "delete_task", redirect: "https://attacker.invalid/",
+    task: "task-a", title: "<img src=x onerror=alert(1)>",
+    name: "عنوان مزيف", action: "delete_task", redirect: "https://attacker.invalid/",
   });
-  const result = resolveSecretaryDeepLink(params.toString(), member, projects, tasks);
+  const result = resolveSecretaryDeepLink(params.toString(), member, tasks);
   assert.equal(result.status, "resolved");
   assert.match(result.announcement, /المهمة المصرح بها/);
   assert.doesNotMatch(result.announcement, /img|مزيف|attacker|delete_task/);
-  const storedMarkupTitle = resolveSecretaryDeepLink("?task=task-a", member, projects, [{ ...tasks[0], title: "<img src=x onerror=alert(1)>" }]);
+  const storedMarkupTitle = resolveSecretaryDeepLink("?task=task-a", member, [{ ...tasks[0], title: "<img src=x onerror=alert(1)>" }]);
   const html = renderToStaticMarkup(React.createElement("p", { role: "status" }, storedMarkupTitle.announcement));
   assert.doesNotMatch(html, /<img/);
   assert.match(html, /&lt;img/);
@@ -64,23 +63,21 @@ test("query titles, names and redirect instructions cannot replace trusted state
 
 test("copied links contain only validated IDs on the same HTTPS origin, never title or credentials", () => {
   const origin = "https://management.example.test";
-  assert.equal(createSecretaryLink(origin, { projectId: "project-a", taskId: "task-a" }), `${origin}/?project=project-a&task=task-a`);
-  assert.equal(createSecretaryLink(origin, { projectId: "project-a" }), `${origin}/?project=project-a`);
+  assert.equal(createSecretaryLink(origin, { taskId: "task-a" }), `${origin}/?task=task-a`);
   for (const unsafe of ["javascript:alert(1)", "https://user:password@management.example.test", `${origin}/path`, `${origin}?token=secret`, "http://management.example.test"]) {
-    assert.equal(createSecretaryLink(unsafe, { projectId: "project-a" }), null);
+    assert.equal(createSecretaryLink(unsafe, { taskId: "task-a" }), null);
   }
-  assert.equal(createSecretaryLink(origin, { projectId: "project-a&role=admin" }), null);
-  assert.equal(createSecretaryLink(origin, { projectId: "project-a", taskId: "../task" }), null);
+  assert.equal(createSecretaryLink(origin, { taskId: "task-a&role=admin" }), null);
+  assert.equal(createSecretaryLink(origin, { taskId: "../task" }), null);
 });
 
 test("activity links use authorized entity IDs, not a model-proposed target", () => {
-  assert.deepEqual(secretaryActivityTarget({ entityType: "task", entityId: "task-a" }, member, projects, tasks), { projectId: "project-a", taskId: "task-a" });
-  assert.deepEqual(secretaryActivityTarget({ entityType: "project", entityId: "project-a" }, member, projects, tasks), { projectId: "project-a" });
+  assert.deepEqual(secretaryActivityTarget({ entityType: "task", entityId: "task-a" }, member, tasks), { taskId: "task-a" });
   for (const activity of [
     { entityType: "user", entityId: "basem" }, { entityType: "task", entityId: "foreign-task" },
-    { entityType: "project", entityId: "foreign-project" },
-  ]) assert.equal(secretaryActivityTarget(activity, member, projects, tasks), null);
-  assert.equal(secretaryActivityTarget({ entityType: "task", entityId: "task-a" }, null, projects, tasks), null);
+    { entityType: "project", entityId: "project-a" },
+  ]) assert.equal(secretaryActivityTarget(activity, member, tasks), null);
+  assert.equal(secretaryActivityTarget({ entityType: "task", entityId: "task-a" }, null, tasks), null);
 });
 
 const senderNumber = "12025550101";
@@ -166,7 +163,7 @@ test("real activity component escapes actor, original text, proposal titles and 
     source: "whatsapp_secretary", summary: attack, previous: { title: attack }, next: { title: attack },
     auditContext: { originalText: attack, proposedCommand: { action: "edit_task", title: attack }, senderNumber },
   }) };
-  const render = viewer => renderToStaticMarkup(React.createElement(SecretaryActivity, { activity, viewer, target: { projectId: "project-a", taskId: "task-a" }, onOpen() {} }));
+  const render = viewer => renderToStaticMarkup(React.createElement(SecretaryActivity, { activity, viewer, target: { taskId: "task-a" }, onOpen() {} }));
   const memberHtml = render(member);
   assert.doesNotMatch(memberHtml, /<img|12025550101/);
   assert.match(memberHtml, /&lt;img/);
@@ -178,7 +175,7 @@ test("real activity component escapes actor, original text, proposal titles and 
 
 test("copy controls render accessible buttons and polite status without automatic navigation", async () => {
   const { SecretaryLinkButton } = await compileComponent("secretary-link-button");
-  const html = renderToStaticMarkup(React.createElement(SecretaryLinkButton, { target: { projectId: "project-a", taskId: "task-a" } }));
+  const html = renderToStaticMarkup(React.createElement(SecretaryLinkButton, { target: { taskId: "task-a" } }));
   assert.match(html, /type="button"/);
   assert.match(html, /نسخ رابط المهمة/);
   assert.match(html, /role="status"/);
@@ -190,7 +187,7 @@ test("dashboard waits for authorized state and provides accessible focus, archiv
   const source = await read("../app/dashboard.tsx");
   assert.match(source, /loadedStateOwnerRef\.current = next\.currentUser\?\.id \?\? null/);
   assert.match(source, /loadedStateOwnerRef\.current !== currentUser\.id/);
-  assert.match(source, /resolveSecretaryDeepLink\(locationSearch, currentUser, data\.projects, data\.tasks\)/);
+  assert.match(source, /resolveSecretaryDeepLink\(locationSearch, currentUser, data\.tasks\)/);
   assert.match(source, /setStatusFilter\(result\.archived \? "archived" : "all"\)/);
   assert.match(source, /setExpandedComments/);
   assert.match(source, /element\.focus\(\{ preventScroll: true \}\)/);

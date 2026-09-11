@@ -13,12 +13,11 @@ export function createSecretaryJobs({ db, config, now = Date.now }: { db: Databa
       db.prepare("SELECT id,name,role,active FROM users").all() as ChatUser[], cfg.allowedGroupIds);
     if (!actor || actor.id !== row.actor_id) return null;
     const snapshot = getManagementSnapshot(db, actor); const task = snapshot.tasks.find(t => t.id === row.task_id);
-    const project = task && snapshot.projects.find(p => p.id === task.projectId);
-    if (!task || !project || task.archivedAt || project.status !== "active" || task.status === "completed") return null;
+    if (!task || task.archivedAt || task.status === "completed") return null;
     if (!isManagementAdmin(actor) && task.owner !== actor.name && task.suggestedOwner !== actor.name) return null;
     const clean = (text: string) => text.replace(/[\x00-\x1f\u202a-\u202e\u2066-\u2069]/g, " ").slice(0, 180);
     return { to: row.group_id || `${row.sender_number}@s.whatsapp.net`,
-      text: `⏰ يا ${clean(actor.name)}، هذا التذكير الذي طلبته:\n*${clean(task.title)}*\n${clean(project.name)}\nاحكيلي شو صار معك؛ أقدر أسجّل تحديثك على المهمة.\nhttps://www.management.titanium-pharmacy.com/?project=${encodeURIComponent(project.id)}&task=${encodeURIComponent(task.id)}`,
+      text: `⏰ يا ${clean(actor.name)}، هذا التذكير الذي طلبته:\n*${clean(task.title)}*\nاحكيلي شو صار معك؛ أقدر أسجّل تحديثك على المهمة.\nhttps://www.management.titanium-pharmacy.com/?task=${encodeURIComponent(task.id)}`,
       messageId: row.reply_message_id };
   }
   return { async deliverNext(send: (message: { to: string; text: string; messageId: string; signal: AbortSignal }) => Promise<unknown>) {

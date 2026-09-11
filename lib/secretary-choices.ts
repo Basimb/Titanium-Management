@@ -2,7 +2,7 @@ import { randomBytes } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 
 export type SecretaryChoices = { id: string; title: string; options: Array<{ id: string; label: string }>; expiresAt: number };
-export type SecretaryChoiceField = "projectId" | "ownerId" | "priority" | "dueDate" | "approvalDecision";
+export type SecretaryChoiceField = "ownerId" | "priority" | "dueDate" | "approvalDecision";
 type Option = { id: string; label: string; value: string | null };
 type Binding = { conversationKey: string; actorId: string; draftVersion: string; catalogHash: string; now: number };
 type Row = { question_id: string; actor_id: string; draft_version: string; catalog_hash: string; field: SecretaryChoiceField; title: string; options_json: string; expires_at: number };
@@ -39,7 +39,7 @@ export function consumeSecretaryChoice(db: DatabaseSync, binding: Binding, choic
   if (!row || row.question_id !== choice.questionId || row.actor_id !== binding.actorId || row.draft_version !== binding.draftVersion
     || row.catalog_hash !== binding.catalogHash || row.expires_at <= binding.now) throw new SecretaryChoiceError();
   const option = (JSON.parse(row.options_json) as Option[]).find(item => item.id === choice.optionId);
-  if (!option || !["projectId", "ownerId", "priority", "dueDate", "approvalDecision"].includes(row.field)) throw new SecretaryChoiceError();
+  if (!option || !["ownerId", "priority", "dueDate", "approvalDecision"].includes(row.field)) throw new SecretaryChoiceError();
   clearSecretaryChoices(db, binding.conversationKey);
   return { field: row.field, value: option.value, label: option.label };
 }
@@ -50,18 +50,10 @@ export function peekSecretaryChoiceField(db: DatabaseSync, conversationKey: stri
 }
 
 export function secretaryChoiceOptions(field: SecretaryChoiceField, catalog: {
-  projects: Array<{ id: string; name: string }>; users: Array<{ id: string; name: string }>; now: number;
+  users: Array<{ id: string; name: string }>; now: number;
 }): Array<{ label: string; value: string | null }> {
   const names = (items: Array<{ id: string; name: string }>) => items.map(item => ({ value: item.id,
     label: items.filter(other => other.name === item.name).length > 1 ? `${clean(item.name, 65)} (${item.id.slice(-12)})` : item.name }));
-  if (field === "projectId") {
-    // "بدون مشروع" is always offered, alongside the real project list and the
-    // free-text escape hatch -- reserve its slot the same way the escape
-    // hatch's own slot is reserved, so the 12-option cap is never exceeded.
-    const limit = catalog.projects.length > 11 ? 10 : 11;
-    return [...names(catalog.projects).slice(0, limit), { label: "بدون مشروع", value: "no_project" },
-      ...(catalog.projects.length > limit ? [{ label: "اكتب اسم مشروع آخر", value: null }] : [])];
-  }
   if (field === "ownerId") return [...names(catalog.users).slice(0, catalog.users.length > 11 ? 10 : 11),
     { label: "بدون مسؤول حاليًا", value: "unassigned" }, ...(catalog.users.length > 11 ? [{ label: "اكتب اسم موظف آخر", value: null }] : [])];
   if (field === "priority") return [{ label: "🔴 قصوى", value: "red" }, { label: "🟡 متوسطة", value: "yellow" }, { label: "🟢 عادية", value: "green" }];

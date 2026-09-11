@@ -1,7 +1,7 @@
 /** Pure read-request parsing. The caller must supply scoped catalogs and recheck visibility. */
-export type PriorityTaskQuery = { kind: "query"; priority: "red" | "yellow" | "green"; projectId?: string; ownerId?: string;
+export type PriorityTaskQuery = { kind: "query"; priority: "red" | "yellow" | "green"; ownerId?: string;
   status?: "open" | "progress" | "approval" | "completed" | "overdue"; offset?: number } | { kind: "clarify"; reply: string };
-type Catalog = { projects: Array<{ id: string; name: string }>; users: Array<{ id: string; name: string; active?: number | boolean }>;
+type Catalog = { users: Array<{ id: string; name: string; active?: number | boolean }>;
   actor: { id: string; role: string; name?: string } };
 const normalize = (text: string) => text.normalize("NFKC").replace(/[\u064b-\u065f\u0670\u0640\ufe0f]/g, "")
   .replace(/[أإآ]/g, "ا").replace(/ى/g, "ي").replace(/ة/g, "ه").replace(/[٠-٩]/g, digit => String("٠١٢٣٤٥٦٧٨٩".indexOf(digit)))
@@ -18,7 +18,7 @@ const statusPatterns = [
   ["completed", /^(?:المعتمده|معتمده|المكتمله|مكتمله|المنجزه|منجزه)(?=$|\s)/u],
   ["overdue", /^(?:المتاخره|متاخره)(?=$|\s)/u],
 ] as const;
-const clarify = (reply = "أي قائمة تقصد بالضبط؟ حدد لونًا واحدًا، واسم المشروع أو المسؤول أو حالة المهمة إن أردت تصفيتها."): PriorityTaskQuery => ({ kind: "clarify", reply });
+const clarify = (reply = "أي قائمة تقصد بالضبط؟ حدد لونًا واحدًا، واسم المسؤول أو حالة المهمة إن أردت تصفيتها."): PriorityTaskQuery => ({ kind: "clarify", reply });
 function consumeName(text: string, items: Array<{ id: string; name: string }>, markers: RegExp[]) {
   const matches: Array<{ id: string; length: number }> = [];
   let marked = false;
@@ -67,11 +67,6 @@ export function priorityTaskQuery(text: string, catalog: Catalog): PriorityTaskQ
     if (status) {
       if (result.status && result.status !== status[0]) return clarify("حدد حالة واحدة للمهام المطلوبة.");
       result.status = status[0]; rest = rest.replace(status[1], "").trim(); continue;
-    }
-    const project = consumeName(rest, catalog.projects, [/^(?:في|ضمن)\s+/u, /^(?:(?:في|ضمن)\s+)?مشروع\s+/u, /^بمشروع\s+/u]);
-    if (project) {
-      if (!project.id || (result.projectId && result.projectId !== project.id)) return clarify("أي مشروع تقصد؟ اكتب اسمه المحدد أو معرّفه إذا تكرر الاسم.");
-      result.projectId = project.id; rest = project.rest; continue;
     }
     if (/^(?:لي|الي|عندي|الخاصه بي)(?=$|\s)/u.test(rest)) {
       if (result.ownerId && result.ownerId !== catalog.actor.id) return clarify("حدد مسؤولًا واحدًا للمهام المطلوبة.");

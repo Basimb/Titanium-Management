@@ -16,9 +16,7 @@ function fixture(t) {
   db.exec(`PRAGMA foreign_keys=ON;
     CREATE TABLE users (id TEXT PRIMARY KEY,name TEXT UNIQUE NOT NULL,role TEXT NOT NULL,active INTEGER NOT NULL,
       pin_salt TEXT,pin_hash TEXT,created_at INTEGER DEFAULT 1,updated_at INTEGER DEFAULT 1);
-    CREATE TABLE projects (id TEXT PRIMARY KEY,name TEXT NOT NULL,status TEXT NOT NULL,created_by TEXT NOT NULL,
-      created_at INTEGER NOT NULL,rejection_reason TEXT,rejected_by TEXT,rejected_at INTEGER);
-    CREATE TABLE tasks (id TEXT PRIMARY KEY,project_id TEXT NOT NULL REFERENCES projects(id),title TEXT NOT NULL,
+    CREATE TABLE tasks (id TEXT PRIMARY KEY,title TEXT NOT NULL,
       details TEXT NOT NULL DEFAULT '',priority TEXT NOT NULL DEFAULT 'yellow',status TEXT NOT NULL,owner TEXT,
       suggested_owner TEXT,started_at INTEGER,due_date TEXT,completed_at INTEGER,rejection_reason TEXT,
       created_at INTEGER NOT NULL,updated_at INTEGER,archived_at INTEGER,archived_by TEXT);
@@ -27,13 +25,12 @@ function fixture(t) {
     CREATE TABLE audit_logs (id INTEGER PRIMARY KEY,actor_user_id TEXT,actor_name TEXT NOT NULL,action TEXT NOT NULL,
       entity_type TEXT NOT NULL,entity_id TEXT NOT NULL,details TEXT NOT NULL,created_at INTEGER NOT NULL);
     INSERT INTO users (id,name,role,active,pin_hash) VALUES ('basem','مدير تجريبي','admin',1,'private-hash'),('member','موظف تجريبي','member',1,NULL),('other','موظف آخر','member',1,NULL),('fake-admin','إدارة أخرى','admin',1,NULL);
-    INSERT INTO projects (id,name,status,created_by,created_at) VALUES ('p','مشروع تجريبي','active','مدير تجريبي',100),('q','مشروع خاص','active','مدير تجريبي',100),('pending','مقترح','pending','مدير تجريبي',100);
-    INSERT INTO tasks (id,project_id,title,status,owner,suggested_owner,started_at,created_at,updated_at) VALUES
-      ('own','p','إنجاز تجريبي','progress','موظف تجريبي','موظف تجريبي',110,100,110),
-      ('assigned','p','مقترحة للموظف','open',NULL,'موظف تجريبي',NULL,100,100),
-      ('private','p','سرّي للموظف الآخر','progress','موظف آخر','موظف آخر',110,100,110),
-      ('unassigned','q','غير معيّنة','open',NULL,NULL,NULL,100,100),
-      ('blocked','pending','في مشروع معلّق','progress','موظف تجريبي','موظف تجريبي',110,100,110);
+    INSERT INTO tasks (id,title,status,owner,suggested_owner,started_at,created_at,updated_at) VALUES
+      ('own','إنجاز تجريبي','progress','موظف تجريبي','موظف تجريبي',110,100,110),
+      ('assigned','مقترحة للموظف','open',NULL,'موظف تجريبي',NULL,100,100),
+      ('private','سرّي للموظف الآخر','progress','موظف آخر','موظف آخر',110,100,110),
+      ('unassigned','غير معيّنة','open',NULL,NULL,NULL,100,100),
+      ('blocked','مهمة إضافية للموظف','progress','موظف تجريبي','موظف تجريبي',110,100,110);
     INSERT INTO comments (task_id,author,body,created_at) VALUES ('private','موظف آخر','تفاصيل خاصة',120);
     INSERT INTO attachments VALUES ('file-private','private','private.pdf','application/pdf',5,'private-object-key','موظف آخر',120);`);
   return db;
@@ -44,27 +41,54 @@ const count = (db, table) => Number(db.prepare(`SELECT COUNT(*) AS n FROM ${tabl
 const denied = (fn, code, status) => assert.throws(fn, error => error instanceof ManagementActionError && error.code === code && (!status || error.status === status));
 const plain = value => JSON.parse(JSON.stringify(value));
 
-test("additive migration is repeatable and snapshot has stable project versions", t => {
+test("additive migration is repeatable and the snapshot carries flat tasks with no grouping entity", t => {
   const db = fixture(t);
   migrateManagementActions(db); migrateManagementActions(db);
   const snapshot = getManagementSnapshot(db, admin);
-  assert.equal(snapshot.projects.find(p => p.id === "p").updatedAt, 100);
-  assert.equal(snapshot.projects.find(p => p.id === "p").archivedAt, null);
-  assert.equal(db.prepare("SELECT updated_at FROM projects WHERE id='p'").get().updated_at, null);
+  assert.equal(snapshot.tasks.find(task => task.id === "own").updatedAt, 110);
+  assert.equal(snapshot.tasks.find(task => task.id === "own").archivedAt, null);
   assert.equal(count(db, "tasks"), 5);
+  // Projects were removed from the product: neither the snapshot shape nor the
+  // task rows carry any grouping entity anymore.
+  assert.equal(snapshot.projects, undefined);
+  assert.ok(!Object.keys(snapshot.tasks[0]).some(key => /project/i.test(key)));
+  assert.ok(!db.prepare("PRAGMA table_info(tasks)").all().some(column => column.name === "project_id"));
   assert.ok(!JSON.stringify(snapshot).includes("private-hash"));
 });
 
-test("member snapshot scopes projects, tasks, files, comments, users and audit metadata", t => {
+// Neither the action engine nor its command parser knows any project action
+// anymore, so a stale client (or a replayed old WhatsApp confirmation) asking
+// for one is rejected outright rather than half-applied.
+test("every removed project action is an unknown action, not a half-supported one", t => {
+  const db = fixture(t);
+  for (const command of [
+    { action: "add_project", name: "مشروع" }, { action: "edit_project", projectId: "p", name: "تعديل" },
+    { action: "approve_project", projectId: "p" }, { action: "reject_project", projectId: "p", reason: "سبب" },
+    { action: "restore_project", projectId: "p" }, { action: "archive_project", projectId: "p" },
+    { action: "delete_project", projectId: "p" }, { action: "move_task", taskId: "own", projectId: "q" },
+  ]) {
+    denied(() => parseManagementCommand(command), "unknown_action", 400);
+    denied(() => run(db, command), "unknown_action", 400);
+  }
+  // add_task/edit_task no longer accept a projectId field at all.
+  denied(() => parseManagementCommand({ action: "add_task", title: "مهمة", projectId: "p" }), "invalid_fields", 400);
+  denied(() => parseManagementCommand({ action: "edit_task", taskId: "own", projectId: "p" }), "invalid_fields", 400);
+  // ...and neither does the stale-version guard.
+  for (const expected of ["expectedProjectId", "expectedProjectUpdatedAt", "expectedProjectStatus", "expectedTargetProjectUpdatedAt"]) {
+    denied(() => parseManagementCommand({ action: "submit", taskId: "own", [expected]: "p" }), "invalid_fields", 400);
+  }
+  assert.equal(count(db, "audit_logs"), 0);
+});
+
+test("member snapshot scopes tasks, files, comments, users and audit metadata", t => {
   const db = fixture(t);
   run(db, { action: "comment", taskId: "own", comment: "تحديث ظاهر" }, member, {
     source: "whatsapp_secretary", auditContext: { originalText: "نص كامل", senderNumber: "+12025550101", sourceMessageId: "message-1" },
   });
   const snapshot = getManagementSnapshot(db, member);
   assert.deepEqual(snapshot.tasks.map(x => x.id).sort(), ["assigned", "blocked", "own"]);
-  assert.deepEqual(snapshot.projects.map(x => x.id).sort(), ["p", "pending"]);
   // A member sees every active colleague (needed to name one in a transfer,
-  // message, or correction), not just themselves -- task/project/comment/
+  // message, or correction), not just themselves -- task/comment/
   // attachment/activity detail stays scoped, asserted separately below.
   assert.deepEqual(snapshot.users.map(x => x.id).sort(), ["basem", "fake-admin", "member", "other"]);
   assert.equal(snapshot.attachments.length, 0);
@@ -79,8 +103,8 @@ test("strict basem/admin authority and live actor prevent spoofed or stale ident
   const db = fixture(t);
   assert.equal(isManagementAdmin(admin), true);
   assert.equal(isManagementAdmin({ ...member, id: "basem" }), false);
-  denied(() => run(db, { action: "add_project", name: "ممنوع" }, { ...admin, id: "fake-admin", name: "إدارة أخرى" }), "admin_required", 403);
-  denied(() => run(db, { action: "add_project", name: "ممنوع" }, { ...member, role: "admin" }), "actor_unavailable", 403);
+  denied(() => run(db, { action: "delete_task", taskId: "own" }, { ...admin, id: "fake-admin", name: "إدارة أخرى" }), "admin_required", 403);
+  denied(() => run(db, { action: "delete_task", taskId: "own" }, { ...member, role: "admin" }), "actor_unavailable", 403);
   denied(() => run(db, { action: "comment", taskId: "own", comment: "x" }, { ...member, name: admin.name }), "actor_unavailable");
   db.prepare("UPDATE users SET active=0 WHERE id='member'").run();
   denied(() => run(db, { action: "submit", taskId: "own" }, member), "actor_unavailable");
@@ -91,12 +115,11 @@ test("strict basem/admin authority and live actor prevent spoofed or stale ident
 test("members cannot promote themselves through command fields or admin commands", t => {
   const db = fixture(t);
   for (const command of [
-    { action: "add_project", name: "مشروع" }, { action: "edit_project", projectId: "p", name: "تعديل" },
-    { action: "add_task", projectId: "p", title: "مهمة" }, { action: "edit_task", taskId: "own", title: "تعديل" },
+    { action: "add_task", title: "مهمة" }, { action: "edit_task", taskId: "own", title: "تعديل" },
     { action: "approve", taskId: "own" }, { action: "reject", taskId: "own", reason: "سبب" },
-    { action: "reassign", taskId: "own", ownerId: "other" }, { action: "move_task", taskId: "own", projectId: "q" },
+    { action: "reassign", taskId: "own", ownerId: "other" },
     { action: "archive_task", taskId: "own" }, { action: "restore_task", taskId: "own" },
-    { action: "delete_task", taskId: "own" }, { action: "delete_project", projectId: "p" },
+    { action: "delete_task", taskId: "own" },
   ]) denied(() => run(db, command, member), "admin_required");
   for (const extra of [{ actor: admin }, { source: "whatsapp_secretary" }, { auditContext: {} }, { actorId: "basem" }]) {
     denied(() => parseManagementCommand({ action: "submit", taskId: "own", ...extra }), "invalid_fields");
@@ -185,14 +208,13 @@ test("release of a legacy task remains atomic even when post-release visibility 
   assert.ok(!getManagementSnapshot(db, member).tasks.some(x => x.id === "own"));
 });
 
-test("stale task and project versions cause no changes or audit", t => {
+test("stale task versions cause no changes or audit", t => {
   const db = fixture(t);
-  for (const expected of [
-    { expectedUpdatedAt: 109 }, { expectedStatus: "open" }, { expectedProjectId: "q" },
-    { expectedProjectUpdatedAt: 101 }, { expectedProjectStatus: "pending" },
-  ]) denied(() => run(db, { action: "comment", taskId: "own", comment: "قديم", ...expected }, member), "stale", 409);
+  for (const expected of [{ expectedUpdatedAt: 109 }, { expectedStatus: "open" }]) {
+    denied(() => run(db, { action: "comment", taskId: "own", comment: "قديم", ...expected }, member), "stale", 409);
+  }
   assert.equal(row(db).updated_at, 110); assert.equal(count(db, "audit_logs"), 0);
-  run(db, { action: "comment", taskId: "own", comment: "حديث", expectedUpdatedAt: 110, expectedProjectUpdatedAt: 100 }, member);
+  run(db, { action: "comment", taskId: "own", comment: "حديث", expectedUpdatedAt: 110, expectedStatus: "progress" }, member);
   denied(() => run(db, { action: "submit", taskId: "own", expectedUpdatedAt: 110 }, member), "stale");
   assert.equal(row(db).status, "progress");
 });
@@ -205,42 +227,31 @@ test("parallel proposals from the same snapshot cannot overwrite a newer edit", 
   assert.equal(row(db).title, "تعديل أول"); assert.equal(count(db, "audit_logs"), 1);
 });
 
-test("project create edit archive restore uses versioned state and preserves prior status", t => {
+// A task no longer lives inside anything, so nothing outside it can block work
+// on it: the old "المشروع ليس نشطًا" gate is gone, and every task in the
+// fixture is immediately actionable by whoever it belongs to.
+test("no containing entity can block work on a task anymore", t => {
   const db = fixture(t);
-  const created = run(db, { action: "add_project", name: "مشروع جديد" });
-  run(db, { action: "edit_project", projectId: created.entityId, name: "اسم أحدث", expectedUpdatedAt: 200 });
-  run(db, { action: "archive_project", projectId: created.entityId, expectedUpdatedAt: 201 });
-  let project = getManagementSnapshot(db, admin).projects.find(p => p.id === created.entityId);
-  assert.equal(project.status, "archived"); assert.equal(project.updatedAt, 202);
-  denied(() => run(db, { action: "add_task", projectId: created.entityId, title: "ممنوع" }), "project_inactive");
-  run(db, { action: "restore_project", projectId: created.entityId, expectedStatus: "archived", expectedUpdatedAt: 202 });
-  project = getManagementSnapshot(db, admin).projects.find(p => p.id === created.entityId);
-  assert.equal(project.status, "active"); assert.equal(project.name, "اسم أحدث");
-  run(db, { action: "archive_project", projectId: "pending" });
-  run(db, { action: "restore_project", projectId: "pending" });
-  assert.equal(getManagementSnapshot(db, admin).projects.find(p => p.id === "pending").status, "pending");
-});
-
-test("project reject restore approve and inactive guard are enforced", t => {
-  const db = fixture(t);
-  denied(() => run(db, { action: "submit", taskId: "blocked" }, member), "project_inactive");
-  run(db, { action: "approve_project", projectId: "pending" });
   run(db, { action: "submit", taskId: "blocked" }, member);
-  run(db, { action: "reject_project", projectId: "pending", reason: "نقص معلومات" });
-  run(db, { action: "restore_project", projectId: "pending" });
-  assert.equal(db.prepare("SELECT status,rejection_reason FROM projects WHERE id='pending'").get().status, "pending");
-  run(db, { action: "approve_project", projectId: "pending" });
-  denied(() => run(db, { action: "approve_project", projectId: "pending" }), "invalid_transition");
+  assert.equal(row(db, "blocked").status, "approval");
+  run(db, { action: "approve", taskId: "blocked" });
+  assert.equal(row(db, "blocked").status, "completed");
+  // Approving a task closes exactly that task (and auto-archives it), never a
+  // containing entity alongside it.
+  assert.ok(row(db, "blocked").archived_at);
+  assert.equal(row(db, "own").status, "progress", "a sibling task is untouched");
+  const message = db.prepare("SELECT details FROM audit_logs WHERE action='approve'").get().details;
+  assert.doesNotMatch(message, /مشروع/);
 });
 
 test("create and partial edit validate assignment, date and priority without wiping other fields", t => {
   const db = fixture(t);
-  const result = run(db, { action: "add_task", projectId: "p", title: "مهمة جديدة", details: "تفاصيل", ownerId: "member", dueDate: "2026-09-08", priority: "red" });
+  const result = run(db, { action: "add_task", title: "مهمة جديدة", details: "تفاصيل", ownerId: "member", dueDate: "2026-09-08", priority: "red" });
   assert.equal(row(db, result.entityId).suggested_owner, member.name);
   run(db, { action: "edit_task", taskId: result.entityId, title: "اسم جديد" });
   assert.equal(row(db, result.entityId).details, "تفاصيل"); assert.equal(row(db, result.entityId).priority, "red");
   for (const fields of [{ dueDate: "2026-02-30" }, { priority: "critical" }, { ownerId: "missing" }, { ownerId: "member", suggestedOwner: other.name }]) {
-    assert.throws(() => run(db, { action: "add_task", projectId: "p", title: "مرفوض", ...fields }), ManagementActionError);
+    assert.throws(() => run(db, { action: "add_task", title: "مرفوض", ...fields }), ManagementActionError);
   }
   db.exec("UPDATE users SET active=0 WHERE id='other'");
   denied(() => run(db, { action: "reassign", taskId: "own", ownerId: "other" }), "assignee_unavailable");
@@ -261,17 +272,6 @@ test("reassignment resets lifecycle and changes member visibility without deleti
   assert.equal(row(db).suggested_owner, null);
 });
 
-test("move validates both projects and retains task status, comments and ownership", t => {
-  const db = fixture(t);
-  denied(() => run(db, { action: "move_task", taskId: "own", projectId: "q", expectedTargetProjectUpdatedAt: 99 }), "stale");
-  denied(() => run(db, { action: "move_task", taskId: "own", projectId: "pending" }), "project_inactive");
-  run(db, { action: "move_task", taskId: "own", projectId: "q", expectedProjectUpdatedAt: 100, expectedTargetProjectUpdatedAt: 100 });
-  assert.equal(row(db).project_id, "q"); assert.equal(row(db).owner, member.name); assert.equal(row(db).status, "progress");
-  const snapshot = getManagementSnapshot(db, admin);
-  assert.equal(snapshot.projects.find(p => p.id === "p").updatedAt, 200);
-  assert.equal(snapshot.projects.find(p => p.id === "q").updatedAt, 200);
-});
-
 test("task archive prevents progress and restore preserves lifecycle", t => {
   const db = fixture(t);
   run(db, { action: "archive_task", taskId: "own" });
@@ -290,23 +290,13 @@ test("task deletion returns object keys, removes dependent records and retains a
   assert.equal(detail.previous.id, "private"); assert.equal(detail.next, null);
 });
 
-test("project deletion removes children atomically but never touches object storage itself", t => {
-  const db = fixture(t);
-  const result = run(db, { action: "delete_project", projectId: "p" });
-  assert.deepEqual(result.deletedObjectKeys, ["private-object-key"]);
-  assert.equal(count(db, "tasks"), 2); assert.equal(count(db, "attachments"), 0); assert.equal(count(db, "comments"), 0);
-  assert.equal(db.prepare("SELECT id FROM projects WHERE id='p'").get(), undefined);
-  assert.equal(db.prepare("SELECT entity_type FROM audit_logs").get().entity_type, "project");
-});
-
-test("audit failure rolls mutation, comment, project version and deletes back together", t => {
+test("audit failure rolls the mutation, its comment and its deletes back together", t => {
   const db = fixture(t); migrateManagementActions(db);
   db.exec("CREATE TRIGGER audit_failure BEFORE INSERT ON audit_logs BEGIN SELECT RAISE(ABORT, 'test-only failure'); END");
   assert.throws(() => run(db, { action: "comment", taskId: "own", comment: "لن يحفظ" }, member), /test-only failure/);
   assert.equal(count(db, "comments"), 1); assert.equal(row(db).updated_at, 110);
-  assert.equal(db.prepare("SELECT updated_at FROM projects WHERE id='p'").get().updated_at, null);
-  assert.throws(() => run(db, { action: "delete_project", projectId: "p" }), /test-only failure/);
-  assert.equal(count(db, "tasks"), 5); assert.equal(count(db, "attachments"), 1); assert.equal(count(db, "projects"), 3);
+  assert.throws(() => run(db, { action: "delete_task", taskId: "private" }), /test-only failure/);
+  assert.equal(count(db, "tasks"), 5); assert.equal(count(db, "attachments"), 1);
   assert.equal(db.isTransaction, false);
 });
 
@@ -326,7 +316,7 @@ test("outer receipt transaction can roll action back and nested failure preserve
 test("migration inside outer rollback can be safely retried", t => {
   const db = fixture(t);
   db.exec("BEGIN IMMEDIATE"); migrateManagementActions(db); db.exec("ROLLBACK");
-  assert.ok(!db.prepare("PRAGMA table_info(projects)").all().some(x => x.name === "updated_at"));
+  assert.ok(!db.prepare("PRAGMA table_info(tasks)").all().some(x => x.name === "watcher"));
   run(db, { action: "submit", taskId: "own" }, member);
   assert.equal(row(db).status, "approval");
 });
@@ -371,7 +361,10 @@ test("state route uses the shared engine/snapshot and preserves private response
   assert.match(source, /result\.deletedObjectKeys\.map/);
   assert.match(source, /private, no-store, no-cache/);
   assert.doesNotMatch(source, /whatsappLoginSettings|whatsapp-login-settings/);
-  assert.match(source, /entity_type = 'project' LIMIT 1/);
+  // The "is this a genuinely fresh install?" probe keys off task history now
+  // that projects no longer exist, and the route seeds tasks directly.
+  assert.match(source, /entity_type = 'task' LIMIT 1/);
+  assert.doesNotMatch(source, /project/i);
 });
 
 // A task opened/approved on the website dashboard used to notify no one --
@@ -381,12 +374,11 @@ test("state route uses the shared engine/snapshot and preserves private response
 // notice plus a private claim/reject-with-comment/transfer poll. Locks in
 // that the dashboard route now relays through the same dispatchManagementNotice
 // the chat paths use, gated on result.notification, with a fresh post-action
-// snapshot and the request body's ownerId/projectId carried through.
+// snapshot and the request body's ownerId carried through.
 test("state route relays website task actions to the employee via dispatchManagementNotice, not just dashboard-local", () => {
   const source = readFileSync(new URL("../app/api/state/route.ts", import.meta.url), "utf8");
   assert.match(source, /import\s*\{\s*dispatchManagementNotice.*\}\s*from\s*"@\/lib\/secretary-service"/);
   assert.match(source, /if\s*\(result\.notification\)\s*\{[\s\S]{0,400}dispatchManagementNotice\(/);
   assert.match(source, /getManagementSnapshot\(chatDatabase\(\), user\) as unknown as Snapshot/);
   assert.match(source, /ownerId:\s*typeof body\.ownerId === "string" \? body\.ownerId : null/);
-  assert.match(source, /projectId:\s*typeof body\.projectId === "string" \? body\.projectId : null/);
 });

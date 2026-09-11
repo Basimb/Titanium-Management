@@ -4,43 +4,28 @@ import { migrateAgentSchema } from "./agent-schema.ts";
 import { ACTION_CAPABILITY, can, inScope, isOwner, type PermissionActor } from "./permissions.ts";
 
 export type ManagementActor = { id: string; name: string; role: "admin" | "manager" | "member"; active: number; department?: string | null };
-type Expected = { expectedUpdatedAt?: number | null; expectedStatus?: string; expectedProjectId?: string;
-  expectedProjectUpdatedAt?: number | null; expectedProjectStatus?: string; expectedTargetProjectUpdatedAt?: number | null };
+type Expected = { expectedUpdatedAt?: number | null; expectedStatus?: string };
 type TaskFields = { title?: string; details?: string; priority?: "red" | "yellow" | "green"; dueDate?: string | null;
   suggestedOwner?: string | null; ownerId?: string | null };
 export type ManagementCommand = Expected & (
-  | { action: "add_project"; name: string }
-  | { action: "edit_project"; projectId: string; name: string }
-  | { action: "approve_project" | "restore_project" | "archive_project" | "delete_project"; projectId: string }
-  | { action: "reject_project"; projectId: string; reason: string }
-  | ({ action: "add_task"; projectId: string; title: string } & TaskFields)
+  | ({ action: "add_task"; title: string } & TaskFields)
   | ({ action: "edit_task"; taskId: string } & TaskFields)
   | { action: "claim" | "cancel_claim" | "submit" | "approve" | "archive_task" | "restore_task" | "delete_task"; taskId: string }
   | { action: "reject"; taskId: string; reason: string }
   | { action: "reopen"; taskId: string; reason?: string }
   | { action: "reassign"; taskId: string; ownerId: string | null }
-  | { action: "move_task"; taskId: string; projectId: string }
   | { action: "comment"; taskId: string; comment: string }
   | { action: "set_watcher"; taskId: string; watcherId: string | null }
   | { action: "set_blocker"; taskId: string; blocker: string | null }
   | { action: "set_expected"; taskId: string; expectedAt: string | null }
 );
 
-export type ManagementProject = { id: string; name: string; status: string; createdBy: string; createdAt: number;
-  updatedAt: number; rejectionReason: string | null; rejectedBy: string | null; rejectedAt: number | null;
-  archivedAt: number | null; archivedBy: string | null;
-  // Auto-generated invisible wrapper project for a "بدون مشروع" task (see
-  // secretary-agent.ts's createStandaloneTask); false for every ordinary
-  // project. Every project auto-archives once its last open task closes
-  // (see the "approve" case below) -- this flag only picks the message
-  // wording (standalone vs. a real project), never whether it auto-closes.
-  isStandalone: boolean };
-export type ManagementTask = { id: string; projectId: string; title: string; details: string; priority: string; status: string;
+export type ManagementTask = { id: string; title: string; details: string; priority: string; status: string;
   owner: string | null; suggestedOwner: string | null; startedAt: number | null; dueDate: string | null;
   completedAt: number | null; rejectionReason: string | null; createdAt: number; updatedAt: number | null;
   archivedAt: number | null; archivedBy: string | null;
   watcher: string | null; expectedAt: string | null; blocker: string | null; lastUpdateAt: number | null };
-export type ManagementResult = { ok: true; action: ManagementCommand["action"]; entityType: "task" | "project";
+export type ManagementResult = { ok: true; action: ManagementCommand["action"]; entityType: "task";
   entityId: string; message: string; deletedObjectKeys: string[];
   notification?: { action: string; title: string; actor: string; extra?: string } };
 
@@ -50,16 +35,13 @@ export class ManagementActionError extends Error {
   constructor(status: number, code: string, message: string) { super(message); this.name = "ManagementActionError"; this.status = status; this.code = code; }
 }
 const fail = (status: number, code: string, message: string): never => { throw new ManagementActionError(status, code, message); };
-const PROJECT_SELECT = "SELECT id,name,status,created_by AS createdBy,created_at AS createdAt,COALESCE(updated_at,created_at) AS updatedAt,rejection_reason AS rejectionReason,rejected_by AS rejectedBy,rejected_at AS rejectedAt,archived_at AS archivedAt,archived_by AS archivedBy,is_standalone AS isStandalone FROM projects";
-const TASK_SELECT = "SELECT id,project_id AS projectId,title,details,priority,status,owner,suggested_owner AS suggestedOwner,started_at AS startedAt,due_date AS dueDate,completed_at AS completedAt,rejection_reason AS rejectionReason,created_at AS createdAt,updated_at AS updatedAt,archived_at AS archivedAt,archived_by AS archivedBy,watcher,expected_at AS expectedAt,blocker,last_update_at AS lastUpdateAt FROM tasks";
-const EXPECTED_KEYS = ["expectedUpdatedAt", "expectedStatus", "expectedProjectId", "expectedProjectUpdatedAt", "expectedProjectStatus", "expectedTargetProjectUpdatedAt"];
+const TASK_SELECT = "SELECT id,title,details,priority,status,owner,suggested_owner AS suggestedOwner,started_at AS startedAt,due_date AS dueDate,completed_at AS completedAt,rejection_reason AS rejectionReason,created_at AS createdAt,updated_at AS updatedAt,archived_at AS archivedAt,archived_by AS archivedBy,watcher,expected_at AS expectedAt,blocker,last_update_at AS lastUpdateAt FROM tasks";
+const EXPECTED_KEYS = ["expectedUpdatedAt", "expectedStatus"];
 export const ACTION_KEYS: Record<ManagementCommand["action"], readonly string[]> = {
-  add_project: ["name"], edit_project: ["projectId", "name"], approve_project: ["projectId"], reject_project: ["projectId", "reason"],
-  restore_project: ["projectId"], archive_project: ["projectId"], delete_project: ["projectId"],
-  add_task: ["projectId", "title", "details", "priority", "dueDate", "suggestedOwner", "ownerId"],
+  add_task: ["title", "details", "priority", "dueDate", "suggestedOwner", "ownerId"],
   edit_task: ["taskId", "title", "details", "priority", "dueDate", "suggestedOwner", "ownerId"],
   claim: ["taskId"], cancel_claim: ["taskId"], submit: ["taskId"], approve: ["taskId"], reject: ["taskId", "reason"],
-  reopen: ["taskId", "reason"], reassign: ["taskId", "ownerId"], move_task: ["taskId", "projectId"],
+  reopen: ["taskId", "reason"], reassign: ["taskId", "ownerId"],
   archive_task: ["taskId"], restore_task: ["taskId"], delete_task: ["taskId"], comment: ["taskId", "comment"],
   set_watcher: ["taskId", "watcherId"], set_blocker: ["taskId", "blocker"], set_expected: ["taskId", "expectedAt"],
 };
@@ -97,13 +79,18 @@ function atomic<T>(sqlite: DatabaseSync, write: boolean, work: () => T): T {
   }
 }
 
-/** Additive migration only. Call on the same SQLite connection before snapshots/actions. */
+/** Additive migration only. Call on the same SQLite connection before snapshots/actions.
+ * Projects were removed from the product entirely (tasks are flat, standalone
+ * records now), so nothing project-shaped is created or patched here anymore --
+ * the one-time destructive drop of the legacy projects table / tasks.project_id
+ * column lives in scripts/migrate-drop-projects.sql and is run by hand, never
+ * from this per-request path (see the doc comment atop migrateAgentSchema). */
 export function migrateManagementActions(sqlite: DatabaseSync): void {
   atomic(sqlite, true, () => {
-    const columns = new Set(sqlite.prepare("PRAGMA table_info(projects)").all().map(row => String(row.name)));
-    if (!columns.has("id")) return fail(503, "schema_unavailable", "بيانات المشاريع غير جاهزة");
-    for (const [column, type] of [["updated_at", "INTEGER"], ["archived_at", "INTEGER"], ["archived_by", "TEXT"], ["is_standalone", "INTEGER DEFAULT 0 NOT NULL"]]) {
-      if (!columns.has(column)) sqlite.exec(`ALTER TABLE projects ADD COLUMN ${column} ${type}`);
+    const columns = new Set(sqlite.prepare("PRAGMA table_info(tasks)").all().map(row => String(row.name)));
+    if (!columns.has("id")) return fail(503, "schema_unavailable", "بيانات المهام غير جاهزة");
+    for (const [column, type] of [["updated_at", "INTEGER"], ["archived_at", "INTEGER"], ["archived_by", "TEXT"]]) {
+      if (!columns.has(column)) sqlite.exec(`ALTER TABLE tasks ADD COLUMN ${column} ${type}`);
     }
   });
   migrateAgentSchema(sqlite);
@@ -142,10 +129,6 @@ export function getManagementSnapshot(sqlite: DatabaseSync, claimed: ManagementA
     const tasks = (sqlite.prepare(`${TASK_SELECT} ORDER BY created_at,id`).all() as ManagementTask[])
       .filter(task => manager || (task.archivedAt === null && canViewManagementTask(actor, task)));
     const taskIds = new Set(tasks.map(task => task.id));
-    const projectIds = new Set(tasks.map(task => task.projectId));
-    const projects = (sqlite.prepare(`${PROJECT_SELECT} ORDER BY created_at,id`).all() as unknown as ManagementProject[])
-      .filter(project => manager || projectIds.has(project.id))
-      .map(project => ({ ...project, status: project.archivedAt === null ? project.status : "archived" }));
     const comments = sqlite.prepare("SELECT id,task_id AS taskId,author,body,created_at AS createdAt FROM comments ORDER BY created_at DESC,id DESC")
       .all().filter(row => manager || taskIds.has(String(row.taskId)));
     // A plain member used to see only their own row here, which fed straight
@@ -163,14 +146,14 @@ export function getManagementSnapshot(sqlite: DatabaseSync, claimed: ManagementA
       .all().filter(row => manager || taskIds.has(String(row.taskId)));
     const activity = sqlite.prepare("SELECT id,actor_user_id AS actorUserId,actor_name AS actorName,action,entity_type AS entityType,entity_id AS entityId,details,created_at AS createdAt FROM audit_logs ORDER BY created_at DESC,id DESC")
       .all().filter(row => manager || (row.entityType === "task" && taskIds.has(String(row.entityId)))
-        || (row.entityType === "project" && projectIds.has(String(row.entityId))) || (row.entityType === "user" && row.entityId === actor.id))
+        || (row.entityType === "user" && row.entityId === actor.id))
       .map(row => {
         if (manager) return row;
         let details: Record<string, unknown> = {};
         try { const parsed = JSON.parse(String(row.details)); if (parsed && typeof parsed === "object") details = parsed; } catch { /* Old malformed audit entry. */ }
         return { ...row, details: JSON.stringify({ summary: typeof details.summary === "string" ? details.summary : String(row.action), source: typeof details.source === "string" ? details.source : "site" }) };
       });
-    return { currentUser: actor, projects, tasks, comments, users, attachments, activity };
+    return { currentUser: actor, tasks, comments, users, attachments, activity };
   });
 }
 
@@ -195,27 +178,17 @@ function priority(value: unknown): string {
   if (typeof value !== "string" || !["red", "yellow", "green"].includes(value)) return fail(400, "invalid_priority", "الأولوية غير صالحة");
   return value;
 }
-function projectById(sqlite: DatabaseSync, id: unknown): ManagementProject {
-  const project = sqlite.prepare(`${PROJECT_SELECT} WHERE id=?`).get(identifier(id)) as ManagementProject | undefined;
-  return project ?? fail(404, "project_missing", "المشروع غير موجود");
-}
 function taskById(sqlite: DatabaseSync, id: unknown, actor: ManagementActor): ManagementTask {
   const task = sqlite.prepare(`${TASK_SELECT} WHERE id=?`).get(identifier(id)) as ManagementTask | undefined;
   return task && canViewManagementTask(actor, task) ? task : fail(404, "task_missing", "المهمة غير موجودة أو غير متاحة لك");
 }
-function checkVersion(command: Expected, task: ManagementTask | null, project: ManagementProject) {
+function checkVersion(command: Expected, task: ManagementTask) {
   const mismatch = (key: keyof Expected, actual: unknown) => Object.hasOwn(command, key) && command[key] !== actual;
-  const projectStatus = project.archivedAt === null ? project.status : "archived";
-  if ((task && (mismatch("expectedUpdatedAt", task.updatedAt) || mismatch("expectedStatus", task.status) || mismatch("expectedProjectId", task.projectId)))
-    || mismatch("expectedProjectUpdatedAt", project.updatedAt) || mismatch("expectedProjectStatus", projectStatus)
-    || (!task && (mismatch("expectedUpdatedAt", project.updatedAt) || mismatch("expectedStatus", projectStatus)))) {
+  if (mismatch("expectedUpdatedAt", task.updatedAt) || mismatch("expectedStatus", task.status)) {
     fail(409, "stale", "تغيّرت البيانات منذ عرضها. حدّثها ثم أعد تأكيد الطلب");
   }
 }
-function activeProject(project: ManagementProject) {
-  if (project.archivedAt !== null || project.status !== "active") fail(409, "project_inactive", "المشروع ليس نشطًا؛ استرجعه واعتمده قبل تعديل مهامه");
-}
-function updateRow(sqlite: DatabaseSync, table: "tasks" | "projects", id: string, changes: Record<string, SQLInputValue>) {
+function updateRow(sqlite: DatabaseSync, table: "tasks", id: string, changes: Record<string, SQLInputValue>) {
   const fields = Object.keys(changes);
   if (Number(sqlite.prepare(`UPDATE ${table} SET ${fields.map(field => `${field}=?`).join(",")} WHERE id=?`).run(...Object.values(changes), id).changes) !== 1) fail(409, "stale", "تغيّرت البيانات؛ حدّث الصفحة");
 }
@@ -262,15 +235,14 @@ export function executeManagementAction(sqlite: DatabaseSync, claimed: Managemen
     try { if (JSON.stringify(context).length > 24_000) return fail(400, "invalid_audit", "بيانات التدقيق أطول من الحد المسموح"); }
     catch (error) { if (error instanceof ManagementActionError) throw error; return fail(400, "invalid_audit", "بيانات التدقيق غير صالحة"); }
     const source = options.source === undefined ? "site" : required(options.source, "مصدر العملية", 64);
-    let previous: ManagementTask | ManagementProject | null = null;
-    let next: ManagementTask | ManagementProject | null = null;
-    let entityType: "task" | "project" = "task";
+    let previous: ManagementTask | null = null;
+    let next: ManagementTask | null = null;
+    const entityType = "task" as const;
     let entityId = "";
     let message = "تم حفظ التحديث";
     let auditAction = command.action as string;
     let notification: ManagementResult["notification"];
     const deletedObjectKeys: string[] = [];
-    const bumpProject = (project: ManagementProject) => updateRow(sqlite, "projects", project.id, { updated_at: Math.max(at, project.updatedAt + 1) });
     const deleteTaskRecords = (taskId: string) => {
       for (const row of sqlite.prepare("SELECT object_key AS objectKey FROM attachments WHERE task_id=?").all(taskId)) deletedObjectKeys.push(String(row.objectKey));
       sqlite.prepare("DELETE FROM attachments WHERE task_id=?").run(taskId);
@@ -278,57 +250,17 @@ export function executeManagementAction(sqlite: DatabaseSync, claimed: Managemen
       sqlite.prepare("DELETE FROM tasks WHERE id=?").run(taskId);
     };
 
-    if (command.action.endsWith("_project")) {
-      entityType = "project";
-      if (command.action === "add_project") {
-        const name = required(command.name, "اسم المشروع"); entityId = randomUUID();
-        const status = manager ? "active" : "pending";
-        sqlite.prepare("INSERT INTO projects (id,name,status,created_by,created_at,updated_at) VALUES (?,?,?,?,?,?)").run(entityId, name, status, actor.name, at, at);
-        message = manager ? `أضاف مشروع: ${name}` : `اقترح مشروعًا بانتظار اعتماد باسم: ${name}`; auditAction = "create";
-      } else {
-        const projectCommand = command as Exclude<Extract<ManagementCommand, { projectId: string }>, { action: "add_task" | "move_task" }>;
-        const project = projectById(sqlite, projectCommand.projectId); previous = project; entityId = project.id;
-        checkVersion(command, null, project);
-        const changes: Record<string, SQLInputValue> = { updated_at: Math.max(at, project.updatedAt + 1) };
-        if (command.action === "delete_project") {
-          for (const task of sqlite.prepare("SELECT id FROM tasks WHERE project_id=?").all(project.id)) deleteTaskRecords(String(task.id));
-          sqlite.prepare("DELETE FROM projects WHERE id=?").run(project.id);
-          message = `حذف المشروع ومهامه نهائيًا: ${project.name}`; auditAction = "delete";
-        } else {
-          if (project.archivedAt !== null && command.action !== "restore_project") return fail(409, "project_archived", "المشروع مؤرشف؛ استرجعه أولًا");
-          if (command.action === "edit_project") { changes.name = required(command.name, "اسم المشروع"); message = `عدّل المشروع: ${project.name}`; auditAction = "edit"; }
-          else if (command.action === "archive_project") { changes.archived_at = at; changes.archived_by = actor.name; message = `أرشف المشروع: ${project.name}`; auditAction = "archive"; }
-          else if (command.action === "restore_project") {
-            if (project.archivedAt !== null) { changes.archived_at = null; changes.archived_by = null; }
-            else if (project.status === "rejected") { changes.status = "pending"; changes.rejection_reason = null; changes.rejected_by = null; changes.rejected_at = null; }
-            else return fail(409, "invalid_transition", "المشروع ليس مؤرشفًا أو مرفوضًا");
-            message = `استرجع المشروع: ${project.name}`; auditAction = "restore";
-          } else if (command.action === "approve_project") {
-            if (project.status !== "pending") return fail(409, "invalid_transition", "المشروع ليس بانتظار الاعتماد");
-            Object.assign(changes, { status: "active", rejection_reason: null, rejected_by: null, rejected_at: null });
-            message = `اعتمد المشروع: ${project.name}`; auditAction = "approve";
-          } else if (command.action === "reject_project") {
-            if (!["pending", "active"].includes(project.status)) return fail(409, "invalid_transition", "حالة المشروع لا تسمح برفضه الآن");
-            const reason = required(command.reason, "سبب الرفض", 4000);
-            Object.assign(changes, { status: "rejected", rejection_reason: reason, rejected_by: actor.name, rejected_at: at });
-            message = `رفض المشروع ${project.name}: ${reason}`; auditAction = "reject";
-          }
-          updateRow(sqlite, "projects", project.id, changes);
-        }
-      }
-      if (command.action !== "delete_project") next = projectById(sqlite, entityId);
-    } else if (command.action === "add_task") {
-      const project = projectById(sqlite, command.projectId); activeProject(project); checkVersion(command, null, project);
+    if (command.action === "add_task") {
       const title = required(command.title, "اسم المهمة"); const owner = assignedName(sqlite, command); entityId = randomUUID();
-      sqlite.prepare("INSERT INTO tasks (id,project_id,title,details,priority,status,suggested_owner,due_date,created_at,updated_at) VALUES (?,?,?,?,?,'open',?,?,?,?)")
-        .run(entityId, project.id, title, optionalText(command.details, "التفاصيل", 10_000), priority(command.priority), owner, dateValue(command.dueDate), at, at);
-      bumpProject(project); next = taskById(sqlite, entityId, actor);
+      sqlite.prepare("INSERT INTO tasks (id,title,details,priority,status,suggested_owner,due_date,created_at,updated_at) VALUES (?,?,?,?,'open',?,?,?,?)")
+        .run(entityId, title, optionalText(command.details, "التفاصيل", 10_000), priority(command.priority), owner, dateValue(command.dueDate), at, at);
+      next = taskById(sqlite, entityId, actor);
       message = `أضاف مهمة: ${title}`; auditAction = "create";
       notification = { action: "create", title, actor: actor.name, extra: owner ? `المسؤول: ${owner}` : "غير معيّنة" };
     } else {
       const taskCommand = command as Exclude<Extract<ManagementCommand, { taskId: string }>, never>;
       const task = taskById(sqlite, taskCommand.taskId, actor); previous = task; entityId = task.id;
-      const project = projectById(sqlite, task.projectId); checkVersion(command, task, project);
+      checkVersion(command, task);
       if (command.action !== "delete_task" && command.action !== "restore_task") {
         // "reopen" is excluded from this gate on purpose: since approve now
         // auto-archives (see the "approve" case below), a completed task is
@@ -339,7 +271,6 @@ export function executeManagementAction(sqlite: DatabaseSync, claimed: Managemen
         // a manually-archived open/in-progress task never has), so this
         // stays narrowly scoped to the auto-archive-on-approve case.
         if (task.archivedAt !== null && command.action !== "reopen") return fail(409, "task_archived", "المهمة مؤرشفة؛ استرجعها أولًا");
-        activeProject(project);
       }
       const changes: Record<string, SQLInputValue> = { updated_at: Math.max(at, (task.updatedAt ?? 0) + 1) };
       if (command.action === "delete_task") { deleteTaskRecords(task.id); message = `حذف المهمة نهائيًا: ${task.title}`; auditAction = "delete"; }
@@ -407,6 +338,9 @@ export function executeManagementAction(sqlite: DatabaseSync, claimed: Managemen
             // restore it first" gate a few lines up) -- same two-step an admin
             // already needed for a manually-archived task, now also covering one
             // that archived itself on approval.
+            // A task is a standalone record now, so approving one closes exactly
+            // that one task -- there is no containing entity left to auto-close
+            // alongside it (projects were removed from the product entirely).
             Object.assign(changes, { status: "completed", completed_at: at, rejection_reason: null, archived_at: at, archived_by: actor.name });
             message = `اعتمد إنجاز المهمة: ${task.title} (وأُرشفت تلقائيًا)`; auditAction = "approve"; break;
           case "reject": {
@@ -426,13 +360,6 @@ export function executeManagementAction(sqlite: DatabaseSync, claimed: Managemen
             Object.assign(changes, { status: "open", owner: null, suggested_owner: owner, started_at: null, completed_at: null, rejection_reason: null });
             message = owner ? `عيّن المهمة إلى ${owner} بانتظار استلامه: ${task.title}` : `ألغى تعيين المسؤول عن المهمة: ${task.title}`; auditAction = "reassign";
             notification = { action: "reassign", title: task.title, actor: actor.name, extra: owner ? `المسؤول: ${owner}` : "غير معيّنة" }; break;
-          }
-          case "move_task": {
-            const destination = projectById(sqlite, command.projectId); activeProject(destination);
-            if (Object.hasOwn(command, "expectedTargetProjectUpdatedAt") && command.expectedTargetProjectUpdatedAt !== destination.updatedAt) return fail(409, "stale", "تغيّر مشروع الوجهة؛ راجعه قبل النقل");
-            if (destination.id === task.projectId) return fail(409, "same_project", "المهمة موجودة في هذا المشروع بالفعل");
-            changes.project_id = destination.id; bumpProject(destination);
-            message = `نقل المهمة «${task.title}» من «${project.name}» إلى «${destination.name}»`; auditAction = "move"; break;
           }
           case "archive_task": changes.archived_at = at; changes.archived_by = actor.name; message = `أرشف المهمة: ${task.title}`; auditAction = "archive"; break;
           case "set_watcher": {
@@ -465,28 +392,7 @@ export function executeManagementAction(sqlite: DatabaseSync, claimed: Managemen
         updateRow(sqlite, "tasks", task.id, changes);
         // The actor may intentionally release a legacy task and lose visibility after this authorized mutation.
         next = sqlite.prepare(`${TASK_SELECT} WHERE id=?`).get(task.id) as ManagementTask;
-        if (command.action === "approve") {
-          // A later "reopen" can un-complete a task, so this can never be
-          // cached -- it is always recomputed live, right here, at the
-          // moment of THIS approve. Same "any open task left?" condition
-          // requestProjectClose (approvals.ts) already shows Basim before he
-          // decides a manual close request.
-          const openLeft = Number((sqlite.prepare("SELECT count(*) AS n FROM tasks WHERE project_id=? AND archived_at IS NULL AND status!='completed'").get(project.id) as { n: number }).n);
-          if (openLeft === 0 && project.archivedAt === null) {
-            // Basim's explicit instruction: when a project's last open task
-            // closes, the WHOLE project archives automatically -- for every
-            // project, not only the invisible "بدون مشروع" wrapper ones. No "ask
-            // Basim first" step at all (an earlier draft of this gated real
-            // projects behind an agent_outbox nudge; Basim corrected that
-            // mid-implementation to fully automatic for all projects).
-            updateRow(sqlite, "projects", project.id, { updated_at: Math.max(at, project.updatedAt + 1), archived_at: at, archived_by: actor.name });
-            sqlite.prepare("INSERT INTO audit_logs (actor_user_id,actor_name,action,entity_type,entity_id,details,created_at) VALUES (?,?,?,?,?,?,?)")
-              .run(actor.id, actor.name, "archive", "project", project.id, JSON.stringify({ summary: project.isStandalone ? `أرشف تلقائيًا المشروع المؤقت: ${project.name}` : `أرشف تلقائيًا (خلصت كل مهامه): ${project.name}`, source: "auto_close" }), at);
-            message += project.isStandalone ? " (وأُغلق تلقائيًا المشروع المؤقت المرتبط فيها)" : ` (وأُغلق تلقائيًا مشروع «${project.name}» لأنه ما بقي فيه مهام مفتوحة)`;
-          }
-        }
       }
-      bumpProject(project);
       if (!notification && ["claim", "submit", "approve", "archive"].includes(auditAction)) notification = { action: auditAction, title: task.title, actor: actor.name };
     }
     sqlite.prepare("INSERT INTO audit_logs (actor_user_id,actor_name,action,entity_type,entity_id,details,created_at) VALUES (?,?,?,?,?,?,?)")

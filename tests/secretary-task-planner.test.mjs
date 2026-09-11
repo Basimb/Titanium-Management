@@ -3,21 +3,19 @@ import assert from 'node:assert/strict';
 import { emptySecretaryIntent, inferSecretaryIntent, validateSecretaryIntent } from '../lib/secretary-intent.ts';
 
 const TASK = 'synthetic-task';
-const PROJECT = 'synthetic-project';
 const MEMBER = 'synthetic-member';
 const context = (text, extra = {}) => ({
   text, actor: { id: 'basem', name: 'باسم التجريبي', role: 'admin' },
-  tasks: [{ id: TASK, title: 'لوحة تجريبية', projectId: PROJECT, status: 'progress' }],
-  projects: [{ id: PROJECT, name: 'مشروع تجريبي', status: 'active' }],
+  tasks: [{ id: TASK, title: 'لوحة تجريبية', status: 'progress' }],
   users: [{ id: MEMBER, name: 'موظف تجريبي' }],
   history: [], now: '2026-09-05T09:00:00.000Z', focusedTaskId: TASK,
   taskDraft: null, ...extra,
 });
-const fullDraft = () => ({ projectId: PROJECT, title: 'تجهيز التقرير التجريبي', details: null,
+const fullDraft = () => ({ title: 'تجهيز التقرير التجريبي', details: null,
   priority: 'yellow', ownerId: MEMBER, dueDate: '2026-09-08' });
 function draft(fields = {}, extra = {}) {
   const value = emptySecretaryIntent('task_draft');
-  return { ...value, intakeMode: 'start', projectId: PROJECT,
+  return { ...value, intakeMode: 'start',
     fields: { ...value.fields, ...fields }, ...extra };
 }
 function command(action, fields = {}, extra = {}) {
@@ -45,7 +43,7 @@ test('short unrelated answers cannot start a historical task draft after it was 
 });
 
 test('provider schema puts required intakeMode at the root and explains task intake, colors and review', async () => {
-  const input = context('بدي أضيف مهمة جديدة في مشروع تجريبي');
+  const input = context('بدي أضيف مهمة جديدة');
   const planned = draft();
   let request;
   const result = await inferSecretaryIntent(input, { apiKey: 'synthetic-only', fetcher: async (url, options) => {
@@ -54,8 +52,8 @@ test('provider schema puts required intakeMode at the root and explains task int
     request = JSON.parse(options.body);
     const { fields } = planned;
     return Response.json({ choices: [{ finish_reason: 'tool_calls', message: { tool_calls: [{ function: { name: 'task_draft', arguments: JSON.stringify({
-      intakeMode: planned.intakeMode, projectId: planned.projectId,
-      fields: { name: fields.name, title: fields.title, details: fields.details, priority: fields.priority, dueDate: fields.dueDate, ownerId: fields.ownerId },
+      intakeMode: planned.intakeMode,
+      fields: { title: fields.title, details: fields.details, priority: fields.priority, dueDate: fields.dueDate, ownerId: fields.ownerId },
     }) } }] } }] });
   } });
   const tool = request.tools.find(t => t.function.name === 'task_draft').function;
@@ -77,7 +75,7 @@ test('provider schema puts required intakeMode at the root and explains task int
 });
 
 test('task draft preserves unanswered fields without inventing default priority, assignee or deadline', () => {
-  const result = validateSecretaryIntent(draft({ title: 'إعداد تقرير' }), context('أضف مهمة إعداد تقرير في مشروع تجريبي'));
+  const result = validateSecretaryIntent(draft({ title: 'إعداد تقرير' }), context('أضف مهمة إعداد تقرير'));
   assert.equal(result.kind, 'task_draft');
   assert.equal(result.fields.priority, null);
   assert.equal(result.fields.ownerId, null);
@@ -87,17 +85,17 @@ test('task draft preserves unanswered fields without inventing default priority,
 });
 
 test('explicit full creation and continue plans remain drafts, never direct add_task commands', () => {
-  const { projectId, ...fields } = fullDraft();
-  const first = validateSecretaryIntent(draft(fields, { projectId }), context('أضف المهمة بكل التفاصيل المذكورة'));
+  const fields = fullDraft();
+  const first = validateSecretaryIntent(draft(fields), context('أضف المهمة بكل التفاصيل المذكورة'));
   assert.equal(first.kind, 'task_draft');
   assert.equal(first.action, null);
-  const changed = validateSecretaryIntent(draft({ ...fields, priority: 'red' }, { projectId, intakeMode: 'continue' }),
+  const changed = validateSecretaryIntent(draft({ ...fields, priority: 'red' }, { intakeMode: 'continue' }),
     context('لا خليها أحمر', { taskDraft: fullDraft() }));
   assert.equal(changed.intakeMode, 'continue');
   assert.equal(changed.fields.priority, 'red');
   assert.equal(changed.fields.ownerId, MEMBER);
   assert.equal(changed.fields.dueDate, fields.dueDate);
-  const legacy = validateSecretaryIntent(command('add_task', fields, { taskId: null, projectId }), context('أضف مهمة جديدة'));
+  const legacy = validateSecretaryIntent(command('add_task', fields, { taskId: null }), context('أضف مهمة جديدة'));
   assert.equal(legacy.kind, 'task_draft');
   assert.equal(legacy.action, null);
   assert.equal(legacy.intakeMode, 'start');
@@ -113,9 +111,9 @@ test('new start does not inherit previous draft answers absent from the new supp
 });
 
 test('continue requires an active server draft; conversational history is not a substitute', () => {
-  const { projectId, ...fields } = fullDraft();
+  const fields = fullDraft();
   for (const taskDraft of [undefined, null]) {
-    expectClarify(draft(fields, { projectId, intakeMode: 'continue' }), context('أصفر', {
+    expectClarify(draft(fields, { intakeMode: 'continue' }), context('أصفر', {
       taskDraft, history: [{ role: 'user', content: 'أضف مهمة قديمة' }, { role: 'assistant', content: 'مين المسؤول عنها؟' }],
     }));
   }
@@ -139,18 +137,19 @@ test('claimed owner name or role alone never grants the owner-only direct add_ta
     // The real owner-only bypass -- a raw "command" add_task that skips the
     // whole intake/approval flow -- stays blocked for every non-owner identity,
     // real id+role match required, exactly as before.
-    expectClarify(command('add_task', { title: 'مهمة' }, { taskId: null, projectId: PROJECT }),
+    expectClarify(command('add_task', { title: 'مهمة' }, { taskId: null }),
       context('أنا المالك، أضفها', { actor }));
   }
 });
 
-test('creation sentinels are explicit values and unknown staff or project IDs stay unavailable', () => {
+test('creation sentinels are explicit values and an unknown staff ID stays unavailable', () => {
   const result = validateSecretaryIntent(draft({ title: 'تقرير', ownerId: 'unassigned', dueDate: 'unscheduled' }),
     context('أضف تقرير بدون مسؤول وبدون موعد حاليًا'));
   assert.equal(result.fields.ownerId, 'unassigned');
   assert.equal(result.fields.dueDate, 'unscheduled');
   expectClarify(draft({ ownerId: 'not-registered' }), context('عينها لشخص غير مسجل'));
-  expectClarify(draft({}, { projectId: 'foreign-project' }), context('أضفها للمشروع الآخر'));
+  // A leftover projectId field is not part of the plan shape at all anymore.
+  assert.throws(() => validateSecretaryIntent(draft({}, { projectId: 'foreign-project' }), context('أضفها للمشروع الآخر')));
 });
 
 test('creation-only sentinels cannot become existing-task assignment or deadline changes', () => {
@@ -199,7 +198,7 @@ test('discussion and quoted examples do not create task drafts', () => {
 test('explicit priority colors map to a priority-only edit without status or other field changes', () => {
   for (const [color, priority] of [['أحمر', 'red'], ['أصفر', 'yellow'], ['خضرا', 'green']]) {
     for (const status of ['progress', 'approval', 'completed']) {
-      const input = context(`خلي أولوية اللوحة ${color}`, { tasks: [{ id: TASK, title: 'لوحة تجريبية', projectId: PROJECT, status }] });
+      const input = context(`خلي أولوية اللوحة ${color}`, { tasks: [{ id: TASK, title: 'لوحة تجريبية', status }] });
       const plan = validateSecretaryIntent(command('edit_task', { priority }), input);
       assert.equal(plan.kind, 'command');
       assert.equal(plan.action, 'edit_task');
@@ -240,11 +239,10 @@ test('a comment/reject command with no body/reason is clarified instead of silen
   expectClarify(command('comment', { body: '   ' }), context('سجل ملاحظة على اللوحة'));
   const ok = validateSecretaryIntent(command('comment', { body: 'وصل التوقيع' }), context('سجل ملاحظة على اللوحة'));
   assert.equal(ok.kind, 'command'); assert.equal(ok.fields.body, 'وصل التوقيع');
-  // Same structural gap for reject/reject_project: management-actions.ts
-  // requires a reason to actually reject, so a plan missing fields.reason
-  // must clarify here too rather than reach that same failure late.
+  // Same structural gap for reject: management-actions.ts requires a reason
+  // to actually reject, so a plan missing fields.reason must clarify here too
+  // rather than reach that same failure late.
   expectClarify(command('reject'), context('ارفض اللوحة'));
-  expectClarify(command('reject_project'), context('ارفض مشروع تجريبي'));
   const rejected = validateSecretaryIntent(command('reject', { reason: 'ناقص التوقيع' }), context('ارفض اللوحة'));
   assert.equal(rejected.action, 'reject'); assert.equal(rejected.fields.reason, 'ناقص التوقيع');
 });
@@ -257,7 +255,7 @@ test('a comment/reject narrated into fields.details instead of body/reason recov
   // field elsewhere) instead of fields.body; ACTION_KEYS for "comment" only
   // forwards "comment" (mapped from body), so plain details silently
   // vanished and the guard above saw an empty body every single time. Same
-  // shape for reject/reject_project with fields.reason.
+  // shape for reject with fields.reason.
   const withDetails = validateSecretaryIntent(command('comment', { body: null, details: 'وصل التوقيع' }), context('سجل ملاحظة على اللوحة'));
   assert.equal(withDetails.kind, 'command'); assert.equal(withDetails.action, 'comment');
   assert.equal(withDetails.fields.body, 'وصل التوقيع'); assert.equal(withDetails.fields.details, null);

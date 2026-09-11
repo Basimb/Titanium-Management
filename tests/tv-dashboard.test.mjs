@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { activeTasks, overdue, overdueDays, pages, taskRank } from '../components/tv-dashboard-model.ts';
-const task=(overrides={})=>({id:'t',projectId:'p',title:'مهمة',details:'',priority:'red',status:'open',owner:null,suggestedOwner:null,dueDate:'2026-09-06',...overrides});
+const task=(overrides={})=>({id:'t',title:'مهمة',details:'',priority:'red',status:'open',owner:null,suggestedOwner:null,dueDate:'2026-09-06',...overrides});
 test('delay count uses Amman calendar dates across months and excludes completed work',()=>{
  const now=Date.parse('2026-09-02T21:01:00Z');
  assert.equal(overdueDays(task({dueDate:'2026-08-31'}),now),3);
@@ -13,9 +13,9 @@ test('TV rotates every task without dropping the last partial page',()=>{
  const items=Array.from({length:24},(_,i)=>task({id:String(i)}));const result=pages(items,5);
  assert.equal(result.length,5);assert.deepEqual(result.flat(),items);assert.equal(result.at(-1).length,4);assert.deepEqual(pages([],5),[[]]);
 });
-test('TV excludes archived tasks and rejected or archived projects',()=>{
- const data={projects:[{id:'p',status:'active'},{id:'old',status:'active',archivedAt:12},{id:'rejected',status:'rejected'}],tasks:[task(),task({id:'old-task',archivedAt:4}),task({id:'old-project',projectId:'old'}),task({id:'rejected-project',projectId:'rejected'}),task({id:'unknown',projectId:'missing'})]};
- assert.deepEqual(activeTasks(data).map(t=>t.id),['t']);
+test('TV shows every live task and excludes only archived ones',()=>{
+ const data={tasks:[task(),task({id:'old-task',archivedAt:4}),task({id:'second'}),task({id:'restored',archivedAt:null}),task({id:'purged',archivedAt:1})]};
+ assert.deepEqual(activeTasks(data).map(t=>t.id),['t','second','restored']);
 });
 test('overdue changes at Amman midnight and never marks completed or undated work late',()=>{
  assert.equal(overdue(task(),Date.parse('2026-09-06T20:59:59Z')),false);

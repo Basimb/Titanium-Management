@@ -25,11 +25,11 @@ export function migrateAgentSchema(sqlite: DatabaseSync): void {
     sqlite.exec(`
       CREATE TABLE IF NOT EXISTS approvals (
         id TEXT PRIMARY KEY NOT NULL,
-        type TEXT NOT NULL,                -- deadline_extension | task_close | task_ownership | project_create | rule | policy
+        type TEXT NOT NULL,                -- deadline_extension | priority_change | task_close | task_ownership | task_transfer | task_create | tasks_create | rule | policy
         status TEXT DEFAULT 'pending' NOT NULL, -- pending | approved | rejected | expired
         requested_by TEXT NOT NULL,        -- user id
         requested_by_name TEXT NOT NULL,
-        entity_type TEXT NOT NULL,         -- task | project | rule
+        entity_type TEXT NOT NULL,         -- task | rule
         entity_id TEXT,
         summary TEXT NOT NULL,             -- one-line Arabic description shown to the approver
         payload TEXT DEFAULT '{}' NOT NULL,-- JSON: old/new values, reason, draft
@@ -46,7 +46,7 @@ export function migrateAgentSchema(sqlite: DatabaseSync): void {
         id TEXT PRIMARY KEY NOT NULL,
         kind TEXT NOT NULL,                -- assignment | policy | note
         statement TEXT NOT NULL,           -- human-readable rule as approved by the owner
-        match TEXT DEFAULT '{}' NOT NULL,  -- JSON: keywords/project/category the rule applies to
+        match TEXT DEFAULT '{}' NOT NULL,  -- JSON: keywords/category the rule applies to
         effect TEXT DEFAULT '{}' NOT NULL, -- JSON: e.g. {"suggestOwner":"khaled"} or {"requireDueDate":true}
         active INTEGER DEFAULT 1 NOT NULL,
         approved_by TEXT NOT NULL,

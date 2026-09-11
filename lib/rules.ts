@@ -4,7 +4,7 @@ import { migrateManagementActions, resolveManagementActor, type ManagementActor 
 import { can, type PermissionActor } from "./permissions.ts";
 import type { SecretaryChoices } from "./secretary-choices.ts";
 
-export type Rule = { id: string; kind: "assignment" | "policy" | "note"; statement: string; match: { keywords?: string[]; projectId?: string | null; category?: string | null }; effect: { suggestOwner?: string | null; requireDueDate?: boolean; requireOwner?: boolean; watcher?: string | null }; active: number; approvedBy: string; createdAt: number };
+export type Rule = { id: string; kind: "assignment" | "policy" | "note"; statement: string; match: { keywords?: string[]; category?: string | null }; effect: { suggestOwner?: string | null; requireDueDate?: boolean; requireOwner?: boolean; watcher?: string | null }; active: number; approvedBy: string; createdAt: number };
 export const CORRECTION_THRESHOLD = 3;
 
 export const normalizeArabic = (value: string) => value.normalize("NFKC").replace(/[\u064b-\u065f\u0670\u0640]/g, "").replace(/[أإآ]/g, "ا").replace(/ة/g, "ه").replace(/ى/g, "ي").toLowerCase();
@@ -19,26 +19,25 @@ export function activeRules(db: DatabaseSync): Rule[] {
   return (db.prepare("SELECT id,kind,statement,match,effect,active,approved_by AS approvedBy,created_at AS createdAt FROM rules WHERE active=1 ORDER BY created_at").all() as Record<string, unknown>[]).map(hydrate);
 }
 
-/** Rules whose keywords appear in the text (title/details) or that apply to the project. */
-export function matchingRules(db: DatabaseSync, input: { text: string; projectId?: string | null; category?: string | null }): Rule[] {
+/** Rules whose keywords appear in the text (title/details) or whose category matches. */
+export function matchingRules(db: DatabaseSync, input: { text: string; category?: string | null }): Rule[] {
   const haystack = normalizeArabic(input.text);
   return activeRules(db).filter(rule => {
     const keywords = (rule.match.keywords ?? []).map(normalizeArabic).filter(Boolean);
     const byKeyword = keywords.length > 0 && keywords.some(keyword => haystack.includes(keyword));
-    const byProject = !!rule.match.projectId && rule.match.projectId === input.projectId;
     const byCategory = !!rule.match.category && !!input.category && normalizeArabic(rule.match.category) === normalizeArabic(input.category);
-    return byKeyword || byProject || byCategory;
+    return byKeyword || byCategory;
   });
 }
 
 /** Deterministic suggestion the agent may offer before creating a task. Never auto-applied. */
-export function suggestOwner(db: DatabaseSync, input: { text: string; projectId?: string | null }): { ownerId: string; rule: Rule } | null {
+export function suggestOwner(db: DatabaseSync, input: { text: string }): { ownerId: string; rule: Rule } | null {
   for (const rule of matchingRules(db, input)) if (rule.kind === "assignment" && rule.effect.suggestOwner) return { ownerId: rule.effect.suggestOwner, rule };
   return null;
 }
 
 /** Policy checks the server enforces at creation time (after owner approval of the policy). */
-export function policyViolations(db: DatabaseSync, draft: { title: string; projectId?: string | null; dueDate?: string | null; ownerId?: string | null }): string[] {
+export function policyViolations(db: DatabaseSync, draft: { title: string; dueDate?: string | null; ownerId?: string | null }): string[] {
   const problems: string[] = [];
   for (const rule of activeRules(db).filter(rule => rule.kind === "policy")) {
     if (rule.effect.requireDueDate && !draft.dueDate) problems.push(`القاعدة: ${rule.statement} — المهمة بلا موعد`);
@@ -73,10 +72,10 @@ export function recordCorrection(db: DatabaseSync, claimed: ManagementActor, inp
   return { count, proposal: { ...proposal, ownerMessage: `لاحظت أنك صححت هذا ${count} مرات: ${input.from ?? "-"} → ${input.to ?? "-"}.\nهل تعتمد القاعدة التالية؟\n${statement}\n\n(اعتمد / ارفض)` } };
 }
 
-/** Explicit owner statement: "أي مهمة حكومية لدابوق خليها لخالد" → proposal the owner then confirms. */
-export function proposeRuleFromStatement(db: DatabaseSync, claimed: ManagementActor, input: { statement: string; keywords: string[]; suggestOwner?: string | null; projectId?: string | null; policy?: { requireDueDate?: boolean; requireOwner?: boolean } }, options: { now?: number } = {}) {
+/** Explicit owner statement: "أي مهمة حكومية خليها لخالد" → proposal the owner then confirms. */
+export function proposeRuleFromStatement(db: DatabaseSync, claimed: ManagementActor, input: { statement: string; keywords: string[]; suggestOwner?: string | null; policy?: { requireDueDate?: boolean; requireOwner?: boolean } }, options: { now?: number } = {}) {
   const isPolicy = !!input.policy && Object.keys(input.policy).length > 0;
-  return requestRule(db, claimed, { kind: isPolicy ? "policy" : input.suggestOwner ? "assignment" : "note", statement: input.statement, match: { keywords: input.keywords.map(word => normalizeArabic(word)).filter(Boolean), projectId: input.projectId ?? null }, effect: isPolicy ? input.policy : { suggestOwner: input.suggestOwner ?? null } }, options);
+  return requestRule(db, claimed, { kind: isPolicy ? "policy" : input.suggestOwner ? "assignment" : "note", statement: input.statement, match: { keywords: input.keywords.map(word => normalizeArabic(word)).filter(Boolean) }, effect: isPolicy ? input.policy : { suggestOwner: input.suggestOwner ?? null } }, options);
 }
 
 export function deactivateRule(db: DatabaseSync, claimed: ManagementActor, ruleId: string, options: { now?: number } = {}): boolean {

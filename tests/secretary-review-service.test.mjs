@@ -9,15 +9,13 @@ function fixture(t) {
   const db = new DatabaseSync(':memory:'); t.after(() => db.close());
   db.exec(`PRAGMA foreign_keys=ON;
     CREATE TABLE users(id TEXT PRIMARY KEY,name TEXT UNIQUE,role TEXT,active INTEGER,pin_hash TEXT,created_at INTEGER,updated_at INTEGER);
-    CREATE TABLE projects(id TEXT PRIMARY KEY,name TEXT,status TEXT,created_by TEXT,created_at INTEGER,rejection_reason TEXT,rejected_by TEXT,rejected_at INTEGER);
-    CREATE TABLE tasks(id TEXT PRIMARY KEY,project_id TEXT REFERENCES projects(id),title TEXT,details TEXT,priority TEXT,status TEXT,owner TEXT,suggested_owner TEXT,started_at INTEGER,due_date TEXT,completed_at INTEGER,rejection_reason TEXT,created_at INTEGER,updated_at INTEGER,archived_at INTEGER,archived_by TEXT);
+    CREATE TABLE tasks(id TEXT PRIMARY KEY,title TEXT,details TEXT,priority TEXT,status TEXT,owner TEXT,suggested_owner TEXT,started_at INTEGER,due_date TEXT,completed_at INTEGER,rejection_reason TEXT,created_at INTEGER,updated_at INTEGER,archived_at INTEGER,archived_by TEXT);
     CREATE TABLE comments(id INTEGER PRIMARY KEY,task_id TEXT REFERENCES tasks(id),author TEXT,body TEXT,created_at INTEGER);
     CREATE TABLE attachments(id TEXT PRIMARY KEY,task_id TEXT REFERENCES tasks(id),file_name TEXT,content_type TEXT,size INTEGER,object_key TEXT,uploaded_by TEXT,created_at INTEGER);
     CREATE TABLE audit_logs(id INTEGER PRIMARY KEY,actor_user_id TEXT,actor_name TEXT,action TEXT,entity_type TEXT,entity_id TEXT,details TEXT,created_at INTEGER);
     INSERT INTO users VALUES('basem','باسم','admin',1,NULL,1,1),('member','خالد','member',1,NULL,1,1),('other','شادي','member',1,NULL,1,1);
-    INSERT INTO projects VALUES('p','مشروع تجريبي','active','باسم',1,NULL,NULL,NULL),('p2','مشروع ثان','active','باسم',1,NULL,NULL,NULL);
-    INSERT INTO tasks VALUES('t','p','لوحة','تفاصيل تنفيذ','red','progress','خالد','خالد',1,'2026-01-01',NULL,NULL,1,1,NULL,NULL),
-      ('private','p2','مهمة شادي الخاصة','تفاصيل سرية','yellow','progress','شادي','شادي',1,NULL,NULL,NULL,1,1,NULL,NULL);
+    INSERT INTO tasks VALUES('t','لوحة','تفاصيل تنفيذ','red','progress','خالد','خالد',1,'2026-01-01',NULL,NULL,1,1,NULL,NULL),
+      ('private','مهمة شادي الخاصة','تفاصيل سرية','yellow','progress','شادي','شادي',1,NULL,NULL,NULL,1,1,NULL,NULL);
     -- secretaryTaskCard no longer surfaces task.details at all (Basim: "شيل
     -- المطلوب من القصة") -- the last comment is now the only detail-bearing
     -- text a "details" reply shows, so the sensitive marker this file's
@@ -30,7 +28,7 @@ function fixture(t) {
   const run = (plan=emptySecretaryIntent('summary'),extra={},infer) => handleSecretaryEvent(db,event(extra),config,{ infer:infer || (async()=>plan),now:()=>now });
   return {db,config,event,run,get now(){return now;},tick:n=>{now+=n;}};
 }
-function command(action,fields={},taskId='t',projectId=null) { const p=emptySecretaryIntent('command');return {...p,action,taskId,projectId,fields:{...p.fields,...fields}}; }
+function command(action,fields={},taskId='t') { const p=emptySecretaryIntent('command');return {...p,action,taskId,fields:{...p.fields,...fields}}; }
 function teamMessage(text='الاجتماع بكرا الساعة 10',recipientIds=['all-team']) { const p=emptySecretaryIntent('message_team');p.fields.body=text;p.recipientIds=recipientIds;return p; }
 
 const owner = { senderNumber:'12025550103' };
@@ -45,7 +43,7 @@ function forbiddenProvider(t, name) {
   return callback;
 }
 const noProviders = (t,f) => ({infer:forbiddenProvider(t,'infer'),search:forbiddenProvider(t,'search'),now:()=>f.now});
-const businessTables = ['users','projects','tasks','comments','attachments','audit_logs','secretary_pending','secretary_task_intake','secretary_choices','secretary_reminders','secretary_outbox_batches','secretary_outbox_deliveries','secretary_outbox_transport'];
+const businessTables = ['users','tasks','comments','attachments','audit_logs','secretary_pending','secretary_task_intake','secretary_choices','secretary_reminders','secretary_outbox_batches','secretary_outbox_deliveries','secretary_outbox_transport'];
 const businessSnapshot = db => Object.fromEntries(businessTables.map(table => [table,db.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all()]));
 
 test('identity names Basim secretary without inference, search, or business changes', async t => {
@@ -81,7 +79,7 @@ const prohibitedPlans = {
   command: () => command('comment',{body:'تحديث غير مأذون'}),
   message_team: () => teamMessage('إرسال غير مأذون',['member']),
   remind: now => { const p=emptySecretaryIntent('remind');p.taskId='t';p.fields.remindAt=new Date(now+120000).toISOString();return p; },
-  task_draft: () => { const p=emptySecretaryIntent('task_draft');p.intakeMode='start';p.projectId='p';Object.assign(p.fields,{title:'مسودة بديلة غير مأذونة',ownerId:'member',priority:'green',dueDate:'unscheduled'});return p; },
+  task_draft: () => { const p=emptySecretaryIntent('task_draft');p.intakeMode='start';Object.assign(p.fields,{title:'مسودة بديلة غير مأذونة',ownerId:'member',priority:'green',dueDate:'unscheduled'});return p; },
 };
 for (const [kind,makePlan] of Object.entries(prohibitedPlans)) {
   for (const draftState of ['intake','confirmation']) {
@@ -92,9 +90,9 @@ for (const [kind,makePlan] of Object.entries(prohibitedPlans)) {
         const started=await f.run(undefined,{...owner,text:'اضف مهمه تجربة الحفظ'},noInference);
         assert.ok(started.choices);assert.ok(f.db.prepare('SELECT * FROM secretary_task_intake').get());
       } else {
-        const plan=emptySecretaryIntent('task_draft');plan.intakeMode='start';plan.projectId='p';
+        const plan=emptySecretaryIntent('task_draft');plan.intakeMode='start';
         Object.assign(plan.fields,{title:'تجربة حفظ المعاينة',ownerId:'member',priority:'yellow',dueDate:'unscheduled'});
-        const preview=await f.run(plan,{...owner,text:'جهز مهمة جديدة في مشروع تجريبي لخالد بأولوية متوسطة وبدون موعد'});
+        const preview=await f.run(plan,{...owner,text:'جهز مهمة جديدة لخالد بأولوية متوسطة وبدون موعد'});
         assert.equal(preview.status,'confirmation');assert.ok(f.db.prepare('SELECT * FROM secretary_pending').get());
       }
       const before=businessSnapshot(f.db);const inputs=[];
@@ -232,7 +230,7 @@ for (const failure of ['infer','invalid-plan','search']) {
 }
 
 test('review never sends an internal prior question to public search even if the model supplies a harmless query', async t => {
-  const f=fixture(t);await f.run(emptySecretaryIntent('summary'),{text:'شو حالة لوحة في مشروع تجريبي؟'});
+  const f=fixture(t);await f.run(emptySecretaryIntent('summary'),{text:'شو حالة لوحة؟'});
   const result=await handleSecretaryEvent(f.db,f.event({text:'جوابك غلط'}),f.config,{
     infer:async()=>emptySecretaryIntent('search','Public productivity tips'),search:forbiddenProvider(t,'search'),now:()=>f.now,
   });

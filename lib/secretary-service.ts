@@ -3,11 +3,11 @@ import type { DatabaseSync } from "node:sqlite";
 import { executeManagementAction, getManagementSnapshot, migrateManagementActions, ManagementActionError, ACTION_KEYS, type ManagementCommand, type ManagementResult } from "./management-actions.ts";
 import { resolveChatUser, normalizeContactNumber, type ChatUser } from "./team-chat-policy.ts";
 import type { TeamChatConfig, TeamChatEnvelope } from "./team-chat-gateway.ts";
-import { directTaskCreationIntent, emptySecretaryIntent, validateSecretaryIntent, PROJECT_NAME_QUESTION, type SecretaryIntent, type SecretaryModelInput } from "./secretary-intent.ts";
+import { directTaskCreationIntent, emptySecretaryIntent, validateSecretaryIntent, type SecretaryIntent, type SecretaryModelInput } from "./secretary-intent.ts";
 import { priorityTaskQuery, type PriorityTaskQuery } from "./secretary-priority-query.ts";
 import { AGENT_KINDS } from "./secretary-intent.ts";
-import { applyDecision, createProjectBundle, createStandaloneTask, describeProjectBundle, handleAgentIntent, type AgentResult, type ProjectDraftTask } from "./secretary-agent.ts";
-import { listApprovals, requestProjectCreate, requestTaskCreate } from "./approvals.ts";
+import { applyDecision, createTasks, handleAgentIntent, type AgentResult, type TaskDraftTask } from "./secretary-agent.ts";
+import { listApprovals, requestTaskCreate } from "./approvals.ts";
 import { activeRules } from "./rules.ts";
 import { searchKnowledge, formatKnowledgeHits } from "./knowledge.ts";
 import { migrateSecretaryMemory, rememberSecretaryMistake, recallSecretaryMemory, personalMemoryCommand, updatePersonalMemory, personalMemory } from "./secretary-memory.ts";
@@ -17,9 +17,8 @@ import { secretaryReviewRequest, isSecretaryIdentityQuery, isAddressedToSecretar
 import { migrateSecretaryOutbox, getSecretaryOutboxRecipients, createSecretaryOutboxPreview, confirmSecretaryOutboxPreview, getSecretaryOutboxStatus, secretaryOutboxDeliveryLabel, SecretaryOutboxError } from "./secretary-outbox.ts";
 import { migrateSecretaryChoices, createSecretaryChoices, consumeSecretaryChoice, clearSecretaryChoices, secretaryChoiceOptions, peekSecretaryChoiceField, SecretaryChoiceError, type SecretaryChoices, type SecretaryChoiceField } from "./secretary-choices.ts";
 
-type Task = { id: string; projectId: string; title: string; details: string; status: string; priority: string; owner: string | null; suggestedOwner: string | null; dueDate: string | null; updatedAt: number | null; archivedAt: number | null };
-type Project = { id: string; name: string; status: string; updatedAt?: number | null; archivedAt?: number | null };
-export type Snapshot = { tasks: Task[]; projects: Project[]; users: Array<ChatUser>; comments: Array<{ taskId: string; author: string; body: string; createdAt: number }> };
+type Task = { id: string; title: string; details: string; status: string; priority: string; owner: string | null; suggestedOwner: string | null; dueDate: string | null; updatedAt: number | null; archivedAt: number | null };
+export type Snapshot = { tasks: Task[]; users: Array<ChatUser>; comments: Array<{ taskId: string; author: string; body: string; createdAt: number }> };
 type Event = TeamChatEnvelope & { replyToMessageId?: string | null; responseMessageId?: string | null };
 type Result = { status: string; reply: string; taskId?: string; batchId?: string; choices?: SecretaryChoices };
 type Pending = { token: string; command_json: string; snapshot_hash: string; original_text: string; source_message_id: string; expires_at: number };
@@ -31,24 +30,14 @@ type Pending = { token: string; command_json: string; snapshot_hash: string; ori
 type TaskChoiceRow = { token: string; kind: string; candidate_ids: string; fields_json: string; original_text: string; source_message_id: string; expires_at: number };
 type ConfirmationView = { token: string; preview_event_key: string; requires_restatement: number };
 type HistoryRow = { original_text: string; result_json: string; scope_json: string };
-// newProjectName holds a project name the user gave that doesn't match any
-// existing project -- captured instead of re-asking "which project?", and
-// resolved into a real project (created together with the task) once the
-// rest of the draft is complete. Mutually exclusive with projectId in
-// practice: availableDraft clears it the moment a real projectId resolves.
-// noProject is the third, explicit "بدون مشروع" answer to that same question
-// -- present (true) only when chosen, absent otherwise (never a literal
-// false) so a persisted draft with no project answer yet still serializes
-// identically to before this field existed. Mutually exclusive with both
-// projectId and newProjectName -- see availableDraft.
-type TaskDraft = { projectId: string | null; newProjectName: string | null; noProject?: true; title: string | null; details: string | null; priority: "red" | "yellow" | "green" | null; ownerId: string | null; dueDate: string | null };
+type TaskDraft = { title: string | null; details: string | null; priority: "red" | "yellow" | "green" | null; ownerId: string | null; dueDate: string | null };
 type IntakeRow = { draft_json: string; last_event_key: string; expires_at: number };
 const ORIGIN = "https://www.management.titanium-pharmacy.com";
 const CONFIRM_MS = 10 * 60_000;
 const HISTORY_MS = 24 * 60 * 60_000;
 const HISTORY_CHARS = 6000;
 const INTAKE_MS = 30 * 60_000;
-const SENSITIVE = new Set(["edit_project", "approve_project", "reject_project", "restore_project", "archive_project", "delete_project", "edit_task", "cancel_claim", "submit", "approve", "reject", "reopen", "reassign", "move_task", "archive_task", "restore_task", "delete_task"]);
+const SENSITIVE = new Set(["edit_task", "cancel_claim", "submit", "approve", "reject", "reopen", "reassign", "archive_task", "restore_task", "delete_task"]);
 // Basim's "شرح الأوامر" footer: a short standalone reminder of the four
 // WhatsApp commands an EMPLOYEE (never Basim -- he doesn't need this) can
 // type about a task, sent as a SEPARATE follow-up message right after any
@@ -199,8 +188,8 @@ function notifyTaskLegend(db: DatabaseSync, toUser: string, now: number, withPol
 // display "مكتملة" (completed) instead. Same underlying status value
 // ("completed"), just the word shown for it everywhere a task's status is
 // rendered (task cards, report headers, the TV board).
-const LABELS: Record<string, string> = { open: "بانتظار الاستلام", progress: "قيد التنفيذ", approval: "بانتظار اعتماد باسم", completed: "مكتملة", active: "نشط", pending: "بانتظار الموافقة", rejected: "مرفوض" };
-const ACTION_LABELS: Record<string, string> = { add_project: "إنشاء مشروع", edit_project: "تعديل المشروع", approve_project: "اعتماد المشروع", reject_project: "رفض المشروع", restore_project: "إعادة فتح المشروع", archive_project: "أرشفة المشروع", delete_project: "حذف المشروع نهائيًا", add_task: "إنشاء مهمة", edit_task: "تعديل المهمة", claim: "استلام المهمة", cancel_claim: "إرجاع المهمة", comment: "إضافة تعليق", submit: "إرسال المهمة لاعتماد باسم", approve: "اعتماد إنجاز المهمة", reject: "رفض الإنجاز", reopen: "إعادة فتح المهمة", reassign: "تغيير المسؤول", move_task: "نقل المهمة", archive_task: "أرشفة المهمة", restore_task: "استعادة المهمة", delete_task: "حذف المهمة نهائيًا" };
+const LABELS: Record<string, string> = { open: "بانتظار الاستلام", progress: "قيد التنفيذ", approval: "بانتظار اعتماد باسم", completed: "مكتملة" };
+const ACTION_LABELS: Record<string, string> = { add_task: "إنشاء مهمة", edit_task: "تعديل المهمة", claim: "استلام المهمة", cancel_claim: "إرجاع المهمة", comment: "إضافة تعليق", submit: "إرسال المهمة لاعتماد باسم", approve: "اعتماد إنجاز المهمة", reject: "رفض الإنجاز", reopen: "إعادة فتح المهمة", reassign: "تغيير المسؤول", archive_task: "أرشفة المهمة", restore_task: "استعادة المهمة", delete_task: "حذف المهمة نهائيًا" };
 const clean = (value: unknown, max = 200) => String(value ?? "").replace(/[\x00-\x1f\u202a-\u202e\u2066-\u2069]/g, " ").slice(0, max);
 // Seed content for secretary_playbook (id='main') -- the standing team
 // instructions retrievable on demand by anyone sending the exact phrase
@@ -246,58 +235,15 @@ export function migrateSecretary(db: DatabaseSync) {
     CREATE TABLE IF NOT EXISTS secretary_task_intake (conversation_key TEXT PRIMARY KEY,draft_json TEXT NOT NULL,last_event_key TEXT NOT NULL,expires_at INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS secretary_reminders (id TEXT PRIMARY KEY,actor_id TEXT NOT NULL,sender_number TEXT NOT NULL,group_id TEXT,task_id TEXT NOT NULL,due_at INTEGER NOT NULL,state TEXT NOT NULL DEFAULT 'pending',created_at INTEGER NOT NULL,sent_at INTEGER,sending_at INTEGER,responded_at INTEGER,reply_message_id TEXT NOT NULL);
     CREATE INDEX IF NOT EXISTS secretary_reminders_due ON secretary_reminders(state,due_at);
-    CREATE TABLE IF NOT EXISTS secretary_last_project (conversation_key TEXT PRIMARY KEY,project_id TEXT NOT NULL,project_name TEXT NOT NULL,expires_at INTEGER NOT NULL);
-    CREATE TABLE IF NOT EXISTS secretary_project_name_pending (conversation_key TEXT PRIMARY KEY,expires_at INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS secretary_playbook (id TEXT PRIMARY KEY,body TEXT NOT NULL,updated_by TEXT NOT NULL,updated_at INTEGER NOT NULL);`);
   // Seed once; never overwrites a value Basim already saved via the
   // admin-only update command (INSERT OR IGNORE keyed on the fixed 'main' id).
   db.prepare("INSERT OR IGNORE INTO secretary_playbook (id,body,updated_by,updated_at) VALUES ('main',?,?,?)").run(DEFAULT_PLAYBOOK, "system", 0);
 }
-// Short-lived "which project are we talking about" memory per conversation --
-// set whenever a task is actually attached to a project (existing or just
-// created) through the task_draft flow, so a follow-up "افتح مهمة كمان: ..."
-// with no project named attaches to the same project instead of asking again.
-// Deliberately short (see LAST_PROJECT_MS) so it never silently reattaches an
-// unrelated later request to a stale project.
-const LAST_PROJECT_MS = 20 * 60_000;
-function rememberLastProject(db: DatabaseSync, key: string, projectId: string, projectName: string, now: number) {
-  db.prepare("INSERT INTO secretary_last_project VALUES(?,?,?,?) ON CONFLICT(conversation_key) DO UPDATE SET project_id=excluded.project_id,project_name=excluded.project_name,expires_at=excluded.expires_at")
-    .run(key, projectId, projectName, now + LAST_PROJECT_MS);
-}
-function recentProject(db: DatabaseSync, key: string, now: number): { id: string; name: string } | null {
-  const row = db.prepare("SELECT project_id AS id,project_name AS name,expires_at AS expiresAt FROM secretary_last_project WHERE conversation_key=?").get(key) as { id: string; name: string; expiresAt: number } | undefined;
-  return row && row.expiresAt > now ? { id: row.id, name: row.name } : null;
-}
-// Marks that we just asked PROJECT_NAME_QUESTION ("شو اسم المشروع؟") for this
-// conversation. Without this, the very next reply -- even a bare name typed
-// right after the question -- has to be re-inferred by the model from raw
-// chat history alone with no explicit signal that it is answering that
-// specific question, which is exactly what silently failed live: a plain
-// project name got read as an unrelated, not-understood message. Single-use
-// and short-lived (see PROJECT_NAME_PENDING_MS) so a stale marker can never
-// force a later, unrelated message to be misread as a project name.
-const PROJECT_NAME_PENDING_MS = 20 * 60_000;
-function markAwaitingProjectName(db: DatabaseSync, key: string, now: number) {
-  db.prepare("INSERT INTO secretary_project_name_pending VALUES(?,?) ON CONFLICT(conversation_key) DO UPDATE SET expires_at=excluded.expires_at").run(key, now + PROJECT_NAME_PENDING_MS);
-}
 function actorFor(db: DatabaseSync, event: Event, config: TeamChatConfig) {
   return resolveChatUser({ senderNumber: event.senderNumber, groupId: event.groupId }, config.contacts, db.prepare("SELECT id,name,role,active FROM users").all() as ChatUser[], config.allowedGroupIds);
 }
 function stateFor(db: DatabaseSync, actor: ChatUser): Snapshot { return getManagementSnapshot(db, actor) as unknown as Snapshot; }
-// A member's/manager's own snapshot only lists projects tied to tasks already
-// visible to them (see getManagementSnapshot's per-actor filtering), which is
-// right for browsing but wrong for naming a project to open a brand-new task
-// in -- an employee with no task yet in a project could never reference it.
-// Creation specifically needs the plain list of active project names (id and
-// name only, no task/comment content), so it is unioned in only for that.
-function activeProjectNames(db: DatabaseSync): Project[] {
-  return db.prepare("SELECT id,name,status,updated_at AS updatedAt,archived_at AS archivedAt FROM projects WHERE archived_at IS NULL AND status='active'").all() as Project[];
-}
-function withCreatableProjects(state: Snapshot, actor: ChatUser, db: DatabaseSync): Snapshot {
-  if (actor.id === "basem" && actor.role === "admin") return state;
-  const seen = new Set(state.projects.map(project => project.id));
-  return { ...state, projects: [...state.projects, ...activeProjectNames(db).filter(project => !seen.has(project.id))] };
-}
 // Same base filter + overdue/pending-first ordering as the displayed task
 // list (readReply's "ordered" array) so a task's position number is always
 // identical wherever it's shown -- the list a user sees and the list any
@@ -314,13 +260,11 @@ function orderedTasks(state: Snapshot, now: number): Task[] {
 // approval-status tasks stay in (for positional parity with the display)
 // but keep their real status so callers can reject taking those cleanly.
 function ownershipCandidates(state: Snapshot, now: number): NonNullable<SecretaryModelInput["ownershipCandidates"]> {
-  return orderedTasks(state, now).slice(0, 80).map(task => {
-    const project = state.projects.find(p => p.id === task.projectId);
-    return { id: task.id, title: task.title, projectName: project?.name || "مشروع غير محدد", status: task.status, assignee: task.owner || task.suggestedOwner };
-  });
+  return orderedTasks(state, now).slice(0, 80)
+    .map(task => ({ id: task.id, title: task.title, status: task.status, assignee: task.owner || task.suggestedOwner }));
 }
-function fingerprint(state: Snapshot) { return hash({ tasks: state.tasks, projects: state.projects, users: state.users.map(u => ({ id: u.id, name: u.name, role: u.role, active: u.active })), comments: state.comments }); }
-function scopeAllowed(scope: string[], state: Snapshot) { const ids = new Set([...state.tasks.map(t => "t:" + t.id), ...state.projects.map(p => "p:" + p.id)]); return scope.every(id => ids.has(id)); }
+function fingerprint(state: Snapshot) { return hash({ tasks: state.tasks, users: state.users.map(u => ({ id: u.id, name: u.name, role: u.role, active: u.active })), comments: state.comments }); }
+function scopeAllowed(scope: string[], state: Snapshot) { const ids = new Set(state.tasks.map(t => "t:" + t.id)); return scope.every(id => ids.has(id)); }
 function conversationHistory(db: DatabaseSync, key: string, state: Snapshot, now: number, anchor?: { created_at: number; sequence: number }): HistoryRow[] {
   const rows = (anchor
     ? db.prepare("SELECT original_text,result_json,scope_json FROM secretary_events WHERE conversation_key=? AND created_at>? AND (created_at<? OR (created_at=? AND rowid<=?)) ORDER BY created_at DESC,rowid DESC LIMIT 8")
@@ -387,7 +331,6 @@ function log(db: DatabaseSync, actor: ChatUser, event: Event, action: string, de
   db.prepare("INSERT INTO audit_logs(actor_user_id,actor_name,action,entity_type,entity_id,details,created_at) VALUES(?,?,?,'secretary',?,?,?)")
     .run(actor.id, actor.name, action, eventKey(event), JSON.stringify({ summary: "محادثة سكرتير الإدارة", source: "whatsapp_secretary", sourceMessageId: event.messageId, senderNumber: event.senderNumber, originalText: event.text, ...details }), now);
 }
-function taskLink(task: Task) { return `${ORIGIN}/?project=${encodeURIComponent(task.projectId)}&task=${encodeURIComponent(task.id)}`; }
 const PRIORITIES: Record<string, { icon: string; label: string; color: string }> = {
   red: { icon: "🔴", label: "قصوى", color: "الحمراء" },
   yellow: { icon: "🟡", label: "متوسطة", color: "الصفراء" },
@@ -411,15 +354,6 @@ function numberedTaskList(tasks: Task[], now: number) {
     const suffix = overdue ? ` • 🔴 متأخرة` : task.dueDate ? ` • الموعد: ${clean(task.dueDate, 10)}` : "";
     return `${stableOrdinal(index + 1, tasks.length)} ${priority?.icon || "⚪"} ${clean(task.title, 90).replace(/\*/g, "")} — ${LABELS[task.status] || clean(task.status)} • ${clean(task.owner || task.suggestedOwner || "غير معيّن", 50)}${suffix}`;
   }).join("\n");
-}
-// Used to bold-and-🔵 any project name the model's free chat/clarify text
-// mentioned inline -- Basim asked for zero special treatment of the concept
-// anywhere, even a visual hint that a name is "a project", so this now only
-// strips a stray literal "المشروع:" label the model might still emit,
-// leaving the rest of the line as ordinary text (project names themselves,
-// like "دابوق", are still fine -- he asked about them himself in that case).
-export function formatSecretaryProjectHeadings(reply: string, _state: Pick<Snapshot, "projects" | "tasks">) {
-  return reply.split("\n").map(line => line.replace(/^(\s*(?:[-•]|\d+[.)])?\s*)المشروع:\s*/u, "$1")).join("\n");
 }
 export function secretaryTaskCard(task: Task, state: Snapshot, now: number, detailed = false) {
   const latest = state.comments.filter(c => c.taskId === task.id).sort((a, b) => b.createdAt - a.createdAt)[0];
@@ -465,10 +399,9 @@ function priorityReadReply(query: Extract<PriorityTaskQuery, { kind: "query" }>,
   const today = new Date(now + 3 * 3600_000).toISOString().slice(0, 10);
   const owner = query.ownerId ? state.users.find(u => u.id === query.ownerId) : null;
   const tasks = state.tasks.filter(t => !t.archivedAt && t.priority === query.priority
-    && (!query.projectId || t.projectId === query.projectId)
     && (!query.ownerId || !!owner && (t.owner || t.suggestedOwner) === owner.name)
     && (!query.status || (query.status === "overdue" ? t.status !== "completed" && !!t.dueDate && t.dueDate < today : t.status === query.status)))
-    .sort((a, b) => a.projectId.localeCompare(b.projectId) || a.id.localeCompare(b.id, "en", { numeric: true }));
+    .sort((a, b) => a.id.localeCompare(b.id, "en", { numeric: true }));
   const header = `${priority.icon} *المهام ${priority.color} — أولوية ${priority.label}*${owner ? `\nالمسؤول: ${clean(owner.name, 60)}` : ""}${query.status ? `\nالحالة: ${query.status === "overdue" ? "متأخرة عن الموعد" : LABELS[query.status]}` : ""}\nالمطابق ضمن صلاحياتك (دون الأرشيف): ${tasks.length}\nاللون للأولوية؛ حالة التنفيذ مذكورة لكل مهمة.\n`;
   const offset = query.offset || 0;
   const cards: string[] = [];
@@ -482,7 +415,7 @@ function priorityReadReply(query: Extract<PriorityTaskQuery, { kind: "query" }>,
   const footer = !tasks.length ? "\nما في مهام تطابق هذا الطلب حاليًا."
     : !cards.length ? `\nالقائمة فيها ${tasks.length} مهام فقط. ابدأ من 1.`
     : `\n\nعرض ${offset + 1}–${next} من ${tasks.length}.${next < tasks.length ? ` للتكملة اكتب: «${clean(continuation, 260)} من ${next + 1}».` : ""}`;
-  return { result: { status: "summary", reply: header + "\n" + cards.join("\n\n") + footer }, scope: [...tasks.map(t => "t:" + t.id), ...(query.projectId ? ["p:" + query.projectId] : [])] };
+  return { result: { status: "summary", reply: header + "\n" + cards.join("\n\n") + footer }, scope: tasks.map(t => "t:" + t.id) };
 }
 function readReply(plan: SecretaryIntent, actor: ChatUser, state: Snapshot, now: number, privateChat: boolean): { result: Result; scope: string[] } {
   const greeting = `أهلًا يا ${clean(actor.name, 60)}، `;
@@ -500,16 +433,14 @@ function readReply(plan: SecretaryIntent, actor: ChatUser, state: Snapshot, now:
       : `احكيلي بطريقتك: شو مهامي؟ سجل تحديث على مهمة قيد التنفيذ، أو اسألني عن أي مهمة بالاسم.\n${TASK_COMMANDS_LEGEND}\nولو عندك مهمة معروضة عليك وبعدك ما استلمتها: اكتب «استلمت» لبدء التنفيذ.`;
     return { result: { status: "summary", reply: `${greeting}${SECRETARY_IDENTITY}\n${body}\nالدخول للموقع برمز خاص على واتسابك المسجّل:\n${ORIGIN}/` }, scope: [] };
   }
-  if (plan.kind === "projects") return { result: { status: "summary", reply: greeting + "\n\n*المشاريع المتاحة إلك*\n\n" + (state.projects.length ? state.projects.slice(0, 16).map(p => `🔵 *${clean(p.name, 100)}* — ${LABELS[p.status] || clean(p.status)}`).join("\n\n") : "ما في مشاريع متاحة إلك حاليًا.") }, scope: state.projects.map(p => "p:" + p.id) };
   if (plan.kind === "details") {
     const task = state.tasks.find(t => t.id === plan.taskId);
     if (task) {
       // Group replies never carry an interactive poll (see the "never a live
       // poll in the group" convention already applied to approvals above).
       const choices = privateChat ? taskActionPoll(task, actor.name, now) : undefined;
-      return { result: { status: "summary", reply: `${greeting}\n${secretaryTaskCard(task, state, now, true)}\n\nاحكيلي شو صار معك أو شو بدك أعمل عليها.`, taskId: task.id, ...(choices ? { choices } : {}) }, scope: ["t:" + task.id, "p:" + task.projectId] };
+      return { result: { status: "summary", reply: `${greeting}\n${secretaryTaskCard(task, state, now, true)}\n\nاحكيلي شو صار معك أو شو بدك أعمل عليها.`, taskId: task.id, ...(choices ? { choices } : {}) }, scope: ["t:" + task.id] };
     }
-    if (plan.projectId) { const project = state.projects.find(p => p.id === plan.projectId); if (project) { const tasks = state.tasks.filter(t => t.projectId === project.id); return { result: { status: "summary", reply: `🔵 *${clean(project.name)}* — ${LABELS[project.status] || clean(project.status)}\n${tasks.length} مهام متاحة إلك، ${tasks.filter(t => t.status === "completed").length} مكتملة.\n\n${tasks.slice(0, 6).map(t => secretaryTaskCard(t, state, now)).join("\n\n")}` }, scope: ["p:" + project.id, ...tasks.map(t => "t:" + t.id)] }; } }
     return { result: { status: "clarify", reply: "أي مهمة بدك أشرح لك؟" }, scope: [] };
   }
   // "مهام خالد" names one person -- report used to always answer with every
@@ -560,8 +491,6 @@ function readReply(plan: SecretaryIntent, actor: ChatUser, state: Snapshot, now:
 function commandFrom(plan: SecretaryIntent, state: Snapshot): Record<string, unknown> {
   const command: Record<string, unknown> = { action: plan.action };
   if (plan.taskId) command.taskId = plan.taskId;
-  if (plan.projectId && (plan.action?.endsWith("_project") || plan.action === "add_task" || plan.action === "move_task")) command.projectId = plan.projectId;
-  if (plan.action === "add_project") delete command.projectId;
   // The planner's "command" tool exposes every field so it can describe any
   // action, but each action only ACCEPTS a fixed subset (see ACTION_KEYS in
   // management-actions.ts) -- e.g. "submit" takes no "details". A model that
@@ -576,17 +505,14 @@ function commandFrom(plan: SecretaryIntent, state: Snapshot): Record<string, unk
     command[mapped] = value;
   }
   const task = state.tasks.find(t => t.id === plan.taskId);
-  const project = state.projects.find(p => p.id === (task?.projectId || plan.projectId));
-  if (task) Object.assign(command, { expectedUpdatedAt: task.updatedAt, expectedStatus: task.status, expectedProjectId: task.projectId });
-  if (project) Object.assign(command, { expectedProjectUpdatedAt: project.updatedAt ?? null, ...(project.status !== "archived" ? { expectedProjectStatus: project.status } : {}) });
-  if (plan.action === "move_task") command.expectedTargetProjectUpdatedAt = state.projects.find(p => p.id === plan.projectId)?.updatedAt ?? null;
+  if (task) Object.assign(command, { expectedUpdatedAt: task.updatedAt, expectedStatus: task.status });
   return command;
 }
 function commandDescription(command: Record<string, unknown>, state: Snapshot) {
-  const task = state.tasks.find(t => t.id === command.taskId); const project = state.projects.find(p => p.id === command.projectId);
+  const task = state.tasks.find(t => t.id === command.taskId);
   const employee = state.users.find(u => u.id === command.ownerId);
-  const lines = [ACTION_LABELS[String(command.action)] || "التغيير المطلوب", task ? `المهمة: ${clean(task.title)}` : null, project ? `المشروع: ${clean(project.name)}` : null,
-    command.title ? `العنوان: ${clean(command.title)}` : null, command.name ? `الاسم: ${clean(command.name)}` : null,
+  const lines = [ACTION_LABELS[String(command.action)] || "التغيير المطلوب", task ? `المهمة: ${clean(task.title)}` : null,
+    command.title ? `العنوان: ${clean(command.title)}` : null,
     command.details ? `التفاصيل: ${clean(command.details, 500)}` : null, employee ? `المسؤول: ${clean(employee.name)}` : null,
     command.comment ? `التعليق: ${clean(command.comment, 500)}` : null,
     command.priority ? `الأولوية: ${PRIORITIES[String(command.priority)]?.label || "غير محددة"}` : null,
@@ -783,8 +709,7 @@ function pendingTaskDraft(pending: Pending | undefined, snapshotHash: string, no
   if (!pending || pending.expires_at <= now || pending.snapshot_hash !== snapshotHash) return null;
   const command = JSON.parse(pending.command_json);
   if (command.action !== "add_task") return null;
-  return { projectId: typeof command.projectId === "string" ? command.projectId : null, newProjectName: null,
-    title: typeof command.title === "string" ? command.title : null, details: typeof command.details === "string" ? command.details : null,
+  return { title: typeof command.title === "string" ? command.title : null, details: typeof command.details === "string" ? command.details : null,
     priority: ["red", "yellow", "green"].includes(command.priority) ? command.priority : null,
     ownerId: command.ownerId === null ? "unassigned" : typeof command.ownerId === "string" ? command.ownerId : null,
     dueDate: command.dueDate === null ? "unscheduled" : typeof command.dueDate === "string" ? command.dueDate : null };
@@ -793,27 +718,14 @@ function availableDraft(draft: TaskDraft, state: Snapshot): TaskDraft {
   const date = draft.dueDate;
   const validDate = date === "unscheduled" || (typeof date === "string" && /^\d{4}-\d{2}-\d{2}$/.test(date)
     && Number.isFinite(Date.parse(`${date}T00:00:00Z`)) && new Date(`${date}T00:00:00Z`).toISOString().slice(0, 10) === date);
-  const hasProject = state.projects.some(project => project.id === draft.projectId && project.status === "active" && !project.archivedAt);
-  // projectId/newProjectName/noProject are mutually exclusive answers to the
-  // same "which project" question -- a resolved real project always wins.
-  const noProject = !hasProject && draft.noProject === true;
-  return { projectId: hasProject ? draft.projectId : null,
-    // A pending new-project name only matters while no real project has
-    // resolved yet -- once one has (e.g. a later turn matched an existing
-    // project instead), drop it so a duplicate project is never created
-    // alongside the real one.
-    newProjectName: hasProject || noProject ? null : (draft.newProjectName?.trim().slice(0, 240) || null),
-    ...(noProject ? { noProject: true as const } : {}),
-    title: draft.title?.trim() || null, details: draft.details?.trim() || null,
+  return { title: draft.title?.trim() || null, details: draft.details?.trim() || null,
     priority: draft.priority && ["red", "yellow", "green"].includes(draft.priority) ? draft.priority : null,
     ownerId: draft.ownerId === "unassigned" || state.users.some(user => user.id === draft.ownerId && user.active === 1) ? draft.ownerId : null,
     dueDate: validDate ? date : null };
 }
-function intakeQuestion(draft: TaskDraft, state: Snapshot): string | null {
-  // A named-but-unknown project (newProjectName) or an explicit "بدون مشروع"
-  // both count as answered -- the former is created together with the task,
-  // the latter skips a project entirely (see taskIntake's noProject branch).
-  if (!draft.projectId && !draft.newProjectName && !draft.noProject) return `بأي مشروع بدك أضيف المهمة؟ لو مشروع جديد، اذكر اسمه وبفتحه إلك. تقدر كمان تقول «بدون مشروع».${state.projects.some(project => project.status === "active") ? ` المشاريع النشطة: ${state.projects.filter(project => project.status === "active").slice(0, 8).map(project => clean(project.name, 90)).join("، ")}.` : ""}`;
+// A task is a flat, standalone record, so the intake questionnaire starts
+// straight at the work itself -- there is no "which project?" step at all.
+function intakeQuestion(draft: TaskDraft): string | null {
   if (!draft.title) return "شو المهمة أو الشغل المطلوب بالضبط؟";
   if (!draft.ownerId) return "مين بدك يمسك المهمة؟ اذكر الموظف، أو قل «بدون مسؤول حاليًا».";
   if (!draft.priority) return "شو أولويتها: 🔴 قصوى، 🟡 متوسطة، ولا 🟢 عادية؟ هاي أولوية الشغل، مش حالة تنفيذه.";
@@ -821,11 +733,9 @@ function intakeQuestion(draft: TaskDraft, state: Snapshot): string | null {
   return null;
 }
 function choiceCatalogHash(state: Snapshot) {
-  return hash({ projects: state.projects.map(project => ({ id: project.id, name: project.name, status: project.status, updatedAt: project.updatedAt, archivedAt: project.archivedAt })),
-    users: state.users.map(user => ({ id: user.id, name: user.name, active: user.active, role: user.role })) });
+  return hash({ users: state.users.map(user => ({ id: user.id, name: user.name, active: user.active, role: user.role })) });
 }
 function missingChoiceField(draft: TaskDraft): Exclude<SecretaryChoiceField, "approvalDecision"> | null {
-  if (!draft.projectId && !draft.newProjectName && !draft.noProject) return "projectId";
   if (!draft.title) return null;
   if (!draft.ownerId) return "ownerId";
   if (!draft.priority) return "priority";
@@ -837,9 +747,9 @@ function intakeChoices(db: DatabaseSync, actor: ChatUser, state: Snapshot, draft
   // back to a plain free-text question instead.
   if (actor.id !== "basem" || actor.role !== "admin") return undefined;
   const field = missingChoiceField(draft); if (!field) return undefined;
-  const options = secretaryChoiceOptions(field, { projects: state.projects.filter(project => project.status === "active" && !project.archivedAt), users: state.users.filter(user => user.active === 1), now });
+  const options = secretaryChoiceOptions(field, { users: state.users.filter(user => user.active === 1), now });
   if (!options.length) return undefined;
-  const titles = { projectId: "اختار المشروع", ownerId: "مين المسؤول عن المهمة؟", priority: "اختار الأولوية، وليس حالة التنفيذ", dueDate: "اختار موعد المهمة بتوقيت عمّان" };
+  const titles = { ownerId: "مين المسؤول عن المهمة؟", priority: "اختار الأولوية، وليس حالة التنفيذ", dueDate: "اختار موعد المهمة بتوقيت عمّان" };
   return createSecretaryChoices(db, { conversationKey: key, actorId: actor.id, draftVersion: hash(intakeRow(db, key)), catalogHash: choiceCatalogHash(state),
     field, title: titles[field], options, now, expiresAt: Math.min(now + INTAKE_MS, intakeRow(db, key)?.expires_at ?? now) });
 }
@@ -847,10 +757,10 @@ function currentIntakeQuestion(db: DatabaseSync, event: Event, actor: ChatUser, 
   const live = intakeRow(db, key);
   if (!live || live.expires_at <= now) return null;
   const draft = availableDraft(JSON.parse(live.draft_json), state);
-  const question = intakeQuestion(draft, state);
-  if (!question) return { result: { status: "clarify", reply: "لم أنشئ المهمة؛ نحتاج معاينة نهائية وموافقتك عليها قبل التنفيذ." }, scope: draft.projectId ? ["p:" + draft.projectId] : [] };
+  const question = intakeQuestion(draft);
+  if (!question) return { result: { status: "clarify", reply: "لم أنشئ المهمة؛ نحتاج معاينة نهائية وموافقتك عليها قبل التنفيذ." }, scope: [] };
   const choices = event.groupId === null ? intakeChoices(db, actor, state, draft, key, now) : undefined;
-  return { result: { status: "clarify", reply: question + (choices ? `\n\n${choices.options.map(option => option.label).join("\n")}\nاختار خيارًا واحدًا، أو اكتب اسم الخيار بالكلام.` : ""), ...(choices ? { choices } : {}) }, scope: draft.projectId ? ["p:" + draft.projectId] : [] };
+  return { result: { status: "clarify", reply: question + (choices ? `\n\n${choices.options.map(option => option.label).join("\n")}\nاختار خيارًا واحدًا، أو اكتب اسم الخيار بالكلام.` : ""), ...(choices ? { choices } : {}) }, scope: [] };
 }
 function taskIntake(db: DatabaseSync, event: Event, actor: ChatUser, state: Snapshot, plan: SecretaryIntent,
   key: string, existingDraft: TaskDraft | null, now: number, freeTextField?: SecretaryChoiceField): Result {
@@ -864,144 +774,61 @@ function taskIntake(db: DatabaseSync, event: Event, actor: ChatUser, state: Snap
     clearSecretaryChoices(db, key);
     return save(db, event, actor, { status: "clarify", reply: "ما في مسودة مهمة حالية نكمل عليها. احكيلي المهمة الجديدة المطلوبة من البداية." }, [], now);
   }
-  // "no_project" is a projectId sentinel (mirrors ownerId's "unassigned" and
-  // dueDate's "unscheduled") the planner emits for an explicit "بدون مشروع"
-  // request -- see validateSecretaryIntent/the PROJECT WHILE OPENING A TASK
-  // prompt in secretary-intent.ts. It never reaches availableDraft as a
-  // literal projectId; translate it to the internal noProject flag here.
-  const noProjectChoice = plan.projectId === "no_project";
-  const proposed: TaskDraft = { projectId: noProjectChoice ? null : plan.projectId, newProjectName: plan.fields.name,
-    ...(noProjectChoice ? { noProject: true as const } : {}),
-    title: plan.fields.title, details: plan.fields.details, priority: plan.fields.priority, ownerId: plan.fields.ownerId, dueDate: plan.fields.dueDate };
+  const proposed: TaskDraft = { title: plan.fields.title, details: plan.fields.details,
+    priority: plan.fields.priority, ownerId: plan.fields.ownerId, dueDate: plan.fields.dueDate };
   if (plan.intakeMode === "continue" && existingDraft) {
     for (const field of Object.keys(proposed) as Array<keyof TaskDraft>) {
       if (proposed[field] === null) Object.assign(proposed, { [field]: existingDraft[field] });
     }
-    if (noProjectChoice) {
-      // The generic restore-from-existingDraft loop above has no idea
-      // proposed.projectId was deliberately nulled by THIS turn's sentinel
-      // (it looks like any other unanswered field) and would otherwise
-      // resurrect an older real project/newProjectName answer over it.
-      // An explicit "بدون مشروع" this turn always wins.
-      proposed.projectId = null; proposed.newProjectName = null;
-    } else if (!proposed.noProject && proposed.projectId === null && !proposed.newProjectName && existingDraft.noProject) {
-      // noProject is a present-or-absent sentinel, not part of the
-      // null-means-unanswered convention above, so it never gets picked up
-      // by that generic loop -- carry it over explicitly, but only when this
-      // turn didn't just answer the project question a different way.
-      proposed.noProject = true;
-    }
   }
-  // A brand-new task-open request (not a continuation) that doesn't name any
-  // project at all quietly attaches to whichever project a task was just
-  // filed/created under in this same conversation, if that was recent -- see
-  // rememberLastProject. This is what lets "افتح مهمة كمان: ..." right after
-  // opening one keep going without repeating the project name; naming a
-  // different project explicitly always overrides it. An explicit "بدون
-  // مشروع" this same turn must never be silently overridden by that memory.
-  if (plan.intakeMode === "start" && proposed.projectId === null && !proposed.newProjectName && !proposed.noProject) {
-    const recent = recentProject(db, key, now);
-    if (recent) proposed.projectId = recent.id;
-  }
-  // Basim/admin is never forced to pick a project: on a brand-new draft where
-  // he still hasn't named one (and none was just reused above), the task
-  // opens standalone instead of the intake question blocking on it -- see
-  // create_standalone_task below. He can still name a project this or a
-  // later turn; that always wins over this default (see the
-  // noProjectChoice/continue-mode handling above). This is deliberately
-  // start-only: a "continue" turn reaches here with proposed.projectId still
-  // null only because a project it already had got invalidated meanwhile
-  // (e.g. rejected/archived -- see availableDraft's hasProject check on the
-  // existingDraft above), and that case must keep re-asking for a project,
-  // never silently fall back to standalone. Employees keep naming a project
-  // every turn for now -- there is no request-to-Basim path yet for a
-  // project-less employee task.
-  if (isAdmin && plan.intakeMode === "start" && proposed.projectId === null && !proposed.newProjectName && !proposed.noProject) proposed.noProject = true;
   // An employee always opens a task for himself -- there is no one else to
   // assign it to from this flow -- so the owner question never applies to him.
   if (!isAdmin && proposed.ownerId === null) proposed.ownerId = actor.id;
-  // "بدون مشروع" creates a real (if invisible) standalone project behind the
-  // scenes -- kept an owner-only capability for now, like every other direct
-  // creation shortcut. The tappable choice never even reaches a non-admin
-  // (see intakeChoices), so the only way here is free text the planner
-  // mapped to the sentinel anyway; decline clearly instead of silently
-  // dropping the answer or filing a request under a made-up project.
-  if (!isAdmin && proposed.noProject) {
-    return save(db, event, actor, { status: "clarify", reply: "فتح مهمة بدون مشروع متاح لباسم فقط حاليًا. اذكر اسم مشروع موجود، أو اسم مشروع جديد وبفتحه مع المهمة." }, [], now);
-  }
   const draft = availableDraft(proposed, state);
   clearSecretaryChoices(db, key);
   // Collecting a new proposal never reuses an older task/send confirmation.
   db.prepare("DELETE FROM secretary_pending WHERE conversation_key=?").run(key);
   db.prepare("INSERT INTO secretary_task_intake VALUES(?,?,?,?) ON CONFLICT(conversation_key) DO UPDATE SET draft_json=excluded.draft_json,last_event_key=excluded.last_event_key,expires_at=excluded.expires_at")
     .run(key, JSON.stringify(draft), eventKey(event), now + INTAKE_MS);
-  const question = intakeQuestion(draft, state);
-  const scope = draft.projectId ? ["p:" + draft.projectId] : [];
+  const question = intakeQuestion(draft);
   if (question) {
-    if (freeTextField) return save(db, event, actor, { status: "clarify", reply: freeTextField === "dueDate" ? "اكتب التاريخ المطلوب باليوم والشهر والسنة." : freeTextField === "projectId" ? "اكتب اسم المشروع المقصود." : "اكتب اسم الموظف المقصود." }, scope, now);
+    if (freeTextField) return save(db, event, actor, { status: "clarify", reply: freeTextField === "dueDate" ? "اكتب التاريخ المطلوب باليوم والشهر والسنة." : "اكتب اسم الموظف المقصود." }, [], now);
     const choices = event.groupId === null ? intakeChoices(db, actor, state, draft, key, now) : undefined;
-    return save(db, event, actor, { status: "clarify", reply: question + (choices ? `\n\n${choices.options.map(option => option.label).join("\n")}\nاختار خيارًا واحدًا، أو اكتب اسم الخيار بالكلام.` : ""), ...(choices ? { choices } : {}) }, scope, now);
+    return save(db, event, actor, { status: "clarify", reply: question + (choices ? `\n\n${choices.options.map(option => option.label).join("\n")}\nاختار خيارًا واحدًا، أو اكتب اسم الخيار بالكلام.` : ""), ...(choices ? { choices } : {}) }, [], now);
   }
-  const project = draft.projectId ? state.projects.find(item => item.id === draft.projectId) ?? null : null;
   const owner = state.users.find(item => item.id === draft.ownerId);
   db.prepare("DELETE FROM secretary_task_intake WHERE conversation_key=?").run(key);
-  const projectTask: ProjectDraftTask = { title: draft.title!, ownerId: draft.ownerId === "unassigned" ? null : draft.ownerId,
-    priority: draft.priority!, dueDate: draft.dueDate === "unscheduled" ? null : draft.dueDate };
-  const chainHint = "\n\nلو بدك تضيف مهمة كمان لنفس المشروع، احكيها عادي وبربطها فيه تلقائيًا.";
+  const chainHint = "\n\nلو بدك تضيف مهمة كمان، احكيها عادي.";
   if (!isAdmin) {
     // Not Basim's decision to make directly -- file it and let him decide,
-    // same pattern as project_create/task_close/ownership requests.
+    // same pattern as task_close/ownership requests.
     try {
-      if (draft.newProjectName) {
-        const request = requestProjectCreate(db, actor, { name: draft.newProjectName, goal: draft.details || undefined, tasks: [projectTask] }, { now });
-        enqueueAgentMessage(db, { toUser: "basem", text: request.ownerMessage, choices: request.choices }, now);
-        notifyTaskLegend(db, actor.id, now + 1);
-        log(db, actor, event, "secretary_proposal", { summary: "رفع طلب فتح مشروع مع مهمته لباسم", approvalId: request.approval.id, confirmationRequired: false }, now);
-        return save(db, event, actor, { status: "applied", reply: `📨 رفعت طلبك لباسم: ${request.approval.summary}\nبخبرك أول ما يقرر.` }, scope, now);
-      }
-      const request = requestTaskCreate(db, actor, { projectId: draft.projectId!, title: draft.title!, details: draft.details || undefined,
+      const request = requestTaskCreate(db, actor, { title: draft.title!, details: draft.details || undefined,
         priority: draft.priority!, dueDate: draft.dueDate === "unscheduled" ? null : draft.dueDate,
         ownerId: draft.ownerId === "unassigned" ? null : draft.ownerId }, { now });
-      rememberLastProject(db, key, draft.projectId!, project?.name ?? draft.projectId!, now);
       enqueueAgentMessage(db, { toUser: "basem", text: request.ownerMessage, choices: request.choices }, now);
       notifyTaskLegend(db, actor.id, now + 1);
       log(db, actor, event, "secretary_proposal", { summary: "رفع طلب فتح مهمة لباسم", approvalId: request.approval.id, confirmationRequired: false }, now);
-      return save(db, event, actor, { status: "applied", reply: `📨 رفعت طلبك لباسم: ${request.approval.summary}\nبخبرك أول ما يقرر.${chainHint}` }, scope, now);
+      return save(db, event, actor, { status: "applied", reply: `📨 رفعت طلبك لباسم: ${request.approval.summary}\nبخبرك أول ما يقرر.${chainHint}` }, [], now);
     } catch (error) {
       if (!(error instanceof ManagementActionError)) throw error;
-      return save(db, event, actor, { status: "clarify", reply: error.message }, scope, now);
+      return save(db, event, actor, { status: "clarify", reply: error.message }, [], now);
     }
   }
-  if (draft.noProject) {
-    const token = "T" + randomBytes(3).toString("hex").toUpperCase();
-    const command = { action: "create_standalone_task", title: draft.title, ...(draft.details ? { details: draft.details } : {}),
-      ownerId: draft.ownerId === "unassigned" ? null : draft.ownerId, priority: draft.priority,
-      dueDate: draft.dueDate === "unscheduled" ? null : draft.dueDate };
-    const reply = `للتأكيد قبل إنشاء المهمة:\nالمهمة: ${draft.title}${draft.details ? `\nالمطلوب: ${draft.details}` : ""}\nالمسؤول: ${owner ? clean(owner.name, 200) : "بدون مسؤول حاليًا"}\nالأولوية: ${PRIORITIES[draft.priority!].icon} ${PRIORITIES[draft.priority!].label}\nالموعد: ${draft.dueDate === "unscheduled" ? "بدون موعد" : draft.dueDate}\nالحالة عند الإنشاء: مفتوحة بانتظار الاستلام.\n\nلم أنشئ المهمة بعد. اكتب «موافق ${token}» أو رد مباشرة بالموافقة على هذه المعاينة؛ وللتراجع اكتب «إلغاء». التأكيد صالح 10 دقائق.`;
-    if (reply.length > 3700) return save(db, event, actor, { status: "clarify", reply: "تفاصيل المهمة طويلة للمعاينة الكاملة. اختصر التفاصيل حتى أعرضها كلها قبل التأكيد." }, scope, now);
-    db.prepare("INSERT INTO secretary_pending VALUES(?,?,?,?,?,?,?)").run(key, token, JSON.stringify(command), fingerprint(state), event.text, event.messageId, now + CONFIRM_MS);
-    log(db, actor, event, "secretary_proposal", { summary: "عرض إنشاء مهمة بدون مشروع", proposedCommand: command, confirmationRequired: true }, now);
-    return save(db, event, actor, { status: "confirmation", reply }, scope, now);
-  }
-  if (draft.newProjectName) {
-    const token = "T" + randomBytes(3).toString("hex").toUpperCase();
-    const command = { action: "create_project_bundle", name: draft.newProjectName, goal: draft.details || "", tasks: [projectTask], suppressNotices: false };
-    const preview = describeProjectBundle(draft.newProjectName, draft.details || "", [projectTask], state.users);
-    const reply = `${preview}\n\nهاد مشروع جديد؛ رح ينشئ مع هاي المهمة سوا. أعتمد الإنشاء؟ اكتب «موافق ${token}» أو صحّح أي بند.`;
-    if (reply.length > 3700) return save(db, event, actor, { status: "clarify", reply: "تفاصيل المهمة طويلة للمعاينة الكاملة. اختصر التفاصيل حتى أعرضها كلها قبل التأكيد." }, scope, now);
-    db.prepare("INSERT INTO secretary_pending VALUES(?,?,?,?,?,?,?)").run(key, token, JSON.stringify(command), fingerprint(state), event.text, event.messageId, now + CONFIRM_MS);
-    log(db, actor, event, "secretary_proposal", { summary: "عرض إنشاء مشروع جديد مع مهمته", proposedCommand: command, confirmationRequired: true }, now);
-    return save(db, event, actor, { status: "confirmation", reply }, scope, now);
-  }
+  // One single creation path for the admin: a plain add_task command, confirmed
+  // and then executed through perform() exactly like a task opened on the
+  // website -- which is what makes dispatchManagementNotice fire (group notice
+  // plus the new owner's own claim poll). The old "create_standalone_task"
+  // pseudo-action that bypassed all of that is gone along with projects.
   const token = "T" + randomBytes(3).toString("hex").toUpperCase();
-  const command = { action: "add_task", projectId: draft.projectId, title: draft.title, ...(draft.details ? { details: draft.details } : {}),
+  const command = { action: "add_task", title: draft.title, ...(draft.details ? { details: draft.details } : {}),
     ownerId: draft.ownerId === "unassigned" ? null : draft.ownerId, priority: draft.priority,
-    dueDate: draft.dueDate === "unscheduled" ? null : draft.dueDate, expectedProjectUpdatedAt: project!.updatedAt ?? null, expectedProjectStatus: "active" };
+    dueDate: draft.dueDate === "unscheduled" ? null : draft.dueDate };
   const reply = `للتأكيد قبل إنشاء المهمة:\nالمهمة: ${draft.title}${draft.details ? `\nالمطلوب: ${draft.details}` : ""}\nالمسؤول: ${owner ? clean(owner.name, 200) : "بدون مسؤول حاليًا"}\nالأولوية: ${PRIORITIES[draft.priority!].icon} ${PRIORITIES[draft.priority!].label}\nالموعد: ${draft.dueDate === "unscheduled" ? "بدون موعد" : draft.dueDate}\nالحالة عند الإنشاء: مفتوحة بانتظار الاستلام.\n\nلم أنشئ المهمة بعد. اكتب «موافق ${token}» أو رد مباشرة بالموافقة على هذه المعاينة؛ وللتراجع اكتب «إلغاء». التأكيد صالح 10 دقائق.`;
-  if (reply.length > 3700) return save(db, event, actor, { status: "clarify", reply: "تفاصيل المهمة طويلة للمعاينة الكاملة. اختصر التفاصيل حتى أعرضها كلها قبل التأكيد." }, scope, now);
+  if (reply.length > 3700) return save(db, event, actor, { status: "clarify", reply: "تفاصيل المهمة طويلة للمعاينة الكاملة. اختصر التفاصيل حتى أعرضها كلها قبل التأكيد." }, [], now);
   db.prepare("INSERT INTO secretary_pending VALUES(?,?,?,?,?,?,?)").run(key, token, JSON.stringify(command), fingerprint(state), event.text, event.messageId, now + CONFIRM_MS);
   log(db, actor, event, "secretary_proposal", { summary: "عرض إنشاء مهمة بعد استكمال بياناتها", proposedCommand: command, confirmationRequired: true }, now);
-  return save(db, event, actor, { status: "confirmation", reply }, scope, now);
+  return save(db, event, actor, { status: "confirmation", reply }, [], now);
 }
 
 function reminder(db: DatabaseSync, event: Event, actor: ChatUser, state: Snapshot, taskId: unknown, due: unknown, now: number): Result {
@@ -1036,13 +863,13 @@ function nudgeOwner(db: DatabaseSync, event: Event, actor: ChatUser, state: Snap
 }
 
 // Search only an exact user-authored question, never model-extracted history or a
-// task catalog. Private/project questions are answered through authorized DB reads.
+// task catalog. Internal questions are answered through authorized DB reads.
 function privateSearchQuestion(query: string, state: Snapshot): boolean {
   const normalize = (value: string) => value.normalize("NFKC").replace(/[\u064b-\u065f\u0670\u0640]/g, "").replace(/[أإآ]/g, "ا").replace(/ى/g, "ي").replace(/ة/g, "ه").toLowerCase();
   const value = normalize(query);
   return !query.trim() || query.length > 500 || (value.match(/[0-9٠-٩۰-۹]/gu)?.length ?? 0) >= 6
-    || /@|https?:\/\/|(?:مهمتي|مهامي|مشاريعي|مشروعنا|موظف|مريض|رقم الهويه|رمز الدخول|كلمه السر|ارقام الفريق|ارقام فريق|ارقام الشباب|فريقنا|شركتنا|راتب|رواتب)|\b(?:otp|password|pin|api.?key)\b/u.test(value)
-    || [...state.tasks.map(t => t.title), ...state.projects.map(p => p.name), ...state.users.map(u => u.name)]
+    || /@|https?:\/\/|(?:مهمتي|مهامي|موظف|مريض|رقم الهويه|رمز الدخول|كلمه السر|ارقام الفريق|ارقام فريق|ارقام الشباب|فريقنا|شركتنا|راتب|رواتب)|\b(?:otp|password|pin|api.?key)\b/u.test(value)
+    || [...state.tasks.map(t => t.title), ...state.users.map(u => u.name)]
       .some(title => title.length > 2 && value.includes(normalize(title)));
 }
 
@@ -1055,14 +882,14 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
   event = resolveTaskActionTextChoice(db, event);
   event = resolveTaskCloseDecisionRejectChoice(db, event);
   const actor = actorFor(db, event, config); if (!actor) return { status: "denied", reply: "" };
-  // The team group is one-way by default: automated notices only (task/project
+  // The team group is one-way by default: automated notices only (task
   // open/close broadcasts, sent separately as groupNotice from a DM-side
   // action). The secretary does not reply to ordinary chatter it receives FROM
   // the group -- there is no live back-and-forth there for a message that
   // isn't for it. The one exception: someone directly calling it by name
   // ("يا سكرتير...") gets an actual reply, in the group, from everything below
   // -- which already has its own per-action/per-actor rules for group origin
-  // (task/project drafting and message_team/announce_group all stay
+  // (task drafting and message_team/announce_group all stay
   // private-chat-only regardless).
   if (event.groupId !== null && !isAddressedToSecretary(event.text)) return { status: "denied", reply: "" };
   const initial = stateFor(db, actor); const previous = lookup(db, event, actor, initial); if (previous) return previous;
@@ -1117,7 +944,7 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
       try {
         const result = executeManagementAction(db, fresh, { action: "approve", taskId: task.id } as ManagementCommand,
           { now, source: "whatsapp_secretary", auditContext: { originalText: event.text, sourceMessageId: event.messageId, confirmationRequired: false } });
-        dispatchManagementNotice(db, fresh, state, result, { projectId: task.projectId }, now);
+        dispatchManagementNotice(db, fresh, state, result, {}, now);
         return save(db, event, fresh, { status: "applied", reply: `✅ ${result.message}`, taskId: task.id }, ["t:" + task.id], now);
       } catch (error) {
         if (!(error instanceof ManagementActionError)) throw error;
@@ -1163,7 +990,7 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
       try {
         const result = executeManagementAction(db, fresh, { action: taskActionPollChoice.action, taskId: task.id } as ManagementCommand,
           { now, source: "whatsapp_secretary", auditContext: { originalText: event.text, sourceMessageId: event.messageId, confirmationRequired: false } });
-        dispatchManagementNotice(db, fresh, state, result, { projectId: task.projectId }, now);
+        dispatchManagementNotice(db, fresh, state, result, {}, now);
         notifyTaskLegend(db, fresh.id, now);
         return save(db, event, fresh, { status: "applied", reply: `✅ ${result.message}`, taskId: task.id }, ["t:" + task.id], now);
       } catch (error) {
@@ -1237,7 +1064,7 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
         const syntheticPlan: SecretaryIntent = row.kind === "close_request"
           ? { ...base, taskId: task.id, message: (stashedFields.message as string | null) ?? null, fields: { ...base.fields, details: (stashedFields.details as string | null) ?? null } }
           : { ...base, taskId: task.id, fields: { ...base.fields, ownerId: (stashedFields.ownerId as string | null) ?? null, reason: (stashedFields.reason as string | null) ?? null } };
-        const result = handleAgentIntent(syntheticPlan, { db, actor: fresh, now, inputKind: event.inputKind, text: row.original_text, suppressNotices: event.groupId === null && /(?:لا|ما)\s+(?:تبعت|تبعث|ترسل)|بدون\s+(?:رسائل|إشعارات|اشعارات)/u.test(row.original_text), users: state.users, tasks: state.tasks, projects: state.projects,
+        const result = handleAgentIntent(syntheticPlan, { db, actor: fresh, now, inputKind: event.inputKind, text: row.original_text, suppressNotices: event.groupId === null && /(?:لا|ما)\s+(?:تبعت|تبعث|ترسل)|بدون\s+(?:رسائل|إشعارات|اشعارات)/u.test(row.original_text), users: state.users, tasks: state.tasks,
           conversationKey: event.groupId === null ? key : undefined,
           stash: command => { const stashToken = "T" + randomBytes(3).toString("hex").toUpperCase(); db.prepare("INSERT INTO secretary_pending VALUES(?,?,?,?,?,?,?)").run(key, stashToken, JSON.stringify(command), initialHash, row.original_text, row.source_message_id, now + CONFIRM_MS); log(db, fresh, event, "secretary_proposal", { summary: "عرض تغييرًا ينتظر التأكيد", proposedCommand: command, confirmationRequired: true }, now); return stashToken; } });
         if (!result) return save(db, event, fresh, { status: "clarify", reply: "ما قدرت أكمل هذا الطلب." }, [], now);
@@ -1257,12 +1084,8 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
   // mid-way through a multi-turn task-open Q&A needs the same persisted
   // memory of already-answered fields, or each new message has to be
   // re-derived whole from raw history and any unrestated answer gets lost
-  // (the same bug class as the project-open loop).
+  // (the same bug class as any multi-turn questionnaire).
   const taskDraft = draftCandidate ? availableDraft(draftCandidate, initial) : null;
-  // See markAwaitingProjectName above -- read-only here (used only to brief
-  // the model this turn); the actual clear/re-arm happens inside the
-  // transaction below, alongside every other draft-state mutation.
-  const awaitingProjectName = !taskDraft && !!db.prepare("SELECT 1 FROM secretary_project_name_pending WHERE conversation_key=? AND expires_at>?").get(key, now);
   const eventChoice = event.choice;
   if (eventChoice) return transaction(db, () => {
     const freshActor = actorFor(db, event, config);
@@ -1290,7 +1113,7 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
       const current = availableDraft(JSON.parse(liveIntake.draft_json), state);
       // Only the stored opaque option selects a value; the submitted display label is not an instruction.
       const draft = { ...current, ...(selected.value === null ? {} : { [selected.field]: selected.value }) } as TaskDraft;
-      const plan: SecretaryIntent = { kind: "task_draft", intakeMode: "continue", action: null, taskId: null, projectId: draft.projectId, recipientIds: [], message: null,
+      const plan: SecretaryIntent = { kind: "task_draft", intakeMode: "continue", action: null, taskId: null, recipientIds: [], message: null,
         fields: { title: draft.title, details: draft.details, ownerId: draft.ownerId, priority: draft.priority, dueDate: draft.dueDate, name: null, reason: null, body: null, remindAt: null, status: null } };
       return taskIntake(db, event, freshActor, state, plan, key, current, now, selected.value === null ? selected.field : undefined);
     } catch (error) {
@@ -1323,10 +1146,10 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
   // A verb carrying the Arabic plural object pronoun "هم" ("قفلهم" = close
   // THEM, "احذفهم" = delete THEM...) asks for one action on MULTIPLE targets
   // at once. No action in this codebase is bulk -- every command/confirmation
-  // resolves to exactly one taskId/projectId -- so there is no way to fulfil
+  // resolves to exactly one taskId -- so there is no way to fulfil
   // this literally. Left unguarded, the model either has to guess which
   // items "them" refers to, or (as actually happened once) falls back to
-  // focusedTaskId -- the single task/project a *previous*, unrelated turn
+  // focusedTaskId -- the single task a *previous*, unrelated turn
   // last touched -- and silently acts on that instead, producing a
   // confirmation and outcome that look like stale garbage to the user even
   // though nothing was hardcoded; it was just the wrong single target. Ask
@@ -1334,13 +1157,11 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
   // focusedTaskId ever see the message, for every actor and even on a
   // reply-quote (quoting doesn't resolve which multiple items "هم" means).
   if (/(?:قفل|سكر|سكّر|اغلق|أغلق|ارشف|أرشف|احذف|امسح|الغ[يو]|افتح|فعّل|عطل|وقف|أوقف)هم(?![ء-ي])/u.test(callerQuestion)) {
-    return earlyRead({ status: "clarify", reply: "ما بقدر أنفّذ إجراء على أكثر من مشروع أو مهمة بنفس الرسالة. حدد كل واحد بالاسم أو الرقم لحاله وبجهزلك تأكيد لكل واحد على حدة." });
+    return earlyRead({ status: "clarify", reply: "ما بقدر أنفّذ إجراء على أكثر من مهمة بنفس الرسالة. حدد كل واحدة بالاسم أو الرقم لحالها وبجهزلك تأكيد لكل واحدة على حدة." });
   }
-  const callerMatch = /^(?:(?:مرحبا|هلا|اهلا)[،,!\s]+)?(?:مين انا|بتعرفني|من انا)[؟?،,\s]*(?:(?:و\s*)?(?:شو|ايش|ما هي)\s+المشاريع(?:\s+(?:الموجودة|الموجوده|النشطة|النشطه))?(?:\s+(?:عندنا|عنا))?[؟?!.\s]*)?$/u.exec(callerQuestion);
+  const callerMatch = /^(?:(?:مرحبا|هلا|اهلا)[،,!\s]+)?(?:مين انا|بتعرفني|من انا)[؟?،,\s]*$/u.exec(callerQuestion);
   if (callerMatch && !event.replyToMessageId) {
-    const projects = callerQuestion.includes("المشاريع") ? initial.projects : [];
-    return earlyRead({ status: "summary", reply: `أهلًا ${clean(actor.name, 60)}، بعرفك من رقمك المسجّل عندنا.` + (callerQuestion.includes("المشاريع")
-      ? `\n\n*المشاريع المتاحة إلك*\n\n${projects.length ? projects.map(p => `🔵 *${clean(p.name, 100)}*\nالحالة: ${LABELS[p.status] || clean(p.status)}`).join("\n\n") : "ما في مشاريع متاحة حاليًا."}` : "") }, projects.map(p => "p:" + p.id));
+    return earlyRead({ status: "summary", reply: `أهلًا ${clean(actor.name, 60)}، بعرفك من رقمك المسجّل عندنا.` });
   }
   // Read-only, any actor, private or group (subject to the same
   // addressed-to-secretary gate applied above for group chats) -- exact
@@ -1418,7 +1239,7 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
     if (!AFFIRMATIONS.includes(confirmationText(event.text))) return save(db, event, actor, { status: "clarify", reply: "ما في طلب معلّق مطابق للتأكيد. اذكر التغيير المطلوب لأعرضه عليك من جديد." }, [], now);
     const currentQuestion = currentIntakeQuestion(db, event, freshActor, state, key, now);
     if (currentQuestion) return save(db, event, freshActor, currentQuestion.result, currentQuestion.scope, now);
-    return save(db, event, freshActor, { status: "summary", reply: `تمام يا ${clean(freshActor.name, 60)}، أنا معك.${visibleFocus ? ` نكمل على «${clean(visibleFocus.title, 120)}»؛ احكيلي شو المطلوب.` : " احكيلي كيف أقدر أساعدك."}`, ...(visibleFocus ? { taskId: visibleFocus.id } : {}) }, visibleFocus ? ["t:" + visibleFocus.id, "p:" + visibleFocus.projectId] : [], now);
+    return save(db, event, freshActor, { status: "summary", reply: `تمام يا ${clean(freshActor.name, 60)}، أنا معك.${visibleFocus ? ` نكمل على «${clean(visibleFocus.title, 120)}»؛ احكيلي شو المطلوب.` : " احكيلي كيف أقدر أساعدك."}`, ...(visibleFocus ? { taskId: visibleFocus.id } : {}) }, visibleFocus ? ["t:" + visibleFocus.id] : [], now);
   });
   if (pending && (isConfirmationAttempt(event.text) || isCancellation(event.text))) {
     return transaction(db, () => {
@@ -1454,7 +1275,7 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
       db.prepare("DELETE FROM secretary_pending WHERE conversation_key=?").run(key);
       clearConfirmationView(db, key);
       clearSecretaryChoices(db, key);
-      if (isCancellation(event.text)) { log(db, freshActor, event, "secretary_cancel", { summary: "ألغى الطلب قبل التنفيذ" }, now); return save(db, event, freshActor, { status: "cancelled", reply: "ألغيت الطلب المعلّق، ما غيّرت المهمة أو المشروع." }, [], now); }
+      if (isCancellation(event.text)) { log(db, freshActor, event, "secretary_cancel", { summary: "ألغى الطلب قبل التنفيذ" }, now); return save(db, event, freshActor, { status: "cancelled", reply: "ألغيت الطلب المعلّق، ما غيّرت المهمة." }, [], now); }
       if (live.expires_at <= now || live.snapshot_hash !== fingerprint(state)) return save(db, event, freshActor, { status: "stale", reply: "انتهى وقت التأكيد أو تغيّرت البيانات/الصلاحيات. ما نفذت الطلب؛ اذكره من جديد لأعرض الوضع الحالي." }, [], now);
       const command = JSON.parse(live.command_json);
       if (command.action === "message_team") {
@@ -1488,16 +1309,19 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
       if (command.action === "schedule_reminder") return reminder(db, event, freshActor, state, command.taskId, command.dueAt, now);
       if (command.action === "close_direct") return closeDirect(db, event, freshActor, state, String(command.taskId), now, { originalText: live.original_text, sourceMessageId: live.source_message_id, confirmationRequired: true, confirmedBy: freshActor.id, confirmationMessageId: event.messageId });
       if (command.action === "claim_multi") return claimMultiple(db, event, freshActor, state, Array.isArray(command.taskIds) ? command.taskIds.map(String) : [], now, { originalText: live.original_text, sourceMessageId: live.source_message_id, confirmationRequired: true, confirmedBy: freshActor.id, confirmationMessageId: event.messageId });
-      if (command.action === "create_project_bundle" || command.action === "decide_approval" || command.action === "create_standalone_task") {
+      if (command.action === "create_tasks" || command.action === "decide_approval") {
         try {
-          const result = command.action === "create_project_bundle"
-            ? createProjectBundle(db, freshActor, { name: String(command.name), goal: String(command.goal ?? ""), tasks: Array.isArray(command.tasks) ? command.tasks : [], suppressNotices: command.suppressNotices === true }, now, { originalText: live.original_text, sourceMessageId: live.source_message_id, confirmationRequired: true, confirmedBy: freshActor.id, confirmationMessageId: event.messageId, senderNumber: event.senderNumber, origin: "whatsapp" })
-            : command.action === "create_standalone_task"
-            ? createStandaloneTask(db, freshActor, { title: String(command.title), details: typeof command.details === "string" ? command.details : "", ownerId: typeof command.ownerId === "string" ? command.ownerId : null, priority: command.priority as "red" | "yellow" | "green", dueDate: typeof command.dueDate === "string" ? command.dueDate : null }, now, { originalText: live.original_text, sourceMessageId: live.source_message_id, confirmationRequired: true, confirmedBy: freshActor.id, confirmationMessageId: event.messageId, senderNumber: event.senderNumber, origin: "whatsapp" })
+          const result = command.action === "create_tasks"
+            // Each task in the bundle is notified individually: createTasks
+            // hands every created task straight to dispatchManagementNotice, so
+            // its own owner gets the normal claim poll and the group gets the
+            // normal notice -- exactly like a single add_task through perform().
+            ? createTasks(db, freshActor, { details: typeof command.details === "string" ? command.details : "", tasks: (Array.isArray(command.tasks) ? command.tasks : []) as TaskDraftTask[], suppressNotices: command.suppressNotices === true },
+              now, { originalText: live.original_text, sourceMessageId: live.source_message_id, confirmationRequired: true, confirmedBy: freshActor.id, confirmationMessageId: event.messageId, senderNumber: event.senderNumber, origin: "whatsapp" },
+              (created, ownerId) => dispatchManagementNotice(db, freshActor, state, created, { ownerId }, now))
             : applyDecision(db, freshActor, { approvalId: String(command.approvalId), decision: command.decision === "approved" ? "approved" : "rejected", note: typeof command.note === "string" ? command.note : undefined }, now);
           deliverAgentSideEffects(db, freshActor, result, now);
-          if (command.action === "create_project_bundle" && result.projectId) rememberLastProject(db, key, result.projectId, String(command.name), now);
-          return save(db, event, freshActor, { status: result.status, reply: result.reply }, [], now);
+          return save(db, event, freshActor, { status: result.status, reply: result.reply, ...(result.taskId ? { taskId: result.taskId } : {}) }, [], now);
         } catch (error) { if (!(error instanceof ManagementActionError)) throw error; return save(db, event, freshActor, { status: "clarify", reply: error.message }, [], now); }
       }
       return perform(db, event, freshActor, state, command, now, { originalText: live.original_text, sourceMessageId: live.source_message_id, confirmationRequired: true, confirmedBy: freshActor.id, confirmationMessageId: event.messageId });
@@ -1506,18 +1330,17 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
   const canMessageTeam = actor.id === "basem" && actor.role === "admin" && event.groupId === null;
   const pendingCommand = canMessageTeam && pending && pending.expires_at > now ? JSON.parse(pending.command_json) : null;
   const input: SecretaryModelInput = { text: event.text, actor: { id: actor.id, name: actor.name, role: actor.role }, focusedTaskId, taskDraft: review ? null : taskDraft,
-    awaitingProjectName: review ? false : awaitingProjectName,
     ...(review ? { review: { previousQuestion: review.question, previousAnswer: review.previousAnswer } } : {}),
     canMessageTeam, messageRecipients: canMessageTeam ? getSecretaryOutboxRecipients(db, config).map(user => ({ id: user.userId, name: user.name })) : [],
     pendingMessagePreview: pendingCommand?.action === "message_team" && typeof pendingCommand.text === "string" && Array.isArray(pendingCommand.recipientIds) ? { text: pendingCommand.text, recipientIds: pendingCommand.recipientIds } : null,
-    tasks: initial.tasks.map(t => ({ id: t.id, title: t.title, projectId: t.projectId, status: t.status, priority: t.priority })),
-    projects: withCreatableProjects(initial, actor, db).projects.map(p => ({ id: p.id, name: p.name, status: p.status })), users: initial.users.filter(u => u.active === 1).map(u => ({ id: u.id, name: u.name })), history, now: new Date(now).toISOString(),
+    tasks: initial.tasks.map(t => ({ id: t.id, title: t.title, status: t.status, priority: t.priority })),
+    users: initial.users.filter(u => u.active === 1).map(u => ({ id: u.id, name: u.name })), history, now: new Date(now).toISOString(),
     ownershipCandidates: review ? [] : ownershipCandidates(initial, now),
     pendingApprovals: safeApprovals(db, actor), rules: safeRules(db),
     personalContext: actor.id === "basem" && actor.role === "admin" && event.groupId === null ? personalMemory(db, actor.id) : [],
     learningMemory: event.groupId === null ? recallSecretaryMemory(db, { conversation: key, role: actor.role,
       query: review?.question || event.text, now,
-      allowedScope: new Set([...initial.tasks.map(t => "t:" + t.id), ...initial.projects.map(p => "p:" + p.id)]) }) : [],
+      allowedScope: new Set(initial.tasks.map(t => "t:" + t.id)) }) : [],
     knowledgeContext: event.groupId === null ? safeKnowledge(db, actor, review?.question || event.text)
       .slice(0, 3).map(hit => ({ title: hit.title, snippet: hit.snippet.slice(0, 600) })) : [] };
   const directCreation = !review && event.inputKind !== "voice" && !event.replyToMessageId ? directTaskCreationIntent(input) : null;
@@ -1552,7 +1375,7 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
         : directCreation ?? validateSecretaryIntent(await dependencies.infer(input), input);
   } catch (error) {
     // Only standalone, unqualified read questions may recover from provider failure.
-    // Never reinterpret a write, project filter, quoted reply, or active intake.
+    // Never reinterpret a write, priority filter, quoted reply, or active intake.
     const generalTasks = event.text.normalize("NFKC").replace(/[أإآ]/g, "ا").replace(/[\u064B-\u065F\u0670ـ]/g, "").replace(/[؟?!.،,]/g, "").replace(/\s+/g, " ").trim();
     if (!review && !event.replyToMessageId && !taskDraft
       && /^(?:(?:شو|ايش|ما هي|اعرض|اعرضلي|وريني) )?(?:المهام(?: المطلوب[ةه]| المتاح[ةه]| الموجود[ةه])?|مهامي)(?: عندنا| عندي)?$/.test(generalTasks)) {
@@ -1563,7 +1386,7 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
     }
   }
   // Independent of the provider validator: criticism never grants a write/replay.
-  if (review && !["summary", "details", "projects", "report", "help", "chat", "clarify", "search", "message_status"].includes(plan.kind)) {
+  if (review && !["summary", "details", "report", "help", "chat", "clarify", "search", "message_status"].includes(plan.kind)) {
     plan = emptySecretaryIntent("clarify", "براجع الجواب معك؛ لم أنفّذ أو أعد إرسال أي طلب. اكتب التغيير المطلوب كطلب جديد إذا بدك تنفيذه.");
   }
   let publicReply: string | null = null;
@@ -1588,14 +1411,9 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
     if ((plan.kind === "task_draft" || pendingDraft) && hash(db.prepare("SELECT * FROM secretary_pending WHERE conversation_key=?").get(key) ?? null) !== hash(pending ?? null)) return save(db, event, freshActor, { status: "stale", reply: "تغيّرت معاينة التأكيد أثناء قراءة رسالتك. لم أنشئ شيئًا؛ أعد التصحيح على المعاينة الحالية." }, [], now);
     if (review && event.groupId === null) rememberSecretaryMistake(db, { conversation: key, role: freshActor.role,
       question: review.question, answer: review.previousAnswer, now,
-      scope: [...initial.tasks.map(t => "t:" + t.id), ...initial.projects.map(p => "p:" + p.id)] });
+      scope: initial.tasks.map(t => "t:" + t.id) });
     rememberPendingPreview(db, event, key, db.prepare("SELECT * FROM secretary_pending WHERE conversation_key=?").get(key) as Pending | undefined);
-    // Single-use: clear by default every turn: the "chat"/"clarify" branch
-    // below re-arms it only when this turn's reply is itself the project-name
-    // question again, so a stale marker never lingers into an unrelated
-    // later message.
-    db.prepare("DELETE FROM secretary_project_name_pending WHERE conversation_key=?").run(key);
-    if (plan.kind === "task_draft") return taskIntake(db, event, freshActor, withCreatableProjects(state, freshActor, db), plan, key, taskDraft, now);
+    if (plan.kind === "task_draft") return taskIntake(db, event, freshActor, state, plan, key, taskDraft, now);
     // Only an explicit task_draft plan may continue intake; unrelated subjects cannot revive it later.
     if (!review) {
       if (storedIntake) db.prepare("DELETE FROM secretary_task_intake WHERE conversation_key=?").run(key);
@@ -1650,7 +1468,7 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
       log(db, freshActor, event, "secretary_announce_preview", { summary: "عرض إعلان على جروب الفريق قبل النشر", confirmationRequired: true }, now);
       return save(db, event, freshActor, { status: "confirmation", reply: `رح أنشر هالنص على جروب الفريق من رقم الإدارة (مو على الخاص):\n\n${text}\n\nلم أنشر شيئًا بعد. اكتب «موافق ${token}» أو رد بالموافقة مباشرة على هذه المعاينة؛ وللتراجع اكتب «إلغاء». التأكيد صالح 10 دقائق.` }, [], now);
     }
-    if (plan.kind === "project_draft" && event.groupId !== null && !(freshActor.id === "basem" && freshActor.role === "admin")) return save(db, event, freshActor, { status: "denied", reply: "فتح مشروع جديد لازم يكون من رسالة خاصة معي، مش من الجروب. راسلني عالخاص." }, [], now);
+    if (plan.kind === "tasks_draft" && event.groupId !== null && !(freshActor.id === "basem" && freshActor.role === "admin")) return save(db, event, freshActor, { status: "denied", reply: "فتح مهام جديدة لازم يكون من رسالة خاصة معي، مش من الجروب. راسلني عالخاص." }, [], now);
     // Basim's report: "انهاء المهمة"/"تحويل المهمة" typed with more than one
     // eligible task open let the model's own taskId guess through untested --
     // close_request and task_transfer_request are exactly the employee
@@ -1683,13 +1501,13 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
     }
     if (AGENT_KINDS.has(plan.kind)) {
       db.prepare("DELETE FROM secretary_pending WHERE conversation_key=?").run(key);
-      const result = handleAgentIntent(plan, { db, actor: freshActor, now, inputKind: event.inputKind, text: event.text, suppressNotices: event.groupId === null && /(?:لا|ما)\s+(?:تبعت|تبعث|ترسل)|بدون\s+(?:رسائل|إشعارات|اشعارات)/u.test(event.text), users: state.users, tasks: state.tasks, projects: state.projects,
+      const result = handleAgentIntent(plan, { db, actor: freshActor, now, inputKind: event.inputKind, text: event.text, suppressNotices: event.groupId === null && /(?:لا|ما)\s+(?:تبعت|تبعث|ترسل)|بدون\s+(?:رسائل|إشعارات|اشعارات)/u.test(event.text), users: state.users, tasks: state.tasks,
         // Interactive choice-button storage is scoped to Basim's own private
         // chat only (see approvalDecisionChoices/createSecretaryChoices) --
         // same gate intakeChoices already uses for the task-intake polls.
         conversationKey: event.groupId === null ? key : undefined,
         stash: command => { const token = "T" + randomBytes(3).toString("hex").toUpperCase(); db.prepare("INSERT INTO secretary_pending VALUES(?,?,?,?,?,?,?)").run(key, token, JSON.stringify(command), initialHash, event.text, event.messageId, now + CONFIRM_MS); log(db, freshActor, event, "secretary_proposal", { summary: "عرض تغييرًا ينتظر التأكيد", proposedCommand: command, confirmationRequired: true }, now); return token; } });
-      if (result) { deliverAgentSideEffects(db, freshActor, result, now); return save(db, event, freshActor, { status: result.status, reply: result.reply, ...(result.taskId ? { taskId: result.taskId } : {}), ...(result.choices ? { choices: result.choices } : {}) }, [...(result.taskId ? ["t:" + result.taskId] : []), ...(result.projectId ? ["p:" + result.projectId] : [])], now); }
+      if (result) { deliverAgentSideEffects(db, freshActor, result, now); return save(db, event, freshActor, { status: result.status, reply: result.reply, ...(result.taskId ? { taskId: result.taskId } : {}), ...(result.choices ? { choices: result.choices } : {}) }, result.taskId ? ["t:" + result.taskId] : [], now); }
     }
     if (plan.kind === "command") {
       const command = commandFrom(plan, state);
@@ -1719,7 +1537,7 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
       if (SENSITIVE.has(String(command.action)) || event.inputKind === "voice") {
         const token = "T" + randomBytes(3).toString("hex").toUpperCase();
         db.prepare("INSERT INTO secretary_pending VALUES(?,?,?,?,?,?,?)").run(key, token, JSON.stringify(command), initialHash, event.text, event.messageId, now + CONFIRM_MS);
-        const scope = [...(plan.taskId ? ["t:" + plan.taskId] : []), ...(plan.projectId ? ["p:" + plan.projectId] : [])];
+        const scope = plan.taskId ? ["t:" + plan.taskId] : [];
         log(db, freshActor, event, "secretary_proposal", { summary: "عرض تغييرًا ينتظر التأكيد", proposedCommand: command, confirmationRequired: true }, now);
         return save(db, event, freshActor, { status: "confirmation", reply: `${event.inputKind === "voice" ? `فهمت من الصوت: «${clean(event.text, 450)}»\n` : ""}للتأكيد قبل التنفيذ:\n${commandDescription(command, state)}\n\nاكتب «موافق ${token}» للتنفيذ أو «إلغاء». الطلب صالح 10 دقائق ولن يُنفّذ إذا تغيّرت بياناته.`, ...(plan.taskId ? { taskId: plan.taskId } : {}) }, scope, now);
       }
@@ -1737,12 +1555,11 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
     }
     if (plan.kind === "nudge") return nudgeOwner(db, event, freshActor, state, String(plan.taskId), now);
     if (plan.kind === "chat" || plan.kind === "clarify" || plan.kind === "search") {
-      if (plan.kind === "clarify" && plan.message === PROJECT_NAME_QUESTION) markAwaitingProjectName(db, key, now);
       let reply = publicReply || plan.message || "أي مهمة تقصد، وشو المطلوب؟";
-      if (plan.kind === "chat" || plan.kind === "clarify") reply = formatSecretaryProjectHeadings(safeConversationalReply(reply), state);
+      if (plan.kind === "chat" || plan.kind === "clarify") reply = safeConversationalReply(reply);
       // The planner explicitly identifies contextual replies; an unrelated topic has no focus.
       const contextTaskId = plan.kind !== "search" && state.tasks.some(task => task.id === plan.taskId) ? plan.taskId : null;
-      return save(db, event, freshActor, { status: plan.kind === "clarify" ? "clarify" : "summary", reply, ...(contextTaskId ? { taskId: contextTaskId } : {}) }, plan.kind !== "search" ? [...state.tasks.map(t => "t:" + t.id), ...state.projects.map(p => "p:" + p.id)] : [], now);
+      return save(db, event, freshActor, { status: plan.kind === "clarify" ? "clarify" : "summary", reply, ...(contextTaskId ? { taskId: contextTaskId } : {}) }, plan.kind !== "search" ? state.tasks.map(t => "t:" + t.id) : [], now);
     }
     const read = readReply(plan, freshActor, state, now, event.groupId === null); return save(db, event, freshActor, read.result, read.scope, now);
   });
@@ -1761,7 +1578,7 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
 // same way. Delivery goes through the chat outbox (enqueueAgentMessage), not
 // the Meta Cloud API, reusing the group's existing emoji/wording conventions
 // (see lib/secretary-agent.ts and lib/approvals.ts's notifyGroup strings).
-function formatManagementNotice(notification: NonNullable<ManagementResult["notification"]>, projectName: string | null): string {
+function formatManagementNotice(notification: NonNullable<ManagementResult["notification"]>): string {
   const title = clean(notification.title, 200);
   const who = clean(notification.actor, 100);
   switch (notification.action) {
@@ -1780,12 +1597,10 @@ function formatManagementNotice(notification: NonNullable<ManagementResult["noti
 /** Broadcasts result.notification to the group and privately heads-up the
  * task's CURRENT owner (freshly read from the DB, since the action just
  * changed it for add_task/reassign) -- never the actor about his own action. */
-export function dispatchManagementNotice(db: DatabaseSync, actor: ChatUser, state: Snapshot, result: ManagementResult, context: { projectId?: string | null; ownerId?: string | null }, now: number) {
+export function dispatchManagementNotice(db: DatabaseSync, actor: ChatUser, state: Snapshot, result: ManagementResult, context: { ownerId?: string | null }, now: number) {
   if (!result.notification) return;
   const taskId = result.entityType === "task" ? result.entityId : null;
-  const projectId = context.projectId ?? (taskId ? state.tasks.find(t => t.id === taskId)?.projectId ?? null : null);
-  const projectName = projectId ? state.projects.find(p => p.id === projectId)?.name ?? null : null;
-  const notice = formatManagementNotice(result.notification, projectName);
+  const notice = formatManagementNotice(result.notification);
   enqueueAgentMessage(db, { toUser: "group", text: notice }, now);
   // create/reassign hand the task to a NEW suggested owner (it stays "open",
   // never actually claimed yet). context.ownerId carries that userId when the
@@ -1930,14 +1745,8 @@ function perform(db: DatabaseSync, event: Event, actor: ChatUser, state: Snapsho
     }
     const taskId = typeof command.taskId === "string" ? command.taskId : result.entityType === "task" ? result.entityId : undefined;
     if (taskId) db.prepare("UPDATE secretary_reminders SET responded_at=? WHERE actor_id=? AND task_id=? AND group_id IS ? AND state='sent' AND responded_at IS NULL").run(now, actor.id, taskId, event.groupId);
-    // Remember this project for a short window so a follow-up task-open
-    // request in the same conversation can skip naming it again.
-    if (command.action === "add_task" && typeof command.projectId === "string") {
-      const projectName = state.projects.find(p => p.id === command.projectId)?.name ?? String(command.projectId);
-      rememberLastProject(db, conversation(event, actor), command.projectId, projectName, now);
-    }
-    dispatchManagementNotice(db, actor, state, result, { projectId: typeof command.projectId === "string" ? command.projectId : null, ownerId: typeof command.ownerId === "string" ? command.ownerId : null }, now);
-    const scope = [...(taskId && state.tasks.some(t => t.id === taskId) && command.action !== "delete_task" ? ["t:" + taskId] : []), ...(typeof command.projectId === "string" && command.action !== "delete_project" ? ["p:" + command.projectId] : [])];
+    dispatchManagementNotice(db, actor, state, result, { ownerId: typeof command.ownerId === "string" ? command.ownerId : null }, now);
+    const scope = taskId && state.tasks.some(t => t.id === taskId) && command.action !== "delete_task" ? ["t:" + taskId] : [];
     // Basim's command legend, right after any task action an EMPLOYEE (never
     // Basim himself) just did directly through chat -- claim/cancel_claim/
     // comment/submit are the only actions a non-admin ever reaches perform()
@@ -1972,7 +1781,7 @@ function closeDirect(db: DatabaseSync, event: Event, actor: ChatUser, state: Sna
     // Only the final approve is announced -- the claim/submit steps this
     // chains through are an implementation detail of "close it in one go",
     // not separate events worth their own group messages.
-    dispatchManagementNotice(db, actor, state, approved, { projectId: task.projectId }, now);
+    dispatchManagementNotice(db, actor, state, approved, {}, now);
     return save(db, event, actor, { status: "applied", reply: `✅ ${approved.message}`, taskId }, ["t:" + taskId], now);
   } catch (error) {
     if (!(error instanceof ManagementActionError)) throw error;
@@ -1995,7 +1804,7 @@ function claimMultiple(db: DatabaseSync, event: Event, actor: ChatUser, state: S
     try {
       if (!task) throw new ManagementActionError(404, "task_missing", "المهمة غير موجودة أو غير متاحة لك");
       const claimed = executeManagementAction(db, actor, { action: "claim", taskId } as ManagementCommand, { now, source: "whatsapp_secretary", auditContext: context });
-      dispatchManagementNotice(db, actor, state, claimed, { projectId: task.projectId }, now);
+      dispatchManagementNotice(db, actor, state, claimed, {}, now);
       done.push(task.title);
     } catch (error) {
       if (!(error instanceof ManagementActionError)) throw error;

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {inferSecretaryIntent,SecretaryProviderError} from '../lib/secretary-intent.ts';
-const input={text:'شو المهام المطلوبة؟',actor:{id:'basem',name:'اختبار',role:'admin'},tasks:[],projects:[],users:[],history:[],now:'2026-09-06T12:00:00Z'};
+const input={text:'شو المهام المطلوبة؟',actor:{id:'basem',name:'اختبار',role:'admin'},tasks:[],users:[],history:[],now:'2026-09-06T12:00:00Z'};
 const toolCall=(name,args)=>Response.json({choices:[{finish_reason:'tool_calls',message:{tool_calls:[{function:{name,arguments:JSON.stringify(args)}}]}}]});
 const ok=()=>toolCall('summary',{});
 test('schema rejection gets one fresh repair, never uses failed generation',async()=>{

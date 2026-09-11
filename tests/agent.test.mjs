@@ -2,12 +2,12 @@ import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import { executeManagementAction, getManagementSnapshot, migrateManagementActions, ManagementActionError } from "../lib/management-actions.ts";
-import { decideApproval, findPendingApproval, listApprovals, requestDeadlineExtension, requestPriorityChange, requestProjectClose, requestProjectCreate, requestTaskClose, requestTaskOwnership, requestTaskTransfer, staleApprovals } from "../lib/approvals.ts";
+import { decideApproval, findPendingApproval, listApprovals, requestDeadlineExtension, requestPriorityChange, requestTasksCreate, requestTaskClose, requestTaskOwnership, requestTaskTransfer, staleApprovals } from "../lib/approvals.ts";
 import { can, capabilities, inScope } from "../lib/permissions.ts";
 import { activeRules, policyViolations, proposeRuleFromStatement, recordCorrection, suggestOwner, CORRECTION_THRESHOLD } from "../lib/rules.ts";
 import { addKnowledge, searchKnowledge, formatKnowledgeHits } from "../lib/knowledge.ts";
 import { createFollowupJobs, enqueueAgentMessage, planFollowups } from "../lib/agent-followups.ts";
-import { handleAgentIntent, parseProjectTaskLines, createProjectBundle } from "../lib/secretary-agent.ts";
+import { handleAgentIntent, parseTaskLines, createTasks } from "../lib/secretary-agent.ts";
 import { emptySecretaryIntent } from "../lib/secretary-intent.ts";
 import { migrateSecretaryChoices, peekSecretaryChoiceField } from "../lib/secretary-choices.ts";
 import { groupBudgetRemaining, isGroupWorthy, GROUP_DAILY_BUDGET } from "../lib/team-chat-policy.ts";
@@ -31,14 +31,12 @@ function fixture(t) {
   t.after(() => db.close());
   db.exec(`PRAGMA foreign_keys=ON;
     CREATE TABLE users (id TEXT PRIMARY KEY,name TEXT UNIQUE NOT NULL,role TEXT NOT NULL,active INTEGER NOT NULL,pin_salt TEXT,pin_hash TEXT,created_at INTEGER DEFAULT 1,updated_at INTEGER DEFAULT 1);
-    CREATE TABLE projects (id TEXT PRIMARY KEY,name TEXT NOT NULL,status TEXT NOT NULL,created_by TEXT NOT NULL,created_at INTEGER NOT NULL,rejection_reason TEXT,rejected_by TEXT,rejected_at INTEGER);
-    CREATE TABLE tasks (id TEXT PRIMARY KEY,project_id TEXT NOT NULL REFERENCES projects(id),title TEXT NOT NULL,details TEXT NOT NULL DEFAULT '',priority TEXT NOT NULL DEFAULT 'yellow',status TEXT NOT NULL,owner TEXT,suggested_owner TEXT,started_at INTEGER,due_date TEXT,completed_at INTEGER,rejection_reason TEXT,created_at INTEGER NOT NULL,updated_at INTEGER,archived_at INTEGER,archived_by TEXT);
+    CREATE TABLE tasks (id TEXT PRIMARY KEY,title TEXT NOT NULL,details TEXT NOT NULL DEFAULT '',priority TEXT NOT NULL DEFAULT 'yellow',status TEXT NOT NULL,owner TEXT,suggested_owner TEXT,started_at INTEGER,due_date TEXT,completed_at INTEGER,rejection_reason TEXT,created_at INTEGER NOT NULL,updated_at INTEGER,archived_at INTEGER,archived_by TEXT);
     CREATE TABLE comments (id INTEGER PRIMARY KEY,task_id TEXT NOT NULL REFERENCES tasks(id),author TEXT NOT NULL,body TEXT NOT NULL,created_at INTEGER NOT NULL);
     CREATE TABLE attachments (id TEXT PRIMARY KEY,task_id TEXT NOT NULL REFERENCES tasks(id),file_name TEXT,content_type TEXT,size INTEGER,object_key TEXT,uploaded_by TEXT,created_at INTEGER);
     CREATE TABLE audit_logs (id INTEGER PRIMARY KEY,actor_user_id TEXT,actor_name TEXT NOT NULL,action TEXT NOT NULL,entity_type TEXT NOT NULL,entity_id TEXT NOT NULL,details TEXT NOT NULL,created_at INTEGER NOT NULL);
     INSERT INTO users (id,name,role,active) VALUES ('basem','باسم','admin',1),('khaled','خالد','member',1),('shadi','شادي','member',1),('mgr','مدير القسم','manager',1);
-    INSERT INTO projects (id,name,status,created_by,created_at) VALUES ('p','ترخيص دابوق','active','باسم',100);
-    INSERT INTO tasks (id,project_id,title,status,owner,due_date,created_at,updated_at,started_at) VALUES ('t1','p','متابعة عقد الإيجار','progress','خالد','2026-09-06',100,100,100),('t2','p','الأوراق الحكومية','open',NULL,NULL,100,100,NULL);
+    INSERT INTO tasks (id,title,status,owner,due_date,created_at,updated_at,started_at) VALUES ('t1','متابعة عقد الإيجار','progress','خالد','2026-09-06',100,100,100),('t2','الأوراق الحكومية','open',NULL,NULL,100,100,NULL);
   `);
   migrateManagementActions(db);
   return db;
@@ -54,15 +52,16 @@ test("agent schema migration is idempotent and adds columns/tables", t => {
 
 test("permission matrix: owner everything, manager creates, member only own work", () => {
   assert.ok(can(owner, "approval.decide"));
-  assert.ok(can(manager, "project.create") && !can(manager, "approval.decide") && !can(manager, "task.delete"));
-  assert.ok(can(khaled, "task.claim") && !can(khaled, "project.create") && !can(khaled, "task.approve"));
+  assert.ok(can(manager, "task.create") && !can(manager, "approval.decide") && !can(manager, "task.delete"));
+  assert.ok(can(khaled, "task.claim") && !can(khaled, "task.create") && !can(khaled, "task.approve"));
   assert.equal(capabilities({ ...khaled, active: 0 }).size, 0);
   assert.ok(inScope(khaled, { owner: "خالد", suggestedOwner: null }));
   assert.ok(!inScope(khaled, { owner: "شادي", suggestedOwner: null }));
   assert.ok(inScope(khaled, { owner: "شادي", suggestedOwner: null, watcher: "خالد" }));
-  // Closing a project always needs Basim's decision now, even for a manager who
-  // used to archive directly -- see project.archive moving to OWNER_ONLY.
-  assert.ok(can(owner, "project.archive") && !can(manager, "project.archive"));
+  // Projects are gone: no capability mentions one, and archiving is a task-level
+  // capability a manager still has for tasks in their own scope.
+  assert.ok(![...capabilities(owner), ...capabilities(manager), ...capabilities(khaled)].some(capability => capability.startsWith("project.")));
+  assert.ok(can(owner, "task.archive") && can(manager, "task.archive"));
 });
 
 test("member cannot edit deadlines directly; extension request goes to owner and applies on approval", t => {
@@ -103,7 +102,7 @@ test("member cannot edit priority directly; priority_change request goes to owne
 });
 
 // Basim's complaint: proactive approval requests (deadline extension, task
-// close, ownership, transfer, project close/create, task create) only ever
+// close, ownership, transfer, single/multi task create) only ever
 // arrived as a plain-text "اعتمد"/"ارفض" instruction with nothing to tap.
 // Every request* function now also returns a real tappable poll whose own
 // option ids embed the approval id -- see approvalDecisionPoll -- so a tap
@@ -155,42 +154,33 @@ test("task close request moves to approval; rejection returns it with the reason
   assert.match(rejected.notifyRequester, /لم يعتمد/);
 });
 
-test("manager project goes pending; project_create approval creates project with tasks", t => {
+// The old "manager proposes a project with its tasks" request became a plain
+// multi-task proposal (tasks_create) once projects were removed: one approval,
+// several standalone tasks, and -- the part that used to be missing -- each
+// created task's own owner privately notified through notifyExtra.
+test("a non-owner's multi-task proposal waits for Basim, then creates every task and notifies each owner", t => {
   const db = fixture(t);
-  const created = executeManagementAction(db, manager, { action: "add_project", name: "مشروع المدير" }, { now: T0 });
-  assert.equal(db.prepare("SELECT status FROM projects WHERE id=?").get(created.entityId).status, "pending");
-  const { approval } = requestProjectCreate(db, manager, { name: "تجهيز دابوق", goal: "افتتاح", tasks: [{ title: "البضاعة", ownerId: "khaled", priority: "red" }, { title: "اللوحة", ownerId: "shadi", priority: "yellow", dueDate: "2026-09-20" }] }, { now: T0 });
+  const { approval, ownerMessage } = requestTasksCreate(db, manager, { details: "افتتاح دابوق", tasks: [{ title: "البضاعة", ownerId: "khaled", priority: "red" }, { title: "اللوحة", ownerId: "shadi", priority: "yellow", dueDate: "2026-09-20" }] }, { now: T0 });
+  assert.equal(approval.type, "tasks_create");
+  assert.equal(approval.entityType, "task");
+  assert.match(ownerMessage, /يقترح فتح مهمتين/);
+  assert.doesNotMatch(ownerMessage, /مشروع/);
+  assert.equal(db.prepare("SELECT count(*) AS n FROM tasks").get().n, 2, "nothing is created before the decision");
   const decision = decideApproval(db, owner, { approvalId: approval.id, decision: "approved" }, { now: T0 + 1 });
-  const project = db.prepare("SELECT id,status FROM projects WHERE name='تجهيز دابوق'").get();
-  assert.equal(project.status, "active");
-  const tasks = db.prepare("SELECT title,suggested_owner,priority FROM tasks WHERE project_id=? ORDER BY created_at").all(project.id);
+  const tasks = db.prepare("SELECT title,suggested_owner,priority,due_date FROM tasks WHERE id NOT IN ('t1','t2') ORDER BY created_at").all();
   assert.deepEqual(tasks.map(task => [task.title, task.suggested_owner, task.priority]), [["البضاعة", "خالد", "red"], ["اللوحة", "شادي", "yellow"]]);
-  assert.match(decision.notifyGroup, /مشروع جديد/);
+  assert.equal(tasks[1].due_date, "2026-09-20");
+  assert.match(decision.notifyGroup, /مهام جديدة/);
+  assert.doesNotMatch(decision.notifyGroup, /مشروع/);
+  // Each owner individually, never one lumped notice.
+  assert.deepEqual(decision.notifyExtra.map(item => item.userId), ["khaled", "shadi"]);
+  for (const item of decision.notifyExtra) assert.match(item.text, /عيّن لك باسم مهمة/);
 });
 
-test("a manager can no longer archive a project directly; must request Basim's approval", t => {
+test("a multi-task proposal with no tasks at all is refused instead of filing an empty request", t => {
   const db = fixture(t);
-  assert.throws(() => executeManagementAction(db, manager, { action: "archive_project", projectId: "p" }, { now: T0 }), ManagementActionError);
-  const { approval, ownerMessage } = requestProjectClose(db, manager, { projectId: "p", reason: "خلصت الرخصة" }, { now: T0 });
-  assert.equal(approval.type, "project_close");
-  assert.match(ownerMessage, /مدير القسم يطلب إغلاق مشروع/);
-  // t1 and t2 are both still open in the fixture -- Basim should see that
-  // before deciding blind, since archiving never blocks on it.
-  assert.match(ownerMessage, /لسا فيه مهمتين مفتوحة/);
-  assert.equal(db.prepare("SELECT archived_at FROM projects WHERE id='p'").get().archived_at, null);
-  assert.throws(() => requestProjectClose(db, manager, { projectId: "p" }, { now: T0 + 1 }), /مماثل/);
-  assert.throws(() => requestProjectClose(db, owner, { projectId: "p" }, { now: T0 + 1 }), ManagementActionError);
-  const decision = decideApproval(db, owner, { approvalId: approval.id, decision: "approved" }, { now: T0 + 2 });
-  assert.ok(db.prepare("SELECT archived_at FROM projects WHERE id='p'").get().archived_at);
-  assert.match(decision.notifyGroup, /اعتُمد إغلاق مشروع/);
-});
-
-test("project close request says all tasks are done when none are left open", t => {
-  const db = fixture(t);
-  db.prepare("UPDATE tasks SET status='completed' WHERE project_id='p'").run();
-  const { ownerMessage } = requestProjectClose(db, manager, { projectId: "p" }, { now: T0 });
-  assert.match(ownerMessage, /كل مهام المشروع منتهية/);
-  assert.doesNotMatch(ownerMessage, /مفتوحة/);
+  assert.throws(() => requestTasksCreate(db, manager, { tasks: [] }, { now: T0 }), /اذكر المهام المطلوبة/);
+  assert.equal(db.prepare("SELECT count(*) AS n FROM approvals").get().n, 0);
 });
 
 test("employee transfers their own task to a named colleague; nothing changes before Basim decides", t => {
@@ -227,19 +217,14 @@ test("declining a task (no suggested colleague) notifies nobody extra beyond the
   assert.equal(task.owner, null); assert.equal(task.suggested_owner, null); assert.equal(task.status, "open");
 });
 
-test("agent kinds: project_close_request and task_transfer_request file requests for non-owners, clarify for Basim", t => {
+test("agent kinds: task_transfer_request files a request for a non-owner", t => {
   const db = fixture(t);
-  const ctx = { db, actor: manager, now: T0, users: [owner, khaled, shadi, manager], tasks: [], projects: [{ id: "p", name: "ترخيص دابوق", status: "active" }],
+  const ctx = { db, actor: manager, now: T0, users: [owner, khaled, shadi, manager], tasks: [],
     stash: () => { throw new Error("must not stash"); } };
-  const closeResult = handleAgentIntent({ ...emptySecretaryIntent("project_close_request"), projectId: "p" }, ctx);
-  assert.equal(closeResult.status, "applied");
-  assert.match(closeResult.reply, /رفعت طلب إغلاق مشروع/);
-  assert.equal(closeResult.notify[0].userId, "basem");
-  const asOwner = handleAgentIntent({ ...emptySecretaryIntent("project_close_request"), projectId: "p" }, { ...ctx, actor: owner });
-  assert.equal(asOwner.status, "clarify");
   const transferResult = handleAgentIntent({ ...emptySecretaryIntent("task_transfer_request"), taskId: "t1", fields: { ...emptySecretaryIntent().fields, ownerId: "shadi" } }, { ...ctx, actor: khaled });
   assert.equal(transferResult.status, "applied");
   assert.match(transferResult.reply, /رفعت طلب التحويل/);
+  assert.equal(transferResult.notify[0].userId, "basem");
 });
 
 test("findPendingApproval resolves by requester name and type words", t => {
@@ -253,17 +238,11 @@ test("findPendingApproval resolves by requester name and type words", t => {
   assert.equal(findPendingApproval(db, owner, {}).candidates.length, 2);
 });
 
-test("findPendingApproval tells a project closure apart from a task closure, and finds a transfer by text", t => {
-  // "سكر/اغلاق مشروع..." must resolve to project_close, never task_close --
-  // the two heuristics share the word "اغلاق", so the مشروع+اغلاق check has to
-  // run before the bare اغلاق check, or every project closure would be
-  // mistaken for closing a random task instead.
+test("findPendingApproval tells a task closure apart from a transfer by text", t => {
   const db = fixture(t);
   const { approval: taskCloseApproval } = requestTaskClose(db, khaled, { taskId: "t1", result: "خلصت المتابعة" }, { now: T0 });
-  const { approval: projectCloseApproval } = requestProjectClose(db, manager, { projectId: "p", reason: "خلص الترخيص" }, { now: T0 + 1 });
   db.prepare("UPDATE tasks SET owner='شادي' WHERE id='t2'").run();
   const { approval: transferApproval } = requestTaskTransfer(db, shadi, { taskId: "t2", suggestedOwnerId: "khaled" }, { now: T0 + 2 });
-  assert.equal(findPendingApproval(db, owner, { text: "اعتمد اغلاق مشروع دابوق" }).approval.id, projectCloseApproval.id);
   assert.equal(findPendingApproval(db, owner, { text: "اعتمد اغلاق مهمة عقد الايجار" }).approval.id, taskCloseApproval.id);
   assert.equal(findPendingApproval(db, owner, { text: "اعتمد تحويل المهمة لخالد" }).approval.id, transferApproval.id);
 });
@@ -311,8 +290,8 @@ test("rules: repeated corrections propose a rule; approved rule suggests owner; 
 test("agent handler: a rule statement and a repeated correction both come back with a tappable poll", t => {
   const db = fixture(t);
   const snapshot = getManagementSnapshot(db, owner);
-  const base = { intakeMode: null, action: null, taskId: null, projectId: null, recipientIds: [], fields: { title: null, name: null, details: null, priority: null, dueDate: null, ownerId: null, reason: null, body: null, remindAt: null } };
-  const ctx = now => ({ db, actor: owner, now, users: snapshot.users, tasks: snapshot.tasks, projects: snapshot.projects, stash: () => "TRUL" });
+  const base = { intakeMode: null, action: null, taskId: null, recipientIds: [], fields: { title: null, name: null, details: null, priority: null, dueDate: null, ownerId: null, reason: null, body: null, remindAt: null } };
+  const ctx = now => ({ db, actor: owner, now, users: snapshot.users, tasks: snapshot.tasks, stash: () => "TRUL" });
 
   const ruleResult = handleAgentIntent({ ...base, kind: "rule", message: "لوحة، لوحات", fields: { ...base.fields, body: "أي مهمة عن اللوحات تكون لشادي" } }, ctx(T0));
   assert.equal(ruleResult.status, "summary");
@@ -336,8 +315,8 @@ test("knowledge: FTS search with visibility scoping, checked by the agent before
   assert.equal(searchKnowledge(db, khaled, "ترخيص صيدلية").length, 1);
   assert.equal(searchKnowledge(db, khaled, "رواتب").length, 0, "owner-only entries hidden");
   assert.equal(searchKnowledge(db, owner, "رواتب").length, 1);
-  const result = handleAgentIntent({ kind: "knowledge", intakeMode: null, action: null, taskId: null, projectId: null, recipientIds: [], message: "كيف نرخص صيدلية", fields: { title: null, name: null, details: null, priority: null, dueDate: null, ownerId: null, reason: null, body: null, remindAt: null } },
-    { db, actor: khaled, now: T0, users: [], tasks: [], projects: [], stash: () => "T1" });
+  const result = handleAgentIntent({ kind: "knowledge", intakeMode: null, action: null, taskId: null, recipientIds: [], message: "كيف نرخص صيدلية", fields: { title: null, name: null, details: null, priority: null, dueDate: null, ownerId: null, reason: null, body: null, remindAt: null } },
+    { db, actor: khaled, now: T0, users: [], tasks: [], stash: () => "T1" });
   assert.match(result.reply, /نقابة الصيادلة/);
 });
 // A short reference-list entry (Basim's real "دليل أوامر تيتانيوم" case) used
@@ -366,9 +345,9 @@ test("knowledge answers show the full body, not a truncated FTS snippet, unless 
 
 test("agent handler: employee extension files a request and notifies owner; owner gets confirmation token instead", t => {
   const db = fixture(t);
-  const base = { intakeMode: null, action: null, projectId: null, recipientIds: [], message: null, fields: { title: null, name: null, details: null, priority: null, dueDate: "2026-09-08", ownerId: null, reason: "المحامي", body: null, remindAt: null } };
+  const base = { intakeMode: null, action: null, recipientIds: [], message: null, fields: { title: null, name: null, details: null, priority: null, dueDate: "2026-09-08", ownerId: null, reason: "المحامي", body: null, remindAt: null } };
   const snapshot = getManagementSnapshot(db, owner);
-  const ctx = actor => ({ db, actor, now: T0, users: snapshot.users, tasks: snapshot.tasks, projects: snapshot.projects, stash: () => "TABC" });
+  const ctx = actor => ({ db, actor, now: T0, users: snapshot.users, tasks: snapshot.tasks, stash: () => "TABC" });
   const member = handleAgentIntent({ ...base, kind: "extension", taskId: "t1" }, ctx(khaled));
   assert.equal(member.status, "applied"); assert.equal(member.notify[0].userId, "basem");
   assert.equal(listApprovals(db, owner).length, 1);
@@ -388,9 +367,9 @@ test("agent handler: employee extension files a request and notifies owner; owne
 // himself gets a direct confirmation token instead.
 test("agent handler: employee priority_change files a request and notifies owner; owner gets confirmation token instead", t => {
   const db = fixture(t);
-  const base = { intakeMode: null, action: null, projectId: null, recipientIds: [], message: null, fields: { title: null, name: null, details: null, priority: "red", dueDate: null, ownerId: null, reason: "قصة عاجلة", body: null, remindAt: null } };
+  const base = { intakeMode: null, action: null, recipientIds: [], message: null, fields: { title: null, name: null, details: null, priority: "red", dueDate: null, ownerId: null, reason: "قصة عاجلة", body: null, remindAt: null } };
   const snapshot = getManagementSnapshot(db, owner);
-  const ctx = actor => ({ db, actor, now: T0, users: snapshot.users, tasks: snapshot.tasks, projects: snapshot.projects, stash: () => "TXYZ" });
+  const ctx = actor => ({ db, actor, now: T0, users: snapshot.users, tasks: snapshot.tasks, stash: () => "TXYZ" });
   const clarify = handleAgentIntent({ ...base, kind: "priority_change", taskId: "t1", fields: { ...base.fields, priority: null } }, ctx(khaled));
   assert.equal(clarify.status, "clarify", "no priority named yet must ask, not guess");
   const member = handleAgentIntent({ ...base, kind: "priority_change", taskId: "t1" }, ctx(khaled));
@@ -415,8 +394,8 @@ test("agent handler: employee priority_change files a request and notifies owner
 test("decide resolves an ordinal from the admin's raw text even when the model's own message paraphrase drops it, and \"الكل\" decides every pending request at once", t => {
   const db = fixture(t);
   const snapshot = getManagementSnapshot(db, owner);
-  const ctx = text => ({ db, actor: owner, now: T0, text, users: snapshot.users, tasks: snapshot.tasks, projects: snapshot.projects, stash: () => "T" });
-  const base = { intakeMode: null, action: "reject", taskId: null, projectId: null, recipientIds: [], fields: { title: null, name: null, details: null, priority: null, dueDate: null, ownerId: null, reason: null, body: null, remindAt: null } };
+  const ctx = text => ({ db, actor: owner, now: T0, text, users: snapshot.users, tasks: snapshot.tasks, stash: () => "T" });
+  const base = { intakeMode: null, action: "reject", taskId: null, recipientIds: [], fields: { title: null, name: null, details: null, priority: null, dueDate: null, ownerId: null, reason: null, body: null, remindAt: null } };
   requestDeadlineExtension(db, khaled, { taskId: "t1", newDueDate: "2026-09-10", reason: "المحكمة" }, { now: T0 });
   requestTaskOwnership(db, shadi, { taskId: "t2" }, { now: T0 + 1 });
   assert.equal(listApprovals(db, owner).length, 2);
@@ -458,11 +437,11 @@ test("approvals listing and the ambiguous-decide clarify attach a real tap-to-de
   const db = fixture(t);
   migrateSecretaryChoices(db);
   const snapshot = getManagementSnapshot(db, owner);
-  const ctx = (actor, extra = {}) => ({ db, actor, now: T0, conversationKey: "basem-dm", users: snapshot.users, tasks: snapshot.tasks, projects: snapshot.projects, stash: () => "T", ...extra });
+  const ctx = (actor, extra = {}) => ({ db, actor, now: T0, conversationKey: "basem-dm", users: snapshot.users, tasks: snapshot.tasks, stash: () => "T", ...extra });
   const inTx = work => { db.exec("BEGIN"); try { const result = work(); db.exec("COMMIT"); return result; } catch (error) { db.exec("ROLLBACK"); throw error; } };
   requestDeadlineExtension(db, khaled, { taskId: "t1", newDueDate: "2026-09-10", reason: "المحكمة" }, { now: T0 });
   requestTaskOwnership(db, shadi, { taskId: "t2" }, { now: T0 + 1 });
-  const base = { intakeMode: null, action: null, taskId: null, projectId: null, recipientIds: [], fields: { title: null, name: null, details: null, priority: null, dueDate: null, ownerId: null, reason: null, body: null, remindAt: null } };
+  const base = { intakeMode: null, action: null, taskId: null, recipientIds: [], fields: { title: null, name: null, details: null, priority: null, dueDate: null, ownerId: null, reason: null, body: null, remindAt: null } };
   // Owner listing: one ✅/❌ pair per pending request, no number to pick.
   const list = inTx(() => handleAgentIntent({ ...base, kind: "approvals", message: null }, ctx(owner)));
   assert.ok(list.choices, "owner approvals listing must attach a real poll");
@@ -487,34 +466,46 @@ test("approvals listing and the ambiguous-decide clarify attach a real tap-to-de
   assert.equal(noKey.choices, undefined);
   assert.match(noKey.reply, /بانتظار قرارك|طلب/);
   // Beyond the 12-option/6-approval cap, fall back to text-only rather than
-  // failing createSecretaryChoices' own option-count guard. project_create
+  // failing createSecretaryChoices' own option-count guard. tasks_create
   // requests have no entity yet, so they can pile up freely (no dedup) --
   // a convenient way to pad the count past 6 without juggling ownership rules.
-  for (let i = 0; i < 5; i++) requestProjectCreate(db, khaled, { name: `مشروع تجريبي ${i}` }, { now: T0 + 10 + i });
+  for (let i = 0; i < 5; i++) requestTasksCreate(db, khaled, { tasks: [{ title: `مهمة تجريبية ${i}` }] }, { now: T0 + 10 + i });
   assert.ok(listApprovals(db, owner, { status: "pending" }).length > 6);
   const tooMany = inTx(() => handleAgentIntent({ ...base, kind: "approvals" }, ctx(owner)));
   assert.equal(tooMany.choices, undefined);
 });
 
-test("project_draft parses task lines, previews for owner, and bundle creation is atomic + audited", t => {
+test("tasks_draft parses task lines, previews for owner, and creates every task through add_task -- notifying each owner", t => {
   const db = fixture(t);
   const snapshot = getManagementSnapshot(db, owner);
-  const parsed = parseProjectTaskLines("البضاعة | khaled | red | -\nاللوحة | شادي | yellow | 2026-09-20\nالاتصالات | ghost | green | -", snapshot.users);
+  const parsed = parseTaskLines("البضاعة | khaled | red | -\nاللوحة | شادي | yellow | 2026-09-20\nالاتصالات | ghost | green | -", snapshot.users);
   assert.equal(parsed.tasks.length, 3); assert.equal(parsed.tasks[1].ownerId, "shadi"); assert.equal(parsed.problems.length, 1);
-  const plan = { kind: "project_draft", intakeMode: null, action: null, taskId: null, projectId: null, recipientIds: [], message: "البضاعة | khaled | red | -", fields: { title: null, name: "تجهيز دابوق", details: "افتتاح الفرع", priority: null, dueDate: null, ownerId: null, reason: null, body: null, remindAt: null } };
+  const plan = { kind: "tasks_draft", intakeMode: null, action: null, taskId: null, recipientIds: [], message: "البضاعة | khaled | red | -\nاللوحة | shadi | yellow | 2026-09-20", fields: { title: null, name: null, details: "افتتاح الفرع", priority: null, dueDate: null, ownerId: null, reason: null, body: null, remindAt: null } };
   const stashed = [];
-  const preview = handleAgentIntent(plan, { db, actor: owner, now: T0, users: snapshot.users, tasks: snapshot.tasks, projects: snapshot.projects, stash: command => { stashed.push(command); return "TXYZ"; } });
-  assert.equal(preview.status, "confirmation"); assert.match(preview.reply, /ملخص المشروع قبل الإنشاء/);
-  assert.equal(stashed[0].action, "create_project_bundle");
-  const result = createProjectBundle(db, owner, stashed[0], T0 + 5, { origin: "test" });
-  assert.match(result.reply, /مع مهمة واحدة/);
-  assert.equal(result.projectId, db.prepare("SELECT id FROM projects WHERE name='تجهيز دابوق'").get().id);
-  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM tasks WHERE project_id=(SELECT id FROM projects WHERE name='تجهيز دابوق')").get().n, 1);
-  // A plain member may also propose a project now (approval.request, which every
-  // role has) -- it is filed for Basim's decision, never created directly.
-  const filed = handleAgentIntent(plan, { db, actor: khaled, now: T0, users: snapshot.users, tasks: snapshot.tasks, projects: snapshot.projects, stash: () => "T" });
+  const preview = handleAgentIntent(plan, { db, actor: owner, now: T0, users: snapshot.users, tasks: snapshot.tasks, stash: command => { stashed.push(command); return "TXYZ"; } });
+  assert.equal(preview.status, "confirmation");
+  assert.match(preview.reply, /ملخص المهام قبل الإنشاء/);
+  assert.doesNotMatch(preview.reply, /مشروع/);
+  assert.equal(stashed[0].action, "create_tasks");
+  // Every created task is handed to the notifier individually -- the exact bug
+  // the old createStandaloneTask/createProjectBundle pair had (no notice at all).
+  const notified = [];
+  const result = createTasks(db, owner, stashed[0], T0 + 5, { origin: "test" }, (created, ownerId) => notified.push([created.action, created.notification.title, ownerId]));
+  assert.match(result.reply, /أضفت مهمتين/);
+  assert.deepEqual(notified, [["add_task", "البضاعة", "khaled"], ["add_task", "اللوحة", "shadi"]]);
+  const created = db.prepare("SELECT title,suggested_owner,details FROM tasks WHERE id NOT IN ('t1','t2') ORDER BY created_at").all();
+  assert.deepEqual(created.map(row => [row.title, row.suggested_owner]), [["البضاعة", "خالد"], ["اللوحة", "شادي"]]);
+  assert.equal(created[0].details, "افتتاح الفرع");
+  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM audit_logs WHERE action='create'").get().n, 2, "each task is audited on its own");
+  // suppressNotices ("بدون إشعارات للفريق") still creates the tasks, silently.
+  const silent = createTasks(db, owner, { ...stashed[0], suppressNotices: true }, T0 + 9, { origin: "test" }, () => assert.fail("must not notify"));
+  assert.match(silent.reply, /بدون إرسال إشعارات للفريق/);
+  // A plain member may also propose several tasks -- filed for Basim's decision,
+  // never created directly.
+  const filed = handleAgentIntent(plan, { db, actor: khaled, now: T0, users: snapshot.users, tasks: snapshot.tasks, stash: () => "T" });
   assert.equal(filed.status, "applied");
-  assert.match(filed.reply, /رفعت اقتراح المشروع/);
+  assert.match(filed.reply, /رفعت اقتراح مهمتين/);
+  assert.equal(filed.notify[0].userId, "basem");
 });
 
 test("follow-ups: overdue owner nudge once per day, stale approval to owner, digest bounded; queued notifications first", async t => {
@@ -549,8 +540,8 @@ test("follow-ups: overdue owner nudge once per day, stale approval to owner, dig
 test("unclaimed task: hourly nudge to its suggested owner during work hours, stopping once they respond", async t => {
   const db = fixture(t);
   // t2 (open, no suggested_owner) must never nudge -- nobody is responsible yet.
-  db.exec(`INSERT INTO tasks (id,project_id,title,status,owner,suggested_owner,due_date,created_at,updated_at)
-    VALUES ('t6','p','تجديد الرخصة','open',NULL,'شادي',NULL,100,100)`);
+  db.exec(`INSERT INTO tasks (id,title,status,owner,suggested_owner,due_date,created_at,updated_at)
+    VALUES ('t6','تجديد الرخصة','open',NULL,'شادي',NULL,100,100)`);
   const config = { enabled: true, contacts: [{ userId: "basem", number: "966500000000" }, { userId: "khaled", number: "962770000000" }, { userId: "shadi", number: "962780000000" }], groupId: "123@g.us" };
   const at = Date.UTC(2026, 8, 10, 7, 0); // 10:00 Amman, inside the 9-18 work-hours window
 
@@ -583,8 +574,8 @@ test("unclaimed task: hourly nudge to its suggested owner during work hours, sto
 
 test("unclaimed task nudge stops as soon as the task is claimed", t => {
   const db = fixture(t);
-  db.exec(`INSERT INTO tasks (id,project_id,title,status,owner,suggested_owner,due_date,created_at,updated_at)
-    VALUES ('t7','p','جرد المستودع','open',NULL,'شادي',NULL,100,100)`);
+  db.exec(`INSERT INTO tasks (id,title,status,owner,suggested_owner,due_date,created_at,updated_at)
+    VALUES ('t7','جرد المستودع','open',NULL,'شادي',NULL,100,100)`);
   const config = { enabled: true, contacts: [{ userId: "basem", number: "966500000000" }, { userId: "shadi", number: "962780000000" }], groupId: "123@g.us" };
   const at = Date.UTC(2026, 8, 10, 7, 0);
   assert.equal(planFollowups(db, config, at).filter(plan => plan.kind === "unclaimed_task").length, 1);
@@ -602,18 +593,18 @@ test("Basim gets a once-daily private digest of tasks still unclaimed after a da
   const day1 = Date.UTC(2026, 8, 10, 7, 0); // 10:00 Amman
   const day2 = day1 + 24 * 60 * 60_000;
 
-  db.exec(`INSERT INTO tasks (id,project_id,title,status,owner,suggested_owner,due_date,created_at,updated_at)
-    VALUES ('fresh','p','مهمة جديدة','open',NULL,'شادي',NULL,${day1},${day1})`);
+  db.exec(`INSERT INTO tasks (id,title,status,owner,suggested_owner,due_date,created_at,updated_at)
+    VALUES ('fresh','مهمة جديدة','open',NULL,'شادي',NULL,${day1},${day1})`);
   assert.equal(planFollowups(db, config, day1).filter(plan => plan.kind === "stale_unclaimed").length, 0,
     "a task suggested moments ago doesn't bother Basim yet -- give the employee's own nudge a day to work first");
 
-  db.exec(`INSERT INTO tasks (id,project_id,title,status,owner,suggested_owner,due_date,created_at,updated_at)
-    VALUES ('stale1','p','تجديد ترخيص الصيدلية','open',NULL,'شادي',NULL,100,100),
-           ('stale2','p','مراجعة عقد الموزع','open',NULL,'خالد',NULL,100,100),
-           ('claimed','p','مهمة مستلمة','progress','خالد',NULL,NULL,100,100),
-           ('nobody','p','مهمة بلا مقترح','open',NULL,NULL,NULL,100,100),
-           ('done','p','مهمة خلصت','completed','شادي',NULL,NULL,100,100),
-           ('gone','p','مهمة مؤرشفة','open',NULL,'شادي',NULL,100,100)`);
+  db.exec(`INSERT INTO tasks (id,title,status,owner,suggested_owner,due_date,created_at,updated_at)
+    VALUES ('stale1','تجديد ترخيص الصيدلية','open',NULL,'شادي',NULL,100,100),
+           ('stale2','مراجعة عقد الموزع','open',NULL,'خالد',NULL,100,100),
+           ('claimed','مهمة مستلمة','progress','خالد',NULL,NULL,100,100),
+           ('nobody','مهمة بلا مقترح','open',NULL,NULL,NULL,100,100),
+           ('done','مهمة خلصت','completed','شادي',NULL,NULL,100,100),
+           ('gone','مهمة مؤرشفة','open',NULL,'شادي',NULL,100,100)`);
   db.exec("UPDATE tasks SET archived_at=100,archived_by='باسم' WHERE id='gone'");
 
   const plans = planFollowups(db, config, day2).filter(plan => plan.kind === "stale_unclaimed");
@@ -639,10 +630,10 @@ test("twice-daily auto reminder fires at local 8am/8pm regardless of work hours,
   // t3 is only suggested (never claimed) -- still belongs on شادي's reminder,
   // same "who is responsible" convention as the on-demand broadcast.
   // t4 is completed and t5 archived: neither should ever appear.
-  db.exec(`INSERT INTO tasks (id,project_id,title,status,owner,suggested_owner,due_date,created_at,updated_at,started_at,completed_at,archived_at)
-    VALUES ('t3','p','دراسة الموقع','open',NULL,'شادي',NULL,100,100,NULL,NULL,NULL),
-           ('t4','p','مهمة مكتملة','completed','خالد',NULL,NULL,100,100,100,100,NULL),
-           ('t5','p','مهمة مؤرشفة','progress','خالد',NULL,NULL,100,100,100,NULL,100)`);
+  db.exec(`INSERT INTO tasks (id,title,status,owner,suggested_owner,due_date,created_at,updated_at,started_at,completed_at,archived_at)
+    VALUES ('t3','دراسة الموقع','open',NULL,'شادي',NULL,100,100,NULL,NULL,NULL),
+           ('t4','مهمة مكتملة','completed','خالد',NULL,NULL,100,100,100,100,NULL),
+           ('t5','مهمة مؤرشفة','progress','خالد',NULL,NULL,100,100,100,NULL,100)`);
   const config = { enabled: true, contacts: [{ userId: "basem", number: "966500000000" }, { userId: "khaled", number: "962770000000" }, { userId: "shadi", number: "962780000000" }], groupId: "123@g.us" };
   const morning = Date.UTC(2026, 8, 10, 5, 0); // 08:00 Amman
   const evening = Date.UTC(2026, 8, 10, 17, 0); // 20:00 Amman

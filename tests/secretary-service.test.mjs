@@ -10,15 +10,13 @@ function fixture(t) {
   const db = new DatabaseSync(':memory:'); t.after(() => db.close());
   db.exec(`PRAGMA foreign_keys=ON;
     CREATE TABLE users(id TEXT PRIMARY KEY,name TEXT UNIQUE,role TEXT,active INTEGER,pin_hash TEXT,created_at INTEGER,updated_at INTEGER);
-    CREATE TABLE projects(id TEXT PRIMARY KEY,name TEXT,status TEXT,created_by TEXT,created_at INTEGER,rejection_reason TEXT,rejected_by TEXT,rejected_at INTEGER);
-    CREATE TABLE tasks(id TEXT PRIMARY KEY,project_id TEXT REFERENCES projects(id),title TEXT,details TEXT,priority TEXT,status TEXT,owner TEXT,suggested_owner TEXT,started_at INTEGER,due_date TEXT,completed_at INTEGER,rejection_reason TEXT,created_at INTEGER,updated_at INTEGER,archived_at INTEGER,archived_by TEXT);
+    CREATE TABLE tasks(id TEXT PRIMARY KEY,title TEXT,details TEXT,priority TEXT,status TEXT,owner TEXT,suggested_owner TEXT,started_at INTEGER,due_date TEXT,completed_at INTEGER,rejection_reason TEXT,created_at INTEGER,updated_at INTEGER,archived_at INTEGER,archived_by TEXT);
     CREATE TABLE comments(id INTEGER PRIMARY KEY,task_id TEXT REFERENCES tasks(id),author TEXT,body TEXT,created_at INTEGER);
     CREATE TABLE attachments(id TEXT PRIMARY KEY,task_id TEXT REFERENCES tasks(id),file_name TEXT,content_type TEXT,size INTEGER,object_key TEXT,uploaded_by TEXT,created_at INTEGER);
     CREATE TABLE audit_logs(id INTEGER PRIMARY KEY,actor_user_id TEXT,actor_name TEXT,action TEXT,entity_type TEXT,entity_id TEXT,details TEXT,created_at INTEGER);
     INSERT INTO users VALUES('basem','باسم','admin',1,NULL,1,1),('member','خالد','member',1,NULL,1,1),('other','شادي','member',1,NULL,1,1);
-    INSERT INTO projects VALUES('p','مشروع تجريبي','active','باسم',1,NULL,NULL,NULL),('p2','مشروع ثان','active','باسم',1,NULL,NULL,NULL);
-    INSERT INTO tasks VALUES('t','p','لوحة','تفاصيل تنفيذ','red','progress','خالد','خالد',1,'2026-01-01',NULL,NULL,1,1,NULL,NULL),
-      ('private','p2','مهمة شادي الخاصة','تفاصيل سرية','yellow','progress','شادي','شادي',1,NULL,NULL,NULL,1,1,NULL,NULL);`);
+    INSERT INTO tasks VALUES('t','لوحة','تفاصيل تنفيذ','red','progress','خالد','خالد',1,'2026-01-01',NULL,NULL,1,1,NULL,NULL),
+      ('private','مهمة شادي الخاصة','تفاصيل سرية','yellow','progress','شادي','شادي',1,NULL,NULL,NULL,1,1,NULL,NULL);`);
   migrateSecretary(db);
   const config = { enabled:true, sharedKey:'ab'.repeat(32), contacts:[{userId:'basem',number:'12025550103'},{userId:'member',number:'12025550101'},{userId:'other',number:'12025550102'}],allowedGroupIds:['12345@g.us'] };
   let count = 0, now = 1788580000000;
@@ -26,15 +24,15 @@ function fixture(t) {
   const run = (plan=emptySecretaryIntent('summary'),extra={},infer) => handleSecretaryEvent(db,event(extra),config,{ infer:infer || (async()=>plan),now:()=>now });
   return {db,config,event,run,get now(){return now;},tick:n=>{now+=n;}};
 }
-function command(action,fields={},taskId='t',projectId=null) { const p=emptySecretaryIntent('command');return {...p,action,taskId,projectId,fields:{...p.fields,...fields}}; }
+function command(action,fields={},taskId='t') { const p=emptySecretaryIntent('command');return {...p,action,taskId,fields:{...p.fields,...fields}}; }
 function teamMessage(text='الاجتماع بكرا الساعة 10',recipientIds=['all-team']) { const p=emptySecretaryIntent('message_team');p.fields.body=text;p.recipientIds=recipientIds;return p; }
 const pending = db => db.prepare('SELECT * FROM secretary_pending').get();
 
-test('caller identity with projects comes from authenticated sender without model IDs or guessed identity',async t=>{
+test('caller identity comes from the authenticated sender without model IDs or guessed identity',async t=>{
  const f=fixture(t);
- const result=await f.run(emptySecretaryIntent('chat','إنت مين؟'),{senderNumber:'12025550103',text:'مرحبا، مين أنا وشو المشاريع الموجودة عندنا؟'},async()=>{throw Error('Identity needs no inference');});
- assert.match(result.reply,/أهلًا باسم/);assert.match(result.reply,/مشروع تجريبي/);
- assert.doesNotMatch(result.reply,/ID:|إنت مين|أنا بخير/);
+ const result=await f.run(emptySecretaryIntent('chat','إنت مين؟'),{senderNumber:'12025550103',text:'مرحبا، مين أنا؟'},async()=>{throw Error('Identity needs no inference');});
+ assert.match(result.reply,/أهلًا باسم/);
+ assert.doesNotMatch(result.reply,/ID:|إنت مين|أنا بخير|مشروع/);
  const member=await f.run(emptySecretaryIntent('chat'),{text:'مين أنا؟'},async()=>{throw Error('No inference');});
  assert.match(member.reply,/أهلًا خالد/);assert.doesNotMatch(member.reply,/أهلًا باسم/);
 });
@@ -72,11 +70,11 @@ test('secretary scoped friendly summary has direct link and no foreign data', as
  const f=fixture(t); const result=await f.run(); assert.equal(result.status,'summary'); assert.match(result.reply,/خالد/);assert.match(result.reply,/🔴 لوحة/);assert.doesNotMatch(result.reply,/https?:\/\/|مهمة شادي|تفاصيل سرية/);
 });
 test('task card colors are actual priority, never completion or lateness',()=>{
- const state={projects:[{id:'p',name:'مشروع'}],comments:[]};
+ const state={comments:[]};
  for(const [priority,status,dueDate,emoji,label] of [
   ['red','completed',null,'🔴','قصوى'],['green','progress','2020-01-01','🟢','عادية'],['yellow','open',null,'🟡','متوسطة'],
  ]){
-  const text=secretaryTaskCard({id:'t',projectId:'p',title:'مهمة',priority,status,dueDate},state,1788580000000);
+  const text=secretaryTaskCard({id:'t',title:'مهمة',priority,status,dueDate},state,1788580000000);
   assert.ok(text.startsWith(emoji+' مهمة'));assert.match(text,new RegExp(`الأولوية: ${label}`));
   if(priority==='green')assert.match(text,/متأخرة عن الموعد/);
  }
@@ -100,15 +98,18 @@ test('priority lists retain member scope and fresh DB facts over incorrect histo
  assert.match(r.reply,/لوحة/);assert.doesNotMatch(r.reply,/شادي|private|تفاصيل سرية/);
  const yellow=await f.run(undefined,{text:'المهام الصفراء'},async()=>{throw Error('must not infer');});assert.match(yellow.reply,/ما في مهام تطابق/);
 });
-test('priority lists match exact project and current owner qualifiers',async t=>{
+test('priority lists match the current owner qualifier, and a project qualifier is not a thing anymore',async t=>{
  const f=fixture(t);f.db.exec("UPDATE tasks SET priority='red' WHERE id='private'");
  const run=text=>f.run(undefined,{text,senderNumber:'12025550103'},async()=>{throw Error('must not infer');});
- const project=await run('المهام الحمراء في مشروع ثان');assert.match(project.reply,/مهمة شادي/);assert.doesNotMatch(project.reply,/\*لوحة\*/);
  const owner=await run('المهام الحمراء لخالد');assert.match(owner.reply,/لوحة/);assert.doesNotMatch(owner.reply,/مهمة شادي/);
+ const other=await run('المهام الحمراء لشادي');assert.match(other.reply,/مهمة شادي/);assert.doesNotMatch(other.reply,/\*لوحة\*/);
+ // An unknown qualifier is never silently dropped -- "في مشروع ثان" is now just
+ // an unrecognized filter, so it asks instead of listing everything.
+ assert.equal((await run('المهام الحمراء في مشروع ثان')).status,'clarify');
 });
 test('priority pagination declares counts, stays bounded and preserves every task across pages',async t=>{
  const f=fixture(t);
- const insert=f.db.prepare("INSERT INTO tasks(id,project_id,title,details,priority,status,owner,created_at,updated_at) VALUES(?,'p',?,'','red','open','خالد',1,1)");
+ const insert=f.db.prepare("INSERT INTO tasks(id,title,details,priority,status,owner,created_at,updated_at) VALUES(?,?,'','red','open','خالد',1,1)");
  for(let n=1;n<=18;n++)insert.run('page-'+n,'تجربة قائمة '+n);
  const run=text=>f.run(undefined,{text},async()=>{throw Error('must not infer');});
  let text='المهام الحمراء';const seen=new Set();let pages=0;
@@ -131,13 +132,13 @@ test('explicit status filters are separate from color and extra qualifiers never
  const late=await run('المهام الحمراء المتأخرة');assert.match(late.reply,/لوحة/);assert.doesNotMatch(late.reply,/مهمة شادي/);
  for(const text of ['المهام الحمراء والصفراء','المهام الحمراء بدون مهام خالد','المهام الحمراء اليوم'])assert.equal((await run(text)).status,'clarify');
 });
-test('continuation removes every accepted page suffix and retains owner/project filters',async t=>{
- const f=fixture(t);const insert=f.db.prepare("INSERT INTO tasks(id,project_id,title,details,priority,status,owner,created_at,updated_at) VALUES(?,'p',?,'','red','open','خالد',1,1)");
+test('continuation removes every accepted page suffix and retains the owner filter',async t=>{
+ const f=fixture(t);const insert=f.db.prepare("INSERT INTO tasks(id,title,details,priority,status,owner,created_at,updated_at) VALUES(?,?,'','red','open','خالد',1,1)");
  for(let n=1;n<=26;n++)insert.run('page-'+n,'تجربة '+n);
  const run=text=>f.run(undefined,{text,senderNumber:'12025550103'},async()=>{throw Error('must not infer');});
  for(const suffix of ['من رقم 11','ابتداء من 11','من ۱۱']){
-  const r=await run('المهام الحمراء في مشروع تجريبي لخالد '+suffix);
-  const next=/للتكملة اكتب: «([^»]+)»/.exec(r.reply);assert.ok(next);assert.match(next[1],/^المهام الحمراء في مشروع تجريبي لخالد من \d+$/);
+  const r=await run('المهام الحمراء لخالد '+suffix);
+  const next=/للتكملة اكتب: «([^»]+)»/.exec(r.reply);assert.ok(next);assert.match(next[1],/^المهام الحمراء لخالد من \d+$/);
   assert.equal((await run(next[1])).status,'summary');
  }
 });
@@ -230,10 +231,9 @@ test('forged model task ID and member admin action cannot write',async t=>{
  const f=fixture(t);assert.equal((await f.run(command('delete_task'),{text:'احذف المهمة'})).status,'denied');assert.equal(pending(f.db),undefined);
  assert.equal((await f.run(command('comment',{body:'hack'},'private'))).status,'clarify');assert.equal(f.db.prepare('SELECT count(*) n FROM comments').get().n,0);
 });
-test('manager create task and project use real authorized IDs; delete needs confirmation',async t=>{
- const f=fixture(t);const e={senderNumber:'12025550103',text:'افتح مشروع تجريبي جديد'};
- assert.equal((await f.run(command('add_project',{name:'مشروع جديد'},null),e)).status,'applied');
- assert.equal((await f.run(command('add_task',{title:'مهمة جديدة',ownerId:'member',priority:'yellow',dueDate:'unscheduled'},null,'p'),{...e,text:'ضيف مهمة جديدة لخالد بأولوية متوسطة وبدون موعد'})).status,'confirmation');
+test('admin create task uses real authorized IDs; delete needs confirmation',async t=>{
+ const f=fixture(t);const e={senderNumber:'12025550103',text:'ضيف مهمة جديدة'};
+ assert.equal((await f.run(command('add_task',{title:'مهمة جديدة',ownerId:'member',priority:'yellow',dueDate:'unscheduled'},null),{...e,text:'ضيف مهمة جديدة لخالد بأولوية متوسطة وبدون موعد'})).status,'confirmation');
  assert.equal((await f.run(undefined,{...e,text:`موافق ${pending(f.db).token}`})).status,'applied');
  assert.equal((await f.run(command('delete_task',{},'private'),{...e,text:'احذف مهمة شادي'})).status,'confirmation');assert.ok(f.db.prepare("SELECT id FROM tasks WHERE id='private'").get());
 });
@@ -315,7 +315,7 @@ test('model inputs contain only catalog titles/status/IDs, not task details or l
  const f=fixture(t);await f.run(undefined,{},async input=>{assert.doesNotMatch(JSON.stringify(input),/تفاصيل تنفيذ|pin_hash|senderNumber|sharedKey/);return emptySecretaryIntent('help');});
 });
 test('partial and future completion are not submit',()=>{
- for(const text of['ما خلصت اللوحة','لسه ناقص شيء','بكرا بخلص','half done?']){const input={text,tasks:[{id:'t',title:'لوحة',projectId:'p',status:'progress'}],projects:[],users:[],actor:{id:'member',name:'خالد',role:'member'},history:[],now:new Date().toISOString()};assert.equal(validateSecretaryIntent(command('submit'),input).kind,'clarify');}
+ for(const text of['ما خلصت اللوحة','لسه ناقص شيء','بكرا بخلص','half done?']){const input={text,tasks:[{id:'t',title:'لوحة',projectId:'p',status:'progress'}],users:[],actor:{id:'member',name:'خالد',role:'member'},history:[],now:new Date().toISOString()};assert.equal(validateSecretaryIntent(command('submit'),input).kind,'clarify');}
 });
 test('explicit reminder is durable, sent once and not sent for completed work',async t=>{
  const f=fixture(t);let p=emptySecretaryIntent('remind');p.taskId='t';p.fields.remindAt=new Date(f.now+120000).toISOString();assert.equal((await f.run(p,{text:'ذكرني باللوحة بعد دقيقتين'})).status,'scheduled');f.tick(120001);
@@ -327,7 +327,7 @@ test('provider search never receives catalog or history and requires actual web 
  assert.equal(body.model,'gpt-4.1-mini');assert.deepEqual(body.tools,[{type:'web_search',search_context_size:'medium'}]);assert.equal(body.tool_choice,'required');assert.doesNotMatch(JSON.stringify(body),/taskCatalog|senderNumber|contacts/);assert.match(reply,/ما قدرت أتحقق/);
 });
 test('planner response limits reject tool calls and success cannot come from model JSON',async()=>{
- const input={text:'مرحبا',tasks:[],projects:[],users:[],actor:{id:'member',name:'خالد',role:'member'},history:[],now:new Date().toISOString()};
+ const input={text:'مرحبا',tasks:[],users:[],actor:{id:'member',name:'خالد',role:'member'},history:[],now:new Date().toISOString()};
  await assert.rejects(inferSecretaryIntent(input,{apiKey:'synthetic',fetcher:async()=>Response.json({choices:[{finish_reason:'stop',message:{content:JSON.stringify(emptySecretaryIntent('help')),tool_calls:[{}]}}]})}));
 });
 
@@ -338,14 +338,20 @@ test('voice create/comment/reminder always require confirmation before any write
  assert.equal((await f.run(undefined,{text:`موافق ${pending(f.db).token}`})).status,'scheduled');
 });
 
-test('identical titles require a uniquely named project, literal ID, or server-bound focus',()=>{
- const input={text:'سجل تحديث للوحة',tasks:[{id:'task-one',title:'لوحة',projectId:'p',status:'progress'},{id:'task-two',title:'لوحة',projectId:'p2',status:'progress'}],projects:[{id:'p',name:'المشروع الأول',status:'active'},{id:'p2',name:'المشروع الثاني',status:'active'}],users:[],actor:{id:'member',name:'خالد',role:'member'},history:[],now:new Date().toISOString()};
+// With projects gone, a duplicate task title can only be disambiguated by the
+// literal task id or by this conversation's own server-bound focus -- never by
+// naming some container the task supposedly sits in.
+test('identical titles require a literal task ID or server-bound focus',()=>{
+ const input={text:'سجل تحديث للوحة',tasks:[{id:'task-one',title:'لوحة',status:'progress'},{id:'task-two',title:'لوحة',status:'progress'}],users:[],actor:{id:'member',name:'خالد',role:'member'},history:[],now:new Date().toISOString()};
  const plan=command('comment',{body:'تحديث'},'task-one');
- assert.equal(validateSecretaryIntent(plan,input).kind,'clarify');
- assert.equal(validateSecretaryIntent(plan,{...input,text:'سجل تحديث للوحة في المشروع الأول'}).kind,'command');
+ const ambiguous=validateSecretaryIntent(plan,input);
+ assert.equal(ambiguous.kind,'clarify');
+ assert.match(ambiguous.message,/معرّف المهمة/);
+ assert.doesNotMatch(ambiguous.message,/مشروع/);
  assert.equal(validateSecretaryIntent(plan,{...input,focusedTaskId:'task-one'}).kind,'command');
  assert.equal(validateSecretaryIntent(plan,{...input,text:'سجل تحديث task-one'}).kind,'command');
- assert.equal(validateSecretaryIntent(plan,{...input,text:'سجل تحديث في المشروع الأول',tasks:input.tasks.map(t=>({...t,projectId:'p'}))}).kind,'clarify');
+ // Naming anything else, however confidently, still does not resolve it.
+ assert.equal(validateSecretaryIntent(plan,{...input,text:'سجل تحديث للوحة الأولى'}).kind,'clarify');
 });
 
 test('freeform replies and history lose visibility when input task permissions change',async t=>{
@@ -415,26 +421,26 @@ test('bare approval without a pending request cannot become a model-generated ac
  assert.equal(f.db.prepare('SELECT count(*) n FROM comments').get().n,0);
 });
 
-test('duplicate project names require the selected literal ID in the current message',()=>{
- const input={text:'أضف مهمة إلى مشروع التجهيز',tasks:[{id:'task-one',title:'لوحة',projectId:'project-one',status:'progress'}],projects:[{id:'project-one',name:'مشروع التجهيز',status:'active'},{id:'project-two',name:'مَشروع التجهيز',status:'active'}],users:[],actor:{id:'basem',name:'باسم',role:'admin'},history:[{role:'user',content:'project-one'}],now:new Date().toISOString()};
- for(const plan of [command('add_task',{title:'تقرير جديد'},null,'project-one'),command('move_task',{},'task-one','project-one'),command('edit_project',{name:'اسم جديد'},null,'project-one'),command('delete_project',{},null,'project-one')]) {
-   assert.equal(validateSecretaryIntent(plan,input).kind,'clarify');
-   assert.equal(validateSecretaryIntent(plan,{...input,text:'نفذ في project-two'}).kind,'clarify');
-   assert.equal(validateSecretaryIntent(plan,{...input,text:'نفذ في project-one-extra'}).kind,'clarify');
-   assert.equal(validateSecretaryIntent(plan,{...input,text:plan.action==='add_task'?'أضف مهمة إلى project-one':'نفذ في project-one'}).kind,plan.action==='add_task'?'task_draft':'command');
+// Every project action the planner used to expose is gone from the schema, so
+// a stale model output naming one is rejected outright rather than validated.
+test('a plan naming any removed project action is rejected as an invalid plan',()=>{
+ const input={text:'أضف مهمة إلى مشروع التجهيز',tasks:[{id:'task-one',title:'لوحة',status:'progress'}],users:[],actor:{id:'basem',name:'باسم',role:'admin'},history:[],now:new Date().toISOString()};
+ for(const action of ['add_project','edit_project','approve_project','reject_project','restore_project','archive_project','delete_project','move_task']) {
+   assert.throws(()=>validateSecretaryIntent(command(action,{name:'اسم'},'task-one'),input),/Invalid secretary plan/,action);
  }
+ // A plan carrying a stray projectId field is rejected on shape alone.
+ assert.throws(()=>validateSecretaryIntent({...command('comment',{body:'تحديث'},'task-one'),projectId:'project-one'},input),/Invalid secretary plan/);
 });
 
-test('ambiguous project creation produces clarification and never inserts into a guessed project',async t=>{
- const f=fixture(t);f.db.exec("UPDATE projects SET name='مشروع تجريبي' WHERE id='p2'");
- const manager={senderNumber:'12025550103'};const plan=command('add_task',{title:'تقرير جديد',ownerId:'unassigned',priority:'yellow',dueDate:'unscheduled'},null,'p2');
+test('an admin task creation needs no container and is confirmed before any insert',async t=>{
+ const f=fixture(t);
+ const admin={senderNumber:'12025550103'};const plan=command('add_task',{title:'تقرير جديد',ownerId:'unassigned',priority:'yellow',dueDate:'unscheduled'},null);
  const before=f.db.prepare('SELECT count(*) n FROM tasks').get().n;
- assert.equal((await f.run(plan,{...manager,text:'أضف تقرير جديد إلى مشروع تجريبي'})).status,'clarify');
- assert.equal(f.db.prepare('SELECT count(*) n FROM tasks').get().n,before);
- assert.equal(pending(f.db),undefined);
- assert.equal((await f.run(plan,{...manager,text:'أضف تقرير جديد إلى p2 بدون مسؤول وموعد بأولوية متوسطة'})).status,'confirmation');
- assert.equal((await f.run(undefined,{...manager,text:`موافق ${pending(f.db).token}`})).status,'applied');
- assert.equal(f.db.prepare("SELECT project_id FROM tasks WHERE title='تقرير جديد'").get().project_id,'p2');
+ assert.equal((await f.run(plan,{...admin,text:'أضف تقرير جديد بدون مسؤول وموعد بأولوية متوسطة'})).status,'confirmation');
+ assert.equal(f.db.prepare('SELECT count(*) n FROM tasks').get().n,before,'nothing inserted before confirmation');
+ assert.equal((await f.run(undefined,{...admin,text:`موافق ${pending(f.db).token}`})).status,'applied');
+ const created=f.db.prepare("SELECT * FROM tasks WHERE title='تقرير جديد'").get();
+ assert.ok(created);assert.ok(!Object.keys(created).includes('project_id'));
 });
 
 test('history retains the latest eight exchanges within 24 hours in deterministic insertion order',async t=>{
@@ -590,30 +596,39 @@ test('general task question recovers from inference failure with scoped live dat
  assert.equal(f.db.prepare('SELECT count(*) n FROM tasks').get().n,2);
 });
 
-test('conversational replies get no special project-name treatment, just a stray "المشروع:" label stripped', async()=>{
- const {formatSecretaryProjectHeadings}=await import('../lib/secretary-service.ts');
- const state={projects:[{name:'مشروع تجريبي'}],tasks:[{title:'مهمة أولى'}]};
- // A raw project name mentioned in an answer stays exactly as written -- no bolding, no 🔵.
- assert.equal(formatSecretaryProjectHeadings('مشروع تجريبي\n🔴 مهمة أولى',state),'مشروع تجريبي\n🔴 مهمة أولى');
- assert.equal(formatSecretaryProjectHeadings('ناقشنا مشروع تجريبي اليوم',state),'ناقشنا مشروع تجريبي اليوم');
- // A stray literal "المشروع:" label (however the model phrased the rest) is dropped, list marker kept.
- assert.equal(formatSecretaryProjectHeadings('المشروع: مشروع تجريبي',state),'مشروع تجريبي');
- assert.equal(formatSecretaryProjectHeadings('1. المشروع: مشروع تجريبي',state),'1. مشروع تجريبي');
-});
-
-test('project test request survives model start metadata and confirms once without team notices',async t=>{
+// The old project bundle became a plain multi-task draft. "ولا تبعت أي رسالة
+// للفريق" must still create the tasks silently, and confirming twice must still
+// create them only once.
+test('a silent multi-task request confirms once, creates every task and sends nothing',async t=>{
  const f=fixture(t);
- const plan=emptySecretaryIntent('project_draft');plan.intakeMode='start';plan.fields.name='تجربة السكرتير';plan.message='اختبار فقط | - | green | -';
- const preview=await f.run(plan,{senderNumber:'12025550103',text:'افتح مشروع اسمه تجربة السكرتير، فيه مهمة اختبار فقط، ولا تبعت أي رسالة للفريق'});
+ const plan=emptySecretaryIntent('tasks_draft');plan.message='اختبار فقط | - | green | -\nاختبار ثاني | other | red | -';
+ const preview=await f.run(plan,{senderNumber:'12025550103',text:'افتح مهام الاختبار، ولا تبعت أي رسالة للفريق'});
  assert.equal(preview.status,'confirmation');assert.match(preview.reply,/بدون إرسال إشعارات/);
- assert.equal(f.db.prepare('SELECT count(*) n FROM projects').get().n,2);
+ assert.doesNotMatch(preview.reply,/مشروع/);
+ assert.equal(f.db.prepare('SELECT count(*) n FROM tasks').get().n,2,'nothing created before confirmation');
  const token=pending(f.db).token;
  const event=f.event({senderNumber:'12025550103',text:'موافق '+token});
  const run=()=>handleSecretaryEvent(f.db,event,f.config,{now:()=>f.now,infer:async()=>assert.fail('confirmation must not infer')});
  const result=await run();assert.equal(result.status,'applied');await run();
- assert.equal(f.db.prepare('SELECT count(*) n FROM projects').get().n,3);
- assert.equal(f.db.prepare('SELECT count(*) n FROM tasks').get().n,3);
- assert.equal(f.db.prepare('SELECT count(*) n FROM agent_outbox').get().n,0);
+ assert.equal(f.db.prepare('SELECT count(*) n FROM tasks').get().n,4,'both tasks, created exactly once');
+ assert.equal(f.db.prepare('SELECT count(*) n FROM agent_outbox').get().n,0,'suppressed notices stay suppressed');
+});
+
+// The same request without the "no notices" instruction must notify each task's
+// own owner individually -- the bug the old bundle path had.
+test('a multi-task request notifies every created task\'s owner individually',async t=>{
+ const f=fixture(t);
+ const plan=emptySecretaryIntent('tasks_draft');plan.message='مهمة خالد | member | green | -\nمهمة شادي الجديدة | other | red | -';
+ const preview=await f.run(plan,{senderNumber:'12025550103',text:'افتح مهام التجهيز'});
+ assert.equal(preview.status,'confirmation');
+ assert.equal((await f.run(undefined,{senderNumber:'12025550103',text:`موافق ${pending(f.db).token}`})).status,'applied');
+ const outbox=f.db.prepare('SELECT to_user AS toUser,text,choices_json AS choicesJson FROM agent_outbox ORDER BY id').all();
+ assert.equal(outbox.filter(row=>row.toUser==='group').length,2,'one group notice per task');
+ for(const userId of ['member','other']) {
+  const own=outbox.find(row=>row.toUser===userId&&/تحديث على مهمتك/.test(row.text));
+  assert.ok(own,`the owner ${userId} is told privately`);
+  assert.match(own.choicesJson,/CLAIM/,'with their own claim poll');
+ }
 });
 
 
@@ -628,7 +643,7 @@ test('ordinary task listing bypasses unavailable provider without dropping filte
 test('general summary lists all 25 short tasks in one flat list without trailing spaces',async t=>{
  const f=fixture(t);
  f.db.prepare("DELETE FROM tasks WHERE id='private'").run();
- for(let i=2;i<=25;i++)f.db.prepare("INSERT INTO tasks(id,project_id,title,details,priority,status,owner,suggested_owner,created_at,updated_at) VALUES(?, 'p', ?, '', 'green', 'open', NULL, 'خالد', 1, 1)").run('grouped-'+i,'مهمة تجريبية '+i);
+ for(let i=2;i<=25;i++)f.db.prepare("INSERT INTO tasks(id,title,details,priority,status,owner,suggested_owner,created_at,updated_at) VALUES(?, ?, '', 'green', 'open', NULL, 'خالد', 1, 1)").run('grouped-'+i,'مهمة تجريبية '+i);
  const r=await f.run(null,{text:'وريني المهام كلها كمان مره'},async()=>assert.fail());
  assert.doesNotMatch(r.reply,/مشروع/);
  assert.match(r.reply,/مهمة تجريبية 25/);assert.match(r.reply,/جميع المهام \(25\)/);
@@ -657,7 +672,7 @@ test('admin reassigning a task directly through chat now broadcasts to the group
  assert.ok(toNewOwner,'the newly-assigned owner must get a private heads-up');
  assert.ok(!rows.some(r=>r.toUser==='basem'),'the admin never notifies himself about his own action');
 });
-function taskDraftPlan(fields,projectId='p') { const p=emptySecretaryIntent('task_draft'); p.intakeMode='start'; p.projectId=projectId; Object.assign(p.fields,fields); return p; }
+function taskDraftPlan(fields) { const p=emptySecretaryIntent('task_draft'); p.intakeMode='start'; Object.assign(p.fields,fields); return p; }
 test('admin adding a task directly for someone else broadcasts to the group and privately notifies that owner',async t=>{
  const f=fixture(t); const admin={senderNumber:'12025550103'};
  // add_task always lands here through the task_draft intake preview + "موافق
@@ -665,7 +680,7 @@ test('admin adding a task directly for someone else broadcasts to the group and 
  // task_draft by validateSecretaryIntent before it ever reaches perform(),
  // so that's the path this test has to go through too.
  const plan=taskDraftPlan({title:'مهمة جديدة',priority:'yellow',dueDate:'unscheduled',ownerId:'other'});
- const preview=await f.run(plan,{...admin,text:'ضيف مهمة جديدة لشادي بمشروع تجريبي'});
+ const preview=await f.run(plan,{...admin,text:'ضيف مهمة جديدة لشادي'});
  assert.equal(preview.status,'confirmation');
  const token=pending(f.db).token;
  const result=await f.run(undefined,{...admin,text:`موافق ${token}`});
@@ -692,7 +707,7 @@ test('admin adding a task directly for someone else broadcasts to the group and 
 test('an employee proposing a new task files it for Basim and gets the command legend, never Basim',async t=>{
  const f=fixture(t);
  const plan=taskDraftPlan({title:'مهمة يقترحها موظف',priority:'yellow',dueDate:'unscheduled'});
- const result=await f.run(plan,{text:'بدي أفتح مهمة جديدة بمشروع تجريبي'}); // default sender is خالد (member)
+ const result=await f.run(plan,{text:'بدي أفتح مهمة جديدة'}); // default sender is خالد (member)
  assert.equal(result.status,'applied');
  assert.match(result.reply,/رفعت طلبك لباسم/);
  const rows=outbox(f.db);
@@ -727,7 +742,7 @@ test('a proactive task-close approval notification carries a tappable poll, and 
 });
 test('a member claiming their own open task broadcasts to the group, gets the command legend, but never a self-notice',async t=>{
  const f=fixture(t);
- f.db.prepare("INSERT INTO tasks(id,project_id,title,details,priority,status,owner,suggested_owner,created_at,updated_at) VALUES('open1','p','مهمة مفتوحة','','yellow','open',NULL,'خالد',1,1)").run();
+ f.db.prepare("INSERT INTO tasks(id,title,details,priority,status,owner,suggested_owner,created_at,updated_at) VALUES('open1','مهمة مفتوحة','','yellow','open',NULL,'خالد',1,1)").run();
  const result=await f.run(command('claim',{},'open1'),{text:'بستلم هاي المهمة'}); // default sender is خالد (member)
  assert.equal(result.status,'applied');
  const rows=outbox(f.db);
@@ -745,7 +760,7 @@ test('a member claiming their own open task broadcasts to the group, gets the co
 // and privately warns them, on top of the existing group broadcast.
 test('an admin claiming a task suggested to someone else privately warns that colleague, not just the group',async t=>{
  const f=fixture(t); const admin={senderNumber:'12025550103'};
- f.db.prepare("INSERT INTO tasks(id,project_id,title,details,priority,status,owner,suggested_owner,created_at,updated_at) VALUES('open3','p','مهمة مقترحة لخالد','','yellow','open',NULL,'خالد',1,1)").run();
+ f.db.prepare("INSERT INTO tasks(id,title,details,priority,status,owner,suggested_owner,created_at,updated_at) VALUES('open3','مهمة مقترحة لخالد','','yellow','open',NULL,'خالد',1,1)").run();
  const result=await f.run(command('claim',{},'open3'),{...admin,text:'بدي استلم مسؤولية هاي المهمة'});
  assert.equal(result.status,'applied');
  const rows=outbox(f.db);
@@ -760,7 +775,7 @@ test('an admin claiming a task suggested to someone else privately warns that co
 test('closeDirect on a never-claimed task broadcasts one final approval notice, and privately notifies a non-admin owner it closes on behalf of',async t=>{
  const f=fixture(t); const admin={senderNumber:'12025550103'};
  // Basim closing a task he owns himself (claims it along the way): only the group hears about it, never a self-notify.
- f.db.prepare("INSERT INTO tasks(id,project_id,title,details,priority,status,owner,suggested_owner,created_at,updated_at) VALUES('open2','p','مهمة باسم','','green','open',NULL,NULL,1,1)").run();
+ f.db.prepare("INSERT INTO tasks(id,title,details,priority,status,owner,suggested_owner,created_at,updated_at) VALUES('open2','مهمة باسم','','green','open',NULL,NULL,1,1)").run();
  const own=await f.run(closeRequest('open2','خلصت'),{...admin,text:'قفل هاي المهمة، خلصت'});
  assert.equal(own.status,'confirmation');
  const ownToken=pending(f.db).token;

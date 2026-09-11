@@ -6,7 +6,8 @@ import { createOdooReportJobs } from "../lib/odoo-reports.ts";
 function fixture(t) {
   const db = new DatabaseSync(":memory:");
   t.after(() => db.close());
-  db.exec("CREATE TABLE projects (id TEXT PRIMARY KEY);");
+  // The shared additive migration needs a tasks table to hang its columns off.
+  db.exec("CREATE TABLE tasks (id TEXT PRIMARY KEY);");
   return db;
 }
 

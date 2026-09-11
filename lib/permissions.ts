@@ -5,8 +5,8 @@
  *
  * Roles (users.role):
  *   admin   → owner (Basim). Everything, including deciding approvals and rules.
- *   manager → department lead. Creates projects (pending owner approval) and
- *             tasks, assigns within own department, sees department tasks.
+ *   manager → department lead. Creates tasks, assigns within own department,
+ *             sees department tasks.
  *   member  → employee. Own tasks only: claim, update, comment, request
  *             extension, request close.
  */
@@ -14,8 +14,7 @@ export type Role = "admin" | "manager" | "member";
 export type PermissionActor = { id: string; name: string; role: Role; active: number; department?: string | null };
 
 export type Capability =
-  | "project.create" | "project.edit" | "project.approve" | "project.reject" | "project.archive" | "project.delete"
-  | "task.create" | "task.edit" | "task.assign" | "task.move" | "task.archive" | "task.delete"
+  | "task.create" | "task.edit" | "task.assign" | "task.archive" | "task.delete"
   | "task.claim" | "task.update" | "task.submit" | "task.approve" | "task.reject" | "task.reopen"
   | "task.watch" | "task.blocker" | "task.expected"
   | "approval.request" | "approval.decide"
@@ -23,11 +22,8 @@ export type Capability =
   | "knowledge.read" | "knowledge.write"
   | "user.manage" | "message.team" | "report.all";
 
-// project.archive is owner-only: closing a project always needs Basim's
-// decision now, even when a department manager asks (see project_close in
-// approvals.ts) -- a manager files a request instead of archiving directly.
-const OWNER_ONLY: readonly Capability[] = ["project.approve", "project.reject", "project.delete", "project.archive", "task.delete", "task.approve", "task.reject", "task.reopen", "approval.decide", "rule.approve", "user.manage", "message.team", "report.all"];
-const MANAGER: readonly Capability[] = ["project.create", "project.edit", "task.create", "task.edit", "task.assign", "task.move", "task.archive", "task.watch", "task.blocker", "task.expected", "task.claim", "task.update", "task.submit", "approval.request", "rule.propose", "knowledge.read", "knowledge.write"];
+const OWNER_ONLY: readonly Capability[] = ["task.delete", "task.approve", "task.reject", "task.reopen", "approval.decide", "rule.approve", "user.manage", "message.team", "report.all"];
+const MANAGER: readonly Capability[] = ["task.create", "task.edit", "task.assign", "task.archive", "task.watch", "task.blocker", "task.expected", "task.claim", "task.update", "task.submit", "approval.request", "rule.propose", "knowledge.read", "knowledge.write"];
 const MEMBER: readonly Capability[] = ["task.claim", "task.update", "task.submit", "task.blocker", "task.expected", "approval.request", "knowledge.read"];
 
 /** Which actions a manager/member cannot do directly but may request. */
@@ -36,8 +32,6 @@ export const REQUESTABLE: Record<string, Capability> = {
   task_close: "task.approve",
   task_ownership: "task.assign",
   task_transfer: "task.assign",
-  project_create: "project.approve",
-  project_close: "project.archive",
   rule: "rule.approve",
   policy: "rule.approve",
 };
@@ -71,11 +65,9 @@ export function inScope(actor: PermissionActor, task: { owner: string | null; su
 
 /** Map a management action to the capability it needs. */
 export const ACTION_CAPABILITY: Record<string, Capability> = {
-  add_project: "project.create", edit_project: "project.edit", approve_project: "project.approve", reject_project: "project.reject",
-  restore_project: "project.edit", archive_project: "project.archive", delete_project: "project.delete",
   add_task: "task.create", edit_task: "task.edit", claim: "task.claim", cancel_claim: "task.claim", comment: "task.update",
   submit: "task.submit", approve: "task.approve", reject: "task.reject", reopen: "task.reopen", reassign: "task.assign",
-  move_task: "task.move", archive_task: "task.archive", restore_task: "task.archive", delete_task: "task.delete",
+  archive_task: "task.archive", restore_task: "task.archive", delete_task: "task.delete",
   set_watcher: "task.watch", set_blocker: "task.blocker", set_expected: "task.expected",
 };
 

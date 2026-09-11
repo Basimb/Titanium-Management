@@ -23,13 +23,11 @@ const clean = (value: string) => value.replace(/[\x00-\x1f\u202a-\u202e\u2066-\u
 // from this file -- importing back from it would be circular).
 const PRIORITY_ICON: Record<string, string> = { red: "\ud83d\udd34", yellow: "\ud83d\udfe1", green: "\ud83d\udfe2" };
 const STATUS_LABEL: Record<string, string> = { open: "\u0628\u0627\u0646\u062a\u0638\u0627\u0631 \u0627\u0644\u0627\u0633\u062a\u0644\u0627\u0645", progress: "\u0642\u064a\u062f \u0627\u0644\u062a\u0646\u0641\u064a\u0630", approval: "\u0628\u0627\u0646\u062a\u0638\u0627\u0631 \u0627\u0639\u062a\u0645\u0627\u062f \u0628\u0627\u0633\u0645" };
-function autoReminderGroups(snapshot: { tasks: ManagementTask[]; projects: Array<{ id: string; status: string }> }, userIdByName: Map<string, string>): Map<string, ManagementTask[]> {
+function autoReminderGroups(snapshot: { tasks: ManagementTask[] }, userIdByName: Map<string, string>): Map<string, ManagementTask[]> {
   const groups = new Map<string, ManagementTask[]>();
   for (const task of snapshot.tasks) {
     const responsible = task.owner || task.suggestedOwner;
     if (task.archivedAt || task.status === "completed" || !responsible) continue;
-    const project = snapshot.projects.find(candidate => candidate.id === task.projectId);
-    if (!project || project.status !== "active") continue;
     const userId = userIdByName.get(responsible);
     if (!userId) continue;
     const list = groups.get(userId) || []; list.push(task); groups.set(userId, list);
@@ -138,8 +136,6 @@ export function planFollowups(db: DatabaseSync, config: FollowupConfig, at: numb
   const overdueTasks: ManagementTask[] = [];
   for (const task of snapshot.tasks) {
     if (task.archivedAt || ["completed", "approval"].includes(task.status) || !task.owner) continue;
-    const project = snapshot.projects.find(candidate => candidate.id === task.projectId);
-    if (!project || project.status !== "active") continue;
     const userId = userIdByName.get(task.owner); const number = userId ? numberOf(userId) : null;
     if (!userId || !number) continue;
     const overdue = !!task.dueDate && task.dueDate < today;
@@ -171,8 +167,6 @@ export function planFollowups(db: DatabaseSync, config: FollowupConfig, at: numb
     if (task.archivedAt || task.status !== "open" || task.owner) continue;
     const responsible = task.suggestedOwner;
     if (!responsible) continue;
-    const project = snapshot.projects.find(candidate => candidate.id === task.projectId);
-    if (!project || project.status !== "active") continue;
     const userId = userIdByName.get(responsible); const number = userId ? numberOf(userId) : null;
     if (!userId || !number) continue;
     if (alreadySent(db, "unclaimed_task", userId, task.id, at - HOUR)) continue;
@@ -209,8 +203,7 @@ export function planFollowups(db: DatabaseSync, config: FollowupConfig, at: numb
   // nudged-tracking table is needed.
   if (ownerNumber && !alreadySent(db, "stale_unclaimed", owner.id, null, at - DAY)) {
     const staleUnclaimed = snapshot.tasks.filter(task => !task.archivedAt && task.status === "open" && !task.owner && task.suggestedOwner
-      && (task.updatedAt ?? 0) < at - STALE_UNCLAIMED_AFTER
-      && snapshot.projects.find(candidate => candidate.id === task.projectId)?.status === "active");
+      && (task.updatedAt ?? 0) < at - STALE_UNCLAIMED_AFTER);
     if (staleUnclaimed.length) {
       const lines = staleUnclaimed.map(task => `• ${clean(task.title)} — المقترحة لـ: ${clean(task.suggestedOwner!)}`);
       plans.push({ id: randomBytes(8).toString("hex"), kind: "stale_unclaimed", targetUser: owner.id, entityId: null, to: `${ownerNumber}@s.whatsapp.net`,

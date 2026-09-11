@@ -1,9 +1,9 @@
 /** URL values select only records already returned by the authenticated state
  * endpoint. They never supply titles, permissions, identities or API commands. */
 export type SecretaryViewer = { id: string; role: string; active: number } | null;
-export type SecretaryProject = { id: string; name: string; status?: string };
-export type SecretaryTask = { id: string; projectId: string; title: string; archivedAt?: number | null };
-export type SecretaryTarget = { projectId: string; taskId?: string };
+export type SecretaryTask = { id: string; title: string; archivedAt?: number | null };
+/** Tasks are flat, standalone records, so a deep link addresses exactly one task. */
+export type SecretaryTarget = { taskId: string };
 export type SecretaryDeepLink =
   | { status: "none" | "deferred" | "unavailable" }
   | { status: "resolved"; target: SecretaryTarget; archived: boolean; announcement: string };
@@ -18,57 +18,49 @@ const record = (value: unknown): Record<string, unknown> | null =>
 export function resolveSecretaryDeepLink(
   search: string,
   viewer: SecretaryViewer,
-  projects: readonly SecretaryProject[],
   tasks: readonly SecretaryTask[],
 ): SecretaryDeepLink {
   if (!viewer || viewer.active !== 1) return { status: "deferred" };
   if (typeof search !== "string" || search.length > 4096) return { status: "unavailable" };
   const params = new URLSearchParams(search);
-  if (!params.has("project") && !params.has("task")) return { status: "none" };
-  if (params.getAll("project").length > 1 || params.getAll("task").length > 1) return { status: "unavailable" };
-  const projectId = params.get("project");
+  if (!params.has("task")) return { status: "none" };
+  if (params.getAll("task").length > 1) return { status: "unavailable" };
   const taskId = params.get("task");
-  if ((projectId !== null && !validId(projectId)) || (taskId !== null && !validId(taskId))) return { status: "unavailable" };
-  const task = taskId === null ? null : tasks.find(item => item.id === taskId);
-  if (taskId !== null && (!task || (projectId !== null && task.projectId !== projectId))) return { status: "unavailable" };
-  const project = projects.find(item => item.id === (projectId ?? task?.projectId));
-  if (!project || !validId(project.id) || (task && !validId(task.id))) return { status: "unavailable" };
+  if (taskId === null || !validId(taskId)) return { status: "unavailable" };
+  const task = tasks.find(item => item.id === taskId);
+  if (!task || !validId(task.id)) return { status: "unavailable" };
   return {
     status: "resolved",
-    target: { projectId: project.id, ...(task ? { taskId: task.id } : {}) },
-    archived: !!task?.archivedAt,
-    announcement: task
-      ? `تم فتح المهمة «${task.title.slice(0, 160)}»${task.archivedAt ? " ضمن الأرشيف" : ""}.`
-      : `تم فتح المشروع «${project.name.slice(0, 160)}».`,
+    target: { taskId: task.id },
+    archived: !!task.archivedAt,
+    announcement: `تم فتح المهمة «${task.title.slice(0, 160)}»${task.archivedAt ? " ضمن الأرشيف" : ""}.`,
   };
 }
 
 export function createSecretaryLink(origin: string, target: SecretaryTarget): string | null {
-  if (!validId(target.projectId) || (target.taskId !== undefined && !validId(target.taskId))) return null;
+  if (!validId(target.taskId)) return null;
   try {
     const base = new URL(origin);
     if (base.origin !== origin || base.username || base.password || base.protocol !== "https:") return null;
     const result = new URL("/", origin);
-    result.searchParams.set("project", target.projectId);
-    if (target.taskId) result.searchParams.set("task", target.taskId);
+    result.searchParams.set("task", target.taskId);
     return result.href;
   } catch { return null; }
 }
 
 export function secretaryActivityTarget(
   activity: { entityType: string; entityId: string },
-  viewer: SecretaryViewer, projects: readonly SecretaryProject[], tasks: readonly SecretaryTask[],
+  viewer: SecretaryViewer, tasks: readonly SecretaryTask[],
 ): SecretaryTarget | null {
   const params = new URLSearchParams();
   if (activity.entityType === "task") params.set("task", activity.entityId);
-  else if (activity.entityType === "project") params.set("project", activity.entityId);
   else return null;
-  const result = resolveSecretaryDeepLink(params.toString(), viewer, projects, tasks);
+  const result = resolveSecretaryDeepLink(params.toString(), viewer, tasks);
   return result.status === "resolved" ? result.target : null;
 }
 
 const labels: Record<string, string> = {
-  action: "الإجراء", taskId: "المهمة", projectId: "المشروع", title: "العنوان", name: "الاسم",
+  action: "الإجراء", taskId: "المهمة", title: "العنوان", name: "الاسم",
   details: "التفاصيل", comment: "التعليق", reason: "السبب", priority: "الأولوية", dueDate: "الموعد",
   status: "الحالة", owner: "المسؤول", ownerId: "معرّف المسؤول", suggestedOwner: "المسؤول المقترح",
   userId: "معرّف المستخدم", id: "المعرّف", active: "التفعيل", role: "الدور",
@@ -80,13 +72,11 @@ const labels: Record<string, string> = {
 const values: Record<string, string> = {
   open: "مفتوحة", progress: "قيد التنفيذ", approval: "بانتظار اعتماد باسم", completed: "مكتملة نهائيًا",
   pending: "بانتظار المراجعة", rejected: "مرفوضة", red: "قصوى", yellow: "متوسطة", green: "عادية",
-  add_project: "إضافة مشروع", add_task: "إضافة مهمة", claim: "استلام مهمة", comment: "إضافة تعليق",
+  add_task: "إضافة مهمة", claim: "استلام مهمة", comment: "إضافة تعليق",
   update: "تحديث التنفيذ", submit: "إرسال للاعتماد", approve: "اعتماد", reject: "رفض",
   edit_task: "تعديل مهمة", reassign: "إعادة تعيين", cancel_claim: "إرجاع مهمة",
   archive_task: "أرشفة مهمة", restore_task: "استرجاع مهمة", delete_task: "حذف مهمة",
-  approve_project: "اعتماد مشروع", reject_project: "رفض مشروع", restore_project: "استرجاع مشروع",
-  edit_project: "تعديل مشروع", archive_project: "أرشفة مشروع", delete_project: "حذف مشروع",
-  move_task: "نقل مهمة", reopen: "إعادة فتح مهمة", active: "نشط", archived: "مؤرشف",
+  reopen: "إعادة فتح مهمة", active: "نشط", archived: "مؤرشف",
   admin: "مدير", member: "عضو",
 };
 const translated = (value: string) => Object.hasOwn(values, value) ? values[value] : value;

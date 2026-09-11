@@ -5,7 +5,7 @@ import { can, isOwner, type PermissionActor } from "./permissions.ts";
 
 export type KnowledgeEntry = { id: string; title: string; body: string; category: string; visibility: "team" | "owner"; addedBy: string; createdAt: number; updatedAt: number };
 export type KnowledgeHit = KnowledgeEntry & { snippet: string };
-const CATEGORIES = ["general", "policy", "licensing", "supplier", "template", "instruction", "project"];
+const CATEGORIES = ["general", "policy", "licensing", "supplier", "template", "instruction"];
 const SELECT = "SELECT id,title,body,category,visibility,added_by AS addedBy,created_at AS createdAt,updated_at AS updatedAt FROM knowledge";
 
 function scoped(actor: ManagementActor, entry: { visibility: string }) { return entry.visibility === "team" || isOwner(actor as PermissionActor); }

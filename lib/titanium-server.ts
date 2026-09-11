@@ -35,15 +35,14 @@ class LocalDatabase {
     catch (error) { this.sqlite.exec("ROLLBACK"); throw error; }
   }
   private migrate() { this.sqlite.exec(`
-    CREATE TABLE IF NOT EXISTS projects (id TEXT PRIMARY KEY NOT NULL, name TEXT NOT NULL, status TEXT DEFAULT 'active' NOT NULL, created_by TEXT NOT NULL, created_at INTEGER NOT NULL, rejection_reason TEXT, rejected_by TEXT, rejected_at INTEGER);
-    CREATE TABLE IF NOT EXISTS tasks (id TEXT PRIMARY KEY NOT NULL, project_id TEXT NOT NULL, title TEXT NOT NULL, details TEXT DEFAULT '' NOT NULL, priority TEXT DEFAULT 'yellow' NOT NULL, status TEXT DEFAULT 'open' NOT NULL, owner TEXT, suggested_owner TEXT, started_at INTEGER, due_date TEXT, completed_at INTEGER, rejection_reason TEXT, created_at INTEGER NOT NULL, updated_at INTEGER, archived_at INTEGER, archived_by TEXT, FOREIGN KEY(project_id) REFERENCES projects(id));
+    CREATE TABLE IF NOT EXISTS tasks (id TEXT PRIMARY KEY NOT NULL, title TEXT NOT NULL, details TEXT DEFAULT '' NOT NULL, priority TEXT DEFAULT 'yellow' NOT NULL, status TEXT DEFAULT 'open' NOT NULL, owner TEXT, suggested_owner TEXT, started_at INTEGER, due_date TEXT, completed_at INTEGER, rejection_reason TEXT, created_at INTEGER NOT NULL, updated_at INTEGER, archived_at INTEGER, archived_by TEXT);
     CREATE TABLE IF NOT EXISTS comments (id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, task_id TEXT NOT NULL, author TEXT NOT NULL, body TEXT NOT NULL, created_at INTEGER NOT NULL, FOREIGN KEY(task_id) REFERENCES tasks(id));
     CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY NOT NULL, name TEXT NOT NULL UNIQUE, role TEXT DEFAULT 'member' NOT NULL, active INTEGER DEFAULT 1 NOT NULL, pin_salt TEXT, pin_hash TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS sessions (token_hash TEXT PRIMARY KEY NOT NULL, user_id TEXT NOT NULL, expires_at INTEGER NOT NULL, created_at INTEGER NOT NULL, FOREIGN KEY(user_id) REFERENCES users(id));
     CREATE TABLE IF NOT EXISTS login_attempts (attempt_key TEXT PRIMARY KEY NOT NULL, attempts INTEGER DEFAULT 0 NOT NULL, last_attempt_at INTEGER NOT NULL, blocked_until INTEGER);
     CREATE TABLE IF NOT EXISTS attachments (id TEXT PRIMARY KEY NOT NULL, task_id TEXT NOT NULL, file_name TEXT NOT NULL, content_type TEXT NOT NULL, size INTEGER NOT NULL, object_key TEXT NOT NULL, uploaded_by TEXT NOT NULL, created_at INTEGER NOT NULL, FOREIGN KEY(task_id) REFERENCES tasks(id));
     CREATE TABLE IF NOT EXISTS audit_logs (id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, actor_user_id TEXT, actor_name TEXT NOT NULL, action TEXT NOT NULL, entity_type TEXT NOT NULL, entity_id TEXT NOT NULL, details TEXT DEFAULT '{}' NOT NULL, created_at INTEGER NOT NULL);
-    CREATE INDEX IF NOT EXISTS idx_tasks_project_status ON tasks(project_id,status);
+    CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
     CREATE INDEX IF NOT EXISTS idx_tasks_owner ON tasks(owner);
     CREATE INDEX IF NOT EXISTS idx_comments_task_id ON comments(task_id);
     CREATE INDEX IF NOT EXISTS idx_attachments_task_id ON attachments(task_id);

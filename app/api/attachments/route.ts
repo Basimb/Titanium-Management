@@ -6,7 +6,7 @@ function permittedTask(actor: TitaniumUser, taskId: string, write = false) {
   const state = getManagementSnapshot(chatDatabase(), actor);
   const task = state.tasks.find(task => task.id === taskId);
   if (!task) return null;
-  if (write && (task.archivedAt !== null || state.projects.find(p => p.id === task.projectId)?.status !== "active"
+  if (write && (task.archivedAt !== null
     || (!isManagementAdmin(actor) && (task.owner !== actor.name || task.status !== "progress")))) return null;
   return task;
 }

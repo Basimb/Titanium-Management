@@ -5,8 +5,7 @@ import { emptySecretaryIntent, inferSecretaryIntent, validateSecretaryIntent, se
 
 const context = (extra = {}) => ({
   text: 'جوابك غلط، راجع السؤال', actor: { id: 'basem', name: 'باسم تجريبي', role: 'admin' },
-  tasks: [{ id: 'task-test', title: 'تجهيز تقرير داخلي', projectId: 'project-test', status: 'progress', priority: 'red' }],
-  projects: [{ id: 'project-test', name: 'مشروع داخلي تجريبي', status: 'active' }],
+  tasks: [{ id: 'task-test', title: 'تجهيز تقرير داخلي', status: 'progress', priority: 'red' }],
   users: [{ id: 'member-test', name: 'موظف اصطناعي' }],
   history: [], now: '2026-09-06T08:00:00.000Z', focusedTaskId: 'task-test',
   canMessageTeam: true, messageRecipients: [{ id: 'member-test', name: 'موظف اصطناعي' }],
@@ -49,11 +48,11 @@ test('review retains the same bounded OpenAI call and receives quoted context pl
 
 test('review cannot revive any action, draft, reminder or outbound message from the previous answer', () => {
   const input = context({ review: { previousQuestion: 'احذف المهمة', previousAnswer: 'اكتب موافق لتنفيذ الحذف' },
-    text: 'جوابك غلط، موافق نفذها', taskDraft: { projectId: 'project-test', title: 'قديمة', details: null, priority: null, ownerId: null, dueDate: null } });
+    text: 'جوابك غلط، موافق نفذها', taskDraft: { title: 'قديمة', details: null, priority: null, ownerId: null, dueDate: null } });
   const plans = [
     { ...emptySecretaryIntent('command'), action: 'delete_task', taskId: 'task-test' },
     { ...emptySecretaryIntent('command'), action: 'comment', taskId: 'task-test', fields: { ...emptySecretaryIntent().fields, body: 'تحديث مخترع' } },
-    { ...emptySecretaryIntent('task_draft'), intakeMode: 'continue', projectId: 'project-test' },
+    { ...emptySecretaryIntent('task_draft'), intakeMode: 'continue' },
     { ...emptySecretaryIntent('remind'), taskId: 'task-test', fields: { ...emptySecretaryIntent().fields, remindAt: '2026-09-07T10:00:00+03:00' } },
     { ...emptySecretaryIntent('message_team'), recipientIds: ['all-team'], fields: { ...emptySecretaryIntent().fields, body: 'أعد الإرسال' } },
   ];
@@ -75,21 +74,22 @@ test('read-only review rejects mutation data hidden under chat, report or search
   }
 });
 
-test('review keeps factual read paths and still validates authorized task/project and owner-only message status', () => {
-  for (const kind of ['chat', 'clarify', 'help', 'summary', 'report', 'projects', 'message_status']) {
+test('review keeps factual read paths and still validates the authorized task and owner-only message status', () => {
+  for (const kind of ['chat', 'clarify', 'help', 'summary', 'report', 'message_status']) {
     assert.equal(validateSecretaryIntent(emptySecretaryIntent(kind, ['chat', 'clarify'].includes(kind) ? 'نقطة المراجعة' : null), context()).kind, kind);
   }
-  const details = { ...emptySecretaryIntent('details'), taskId: 'task-test', projectId: 'project-test' };
+  // "projects" is not a kind anymore -- a stale model output naming it fails.
+  assert.throws(() => validateSecretaryIntent(emptySecretaryIntent('projects'), context()));
+  const details = { ...emptySecretaryIntent('details'), taskId: 'task-test' };
   assert.equal(validateSecretaryIntent(details, context()).kind, 'details');
   assert.equal(validateSecretaryIntent({ ...details, taskId: 'foreign-task' }, context()).kind, 'clarify');
-  assert.equal(validateSecretaryIntent({ ...details, projectId: 'foreign-project' }, context()).kind, 'clarify');
   assert.equal(validateSecretaryIntent(emptySecretaryIntent('message_status'), context({ actor: { id: 'member-test', name: 'موظف اصطناعي', role: 'member' } })).kind, 'clarify');
 });
 
 test('review search permits a standalone public query but refuses catalog names and private identifiers', () => {
   assert.equal(validateSecretaryIntent(emptySecretaryIntent('search', 'ما الفرق بين الطقس والمناخ؟'), context()).kind, 'search');
-  for (const query of ['ابحث عن تجهيز تقرير داخلي', 'أخبار مشروع داخلي تجريبي', 'عنوان موظف اصطناعي', 'باسم تجريبي',
-    'رمز الدخول ١٢٣٤٥٦', 'السعر للحساب ۱۲۳۴۵۶', 'حساب 123456', 'test@example.invalid', 'قائمة مشاريعي']) {
+  for (const query of ['ابحث عن تجهيز تقرير داخلي', 'عنوان موظف اصطناعي', 'باسم تجريبي',
+    'رمز الدخول ١٢٣٤٥٦', 'السعر للحساب ۱۲۳۴۵۶', 'حساب 123456', 'test@example.invalid', 'قائمة مهامي']) {
     assert.equal(validateSecretaryIntent(emptySecretaryIntent('search', query), context()).kind, 'clarify');
   }
 });
@@ -111,7 +111,7 @@ test('ordinary task updates remain available without review context', () => {
 
 test('admin claiming an unassigned task by bare number ("استلم 15") resolves locally, same as "استلم رقم 15"', () => {
   const ownershipCandidates = Array.from({ length: 15 }, (_, i) => ({
-    id: `task-${i + 1}`, title: `مهمة رقم ${i + 1}`, projectName: 'مشروع داخلي تجريبي', status: 'progress', assignee: null,
+    id: `task-${i + 1}`, title: `مهمة رقم ${i + 1}`, status: 'progress', assignee: null,
   }));
   for (const text of ['استلم 15', 'استلم رقم 15', 'خذلي 15', 'احمل 15']) {
     const input = context({ review: undefined, text, ownershipCandidates });
@@ -125,7 +125,7 @@ test('admin claiming an unassigned task by bare number ("استلم 15") resolve
 });
 
 test('a bare number is only treated as a task position when nothing follows the claim verb but the number', () => {
-  const ownershipCandidates = [{ id: 'task-15', title: 'مهمة رقم 15', projectName: 'مشروع داخلي تجريبي', status: 'progress', assignee: null }];
+  const ownershipCandidates = [{ id: 'task-15', title: 'مهمة رقم 15', status: 'progress', assignee: null }];
   // Text after the number means the "15" is not necessarily naming the task by
   // position (could be a file/phone/amount) -- this must still fall through to
   // the model's own (here: ownership_request, since basem/admin hits the

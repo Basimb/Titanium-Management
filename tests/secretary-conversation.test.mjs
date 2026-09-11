@@ -3,8 +3,7 @@ import assert from 'node:assert/strict';
 import { emptySecretaryIntent, inferSecretaryIntent, validateSecretaryIntent } from '../lib/secretary-intent.ts';
 
 const input = (text, history = []) => ({ text, actor: { id: 'basem', name: 'مستخدم تجريبي', role: 'admin' },
-  tasks: [{ id: 'synthetic-task', title: 'تقرير تجريبي', projectId: 'synthetic-project', status: 'progress' }],
-  projects: [{ id: 'synthetic-project', name: 'مشروع تجريبي', status: 'active' }],
+  tasks: [{ id: 'synthetic-task', title: 'تقرير تجريبي', status: 'progress' }],
   users: [], history, now: '2026-09-05T09:00:00.000Z', focusedTaskId: 'synthetic-task' });
 
 test('conversational provider keeps task planner schema and untrusted context boundary', async () => {
@@ -19,7 +18,9 @@ test('conversational provider keeps task planner schema and untrusted context bo
   assert.equal(body.model,'gpt-4o');
   assert.equal(body.tool_choice,'required');
   assert.equal(body.parallel_tool_calls,false);
-  assert.equal(body.tools.length,27); // +1 for the nudge tool
+  // Three kinds were removed with projects (projects, project_close_request,
+  // project_draft) and one added back in their place (tasks_draft).
+  assert.equal(body.tools.length,25);
   assert.ok(body.tools.every(tool=>tool.type==='function' && tool.function.strict===true));
   assert.equal(body.tools.find(tool=>tool.function.name==='chat').function.parameters.required.includes('message'),true);
   assert.equal(body.messages.length,2);

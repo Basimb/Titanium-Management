@@ -12,14 +12,13 @@ function fixture(t) {
   const db = new DatabaseSync(':memory:'); t.after(() => db.close());
   db.exec(`PRAGMA foreign_keys=ON;
     CREATE TABLE users(id TEXT PRIMARY KEY,name TEXT UNIQUE,role TEXT,active INTEGER,pin_hash TEXT,created_at INTEGER,updated_at INTEGER);
-    CREATE TABLE projects(id TEXT PRIMARY KEY,name TEXT,status TEXT,created_by TEXT,created_at INTEGER,rejection_reason TEXT,rejected_by TEXT,rejected_at INTEGER);
-    CREATE TABLE tasks(id TEXT PRIMARY KEY,project_id TEXT REFERENCES projects(id),title TEXT,details TEXT,priority TEXT,status TEXT,owner TEXT,suggested_owner TEXT,started_at INTEGER,due_date TEXT,completed_at INTEGER,rejection_reason TEXT,created_at INTEGER,updated_at INTEGER,archived_at INTEGER,archived_by TEXT);
+    CREATE TABLE tasks(id TEXT PRIMARY KEY,title TEXT,details TEXT,priority TEXT,status TEXT,owner TEXT,suggested_owner TEXT,started_at INTEGER,due_date TEXT,completed_at INTEGER,rejection_reason TEXT,created_at INTEGER,updated_at INTEGER,archived_at INTEGER,archived_by TEXT);
     CREATE TABLE comments(id INTEGER PRIMARY KEY,task_id TEXT REFERENCES tasks(id),author TEXT,body TEXT,created_at INTEGER);
     CREATE TABLE attachments(id TEXT PRIMARY KEY,task_id TEXT REFERENCES tasks(id),file_name TEXT,content_type TEXT,size INTEGER,object_key TEXT,uploaded_by TEXT,created_at INTEGER);
     CREATE TABLE audit_logs(id INTEGER PRIMARY KEY,actor_user_id TEXT,actor_name TEXT,action TEXT,entity_type TEXT,entity_id TEXT,details TEXT,created_at INTEGER);
     INSERT INTO users VALUES('basem','باسم','admin',1,NULL,1,1),('member','خالد','member',1,NULL,1,1),('other','شادي','member',1,NULL,1,1),('mgr','أيمن','manager',1,NULL,1,1);
-    INSERT INTO projects VALUES('p','مشروع تجريبي','active','باسم',1,NULL,NULL,NULL);`);
-  const insert = db.prepare("INSERT INTO tasks(id,project_id,title,details,priority,status,owner,suggested_owner,created_at,updated_at) VALUES(?,'p',?,'','red',?,?,?,1,1)");
+`);
+  const insert = db.prepare("INSERT INTO tasks(id,title,details,priority,status,owner,suggested_owner,created_at,updated_at) VALUES(?,?,'','red',?,?,?,1,1)");
   for (let n = 1; n <= 5; n++) insert.run(`aiman-${n}`, `مهمة أيمن ${n}`, 'progress', 'أيمن', 'أيمن'); // busiest
   for (let n = 1; n <= 2; n++) insert.run(`khaled-${n}`, `مهمة خالد ${n}`, 'progress', 'خالد', 'خالد');
   insert.run('shadi-done', 'مهمة شادي المنتهية', 'completed', 'شادي', 'شادي'); // completed -- never counted
