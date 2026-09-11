@@ -478,7 +478,19 @@ function readReply(plan: SecretaryIntent, actor: ChatUser, state: Snapshot, now:
   // status ("مش مستلمة", "قيد التنفيذ"...) now narrows the same report shape
   // down to just that one lifecycle status instead of dumping everything.
   const reportStatus = plan.kind === "report" ? plan.fields.status : null;
-  const tasks = state.tasks.filter(t => !t.archivedAt && (!reportOwner || (t.owner || t.suggestedOwner) === reportOwner.name) && (!reportStatus || t.status === reportStatus));
+  // Basim: "لما سالتو شو مهامي طلع مهام الفريق" -- summary is documented
+  // (secretary-intent.ts WHOSE TASKS) as always meaning the ACTOR's own
+  // مهام/مهامي, never the team's. A plain member's state.tasks already only
+  // ever holds their own tasks (getManagementSnapshot scopes it via
+  // canViewManagementTask), so this filter is a no-op for them -- but
+  // Basim/admin and a department manager deliberately get an UNSCOPED
+  // state.tasks (every task, or every task in their department) for the
+  // report/team views, so without this, their own "شو مهامي؟" silently
+  // reused that same unscoped list and showed everyone's tasks instead of
+  // just theirs.
+  const summaryOwnerOnly = plan.kind === "summary";
+  const tasks = state.tasks.filter(t => !t.archivedAt && (!reportOwner || (t.owner || t.suggestedOwner) === reportOwner.name) && (!reportStatus || t.status === reportStatus)
+    && (!summaryOwnerOnly || (t.owner || t.suggestedOwner) === actor.name));
   const today = new Date(now + 3 * 3600_000).toISOString().slice(0, 10);
   const overdue = tasks.filter(t => t.status !== "completed" && t.dueDate && t.dueDate < today);
   const pending = tasks.filter(t => t.status === "approval");
@@ -494,7 +506,8 @@ function readReply(plan: SecretaryIntent, actor: ChatUser, state: Snapshot, now:
   // the report header would say "ملخص مهام خالد" (or name one status) while
   // the grouped listing below it still dumped every task from everyone in
   // every status, exactly the bug being fixed here.
-  const ordered = orderedTasks(state, now).filter(t => (!reportOwner || (t.owner || t.suggestedOwner) === reportOwner.name) && (!reportStatus || t.status === reportStatus));
+  const ordered = orderedTasks(state, now).filter(t => (!reportOwner || (t.owner || t.suggestedOwner) === reportOwner.name) && (!reportStatus || t.status === reportStatus)
+    && (!summaryOwnerOnly || (t.owner || t.suggestedOwner) === actor.name));
   if (plan.kind === "summary") {
     const list = numberedTaskList(ordered, now);
     const reply = `${header.trimEnd()}${list ? `\n${list}` : "\nما في مهام متاحة إلك حاليًا."}\n\nتم عرض جميع المهام (${ordered.length}).\nاختار رقم المهمة كما هو مكتوب، مثل: «رقم 12».`;

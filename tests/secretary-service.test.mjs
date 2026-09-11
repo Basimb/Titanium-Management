@@ -69,6 +69,24 @@ test('a disputed private answer is recalled across days without turning criticis
 test('secretary scoped friendly summary has direct link and no foreign data', async t=>{
  const f=fixture(t); const result=await f.run(); assert.equal(result.status,'summary'); assert.match(result.reply,/خالد/);assert.match(result.reply,/🔴 لوحة/);assert.doesNotMatch(result.reply,/https?:\/\/|مهمة شادي|تفاصيل سرية/);
 });
+// Basim: "لما سالتو شو مهامي طلع مهام الفريق هاي اول غلط" -- a plain member's
+// state.tasks already only ever holds their own tasks (checked above), but
+// Basim/admin's (and a department manager's) state.tasks is deliberately
+// UNSCOPED for the report/team views, so "شو مهامي؟" used to silently reuse
+// that same unscoped list and show every task from every owner instead of
+// just his own. summary must filter down to the actor's own tasks itself;
+// report (the actual team log) must stay untouched and keep showing everyone.
+test('admin "شو مهامي؟" shows only his own tasks, never the whole team\'s -- report stays unfiltered',async t=>{
+ const f=fixture(t);
+ f.db.exec("INSERT INTO tasks (id,title,details,priority,status,owner,suggested_owner,started_at,due_date,completed_at,rejection_reason,created_at,updated_at,archived_at,archived_by) VALUES('mine','مهمة باسم الخاصة','تفاصيل','green','progress','باسم','باسم',1,NULL,NULL,NULL,1,1,NULL,NULL)");
+ const mine=await f.run(undefined,{senderNumber:'12025550103'});
+ assert.equal(mine.status,'summary');
+ assert.match(mine.reply,/مهمة باسم الخاصة/);
+ assert.doesNotMatch(mine.reply,/لوحة|مهمة شادي الخاصة/);
+ const report=await f.run(emptySecretaryIntent('report'),{senderNumber:'12025550103',text:'سجل مهام الفريق'});
+ assert.equal(report.status,'summary');
+ assert.match(report.reply,/لوحة/);assert.match(report.reply,/مهمة شادي الخاصة/);assert.match(report.reply,/مهمة باسم الخاصة/);
+});
 test('task card colors are actual priority, never completion or lateness',()=>{
  const state={comments:[]};
  for(const [priority,status,dueDate,emoji,label] of [
