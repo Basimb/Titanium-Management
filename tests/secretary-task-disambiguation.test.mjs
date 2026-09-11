@@ -75,9 +75,15 @@ test('close_request ("انهاء المهمة") with two eligible in-progress ta
 // aborting the whole turn instead of just replacing it with a fresh poll.
 test('retyping the same ambiguous command again before tapping the first poll replaces it with a fresh poll instead of crashing', async t => {
   const f = fixture(t);
-  const first = await f.run(closeRequest(A, 'خلصت التنفيذ'), { text: 'انهيت المهمة' });
+  // Deliberately a fuller sentence, not one of the bare trigger phrases
+  // legendTypedPhraseOption matches (secretary-task-typed-command.test.mjs
+  // covers that deterministic pre-model path) -- this test is specifically
+  // about the MODEL-classified plan still getting re-verified/overridden by
+  // legendCandidates, so it needs the model actually to be asked and to
+  // carry real "details" text through the tap.
+  const first = await f.run(closeRequest(A, 'خلصت التنفيذ'), { text: 'خلصت الشغل وبدي اعلمك' });
   assert.ok(first.choices, 'first attempt must offer a poll');
-  const second = await f.run(closeRequest(B, 'خلصت فعلا'), { text: 'انهيت المهمة' });
+  const second = await f.run(closeRequest(B, 'خلصت فعلا'), { text: 'خلصت الشغل وبدي اعلمك' });
   assert.equal(second.status, 'clarify');
   assert.ok(second.choices, 'retyping the same ambiguous command must still offer a poll, never crash or fall back to plain text');
   assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM secretary_task_choice').get().n, 1, 'the stale row must be replaced, not duplicated');
@@ -93,7 +99,8 @@ test('retyping the same ambiguous command again before tapping the first poll re
 });
 test('tapping the disambiguation poll finishes the exact close_request that was typed, against the tapped task only', async t => {
   const f = fixture(t);
-  const first = await f.run(closeRequest(A, 'خلصت التنفيذ بالكامل'), { text: 'انهيت المهمة' });
+  // Fuller sentence on purpose -- see the comment on the "retyping" test above.
+  const first = await f.run(closeRequest(A, 'خلصت التنفيذ بالكامل'), { text: 'خلصت الشغل وبدي اعلمك' });
   const token = first.choices.id.slice(3);
   const tapped = await f.run(undefined, tap(first.choices.id, first.choices.options[1].id),
     async () => { throw Error('a disambiguation tap must resolve directly, never ask the model'); });
@@ -189,7 +196,8 @@ test('with two eligible tasks Basim personally owns, close_request stops for the
 });
 test('tapping that poll as Basim resolves through close_request\'s own "owner" branch (a confirmation to close_direct/approve), never crashing or misrouting to the employee approval flow', async t => {
   const f = fixture(t, { owner: 'باسم' }); const admin = { senderNumber: '12025550103' };
-  const first = await f.run(closeRequest(A, 'خلصت التنفيذ بالكامل'), { ...admin, text: 'انهيت المهمة' });
+  // Fuller sentence on purpose -- see the comment on the "retyping" test above.
+  const first = await f.run(closeRequest(A, 'خلصت التنفيذ بالكامل'), { ...admin, text: 'خلصت الشغل وبدي اعلمك' });
   const tapped = await f.run(undefined, { ...admin, ...tap(first.choices.id, first.choices.options[1].id) },
     async () => { throw Error('a disambiguation tap must resolve directly, never ask the model'); });
   assert.equal(tapped.status, 'confirmation', 'Basim owns the task himself, so this is his own close_direct/approve confirmation, not an employee\'s task_close approval request');

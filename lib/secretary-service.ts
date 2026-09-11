@@ -112,6 +112,27 @@ function legendRewriteText(optionId: string, title: string): string {
     : optionId === "LGDNOTE" ? `بدي أضيف ملاحظة على مهمة «${title}»`
     : `بدي أحول مهمة «${title}» لحدا غيري`;
 }
+// Basim: "خلصت المهمة"/"حوّل المهمة"/"بدي أضيف ملاحظة" typed out on their
+// own, without ever tapping the legend poll, must resolve exactly as
+// deterministically as a real tap does -- a typed "انهاء المهمة" reaching
+// the model as plain conversation is what let it silently guess a taskId on
+// its own (or bail out to a generic "clarify") instead of ever offering a
+// real tappable choice among several eligible tasks: خالد's case, the same
+// broken numbered-list reply came back twice in a row for the same message.
+// Matches the WHOLE normalized message on purpose, same as every other
+// bare-command check in this file (bareOwnershipOrdinal, directTaskList) --
+// a longer sentence that merely mentions one of these words is left alone
+// for the model exactly as before.
+const LEGEND_TYPED_PHRASES: Record<string, RegExp> = {
+  LGDFINISH: /^(?:انهاء المهمة|انهيت المهمة|خلصت المهمة|خلصت من المهمة|خلصت مهمتي|خلصتها|انتهيت من المهمة|انتهيت منها)$/,
+  LGDTRANSFER: /^(?:تحويل المهمة|حول المهمة|حولها لحدا غيري|حولها لشخص غيري|مش مسؤوليتي|ما بقدر اعملها|ما بقدر اسويها)$/,
+  LGDNOTE: /^(?:اضافة ملاحظة|بدي اضيف ملاحظة|بدي اضيف تحديث|عندي تحديث|بدي احدث المهمة|بدي احدث مهمة)$/,
+};
+function legendTypedPhraseOption(text: string): string | null {
+  const normalized = text.normalize("NFKC").replace(/[أإآ]/g, "ا").replace(/[ً-ٰٟـ؟?!.،,]/g, "").replace(/\s+/g, " ").trim();
+  for (const optionId of Object.keys(LEGEND_TYPED_PHRASES)) if (LEGEND_TYPED_PHRASES[optionId].test(normalized)) return optionId;
+  return null;
+}
 // Inverse of taskCommandsLegendPoll. LGDADD is always safe to rewrite
 // outright -- a brand-new task touches no existing record. FINISH/TRANSFER/
 // NOTE need an existing task identified first: unlike taskActionPoll's own
@@ -123,16 +144,21 @@ function legendRewriteText(optionId: string, title: string): string {
 // progress. Resolve deterministically here only when exactly one of the
 // actor's own tasks could apply to that action; otherwise leave event.choice
 // set so the dedicated branch in handleSecretaryEvent asks by name instead
-// of ever letting the model guess.
+// of ever letting the model guess. Also runs for a typed phrase that never
+// touched the poll at all (legendTypedPhraseOption above), synthesizing the
+// same LGDQ choice shape so a typed command converges onto the exact same
+// resolution as a tap -- including its own dedicated branch below for the
+// 0/2+ leftover cases.
 function resolveTaskCommandsLegendChoice(db: DatabaseSync, event: Event, config: TeamChatConfig): Event {
-  const choice = event.choice;
+  const typedOptionId = !event.choice && event.groupId === null && !event.replyToMessageId && event.inputKind !== "voice" ? legendTypedPhraseOption(event.text) : null;
+  const choice = event.choice ?? (typedOptionId ? { questionId: "LGDQ", optionId: typedOptionId } : undefined);
   if (!choice || choice.questionId !== "LGDQ") return event;
   if (choice.optionId === "LGDADD") return { ...event, text: "اضافة مهمة", choice: undefined };
   if (!["LGDFINISH", "LGDTRANSFER", "LGDNOTE"].includes(choice.optionId)) return event;
   const actor = actorFor(db, event, config);
   if (!actor) return { ...event, choice: undefined };
   const candidates = legendCandidates(stateFor(db, actor), actor.name, choice.optionId);
-  return candidates.length === 1 ? { ...event, text: legendRewriteText(choice.optionId, candidates[0].title), choice: undefined } : event;
+  return candidates.length === 1 ? { ...event, text: legendRewriteText(choice.optionId, candidates[0].title), choice: undefined } : { ...event, choice };
 }
 /** Queues the command legend as its own WhatsApp message (never in the same
  * bubble as the task message itself) for a real employee recipient only --
@@ -1137,12 +1163,18 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
       }
     });
   }
-  // The ambiguous/no-match half of the legend's FINISH/TRANSFER/NOTE taps --
-  // resolveTaskCommandsLegendChoice above already rewrote a single unambiguous
-  // candidate into the normal named-task sentence before this point; reaching
-  // here means event.choice is still the untouched LGDQ tap (zero or several
-  // candidate tasks), so ask by name instead of ever letting the model guess
-  // one on its own.
+  // The ambiguous/no-match half of the legend's FINISH/TRANSFER/NOTE taps AND
+  // of a typed bare command that resolves to the exact same set (see
+  // legendTypedPhraseOption/resolveTaskCommandsLegendChoice above) -- a
+  // single unambiguous candidate is already rewritten into the normal
+  // named-task sentence before this point, so reaching here means zero or
+  // several candidate tasks. Several candidates now get the SAME real
+  // tappable poll as the close_request/task_transfer_request/comment
+  // branches further below (taskChoicePoll + secretary_task_choice), not a
+  // plain numbered list nobody can tap -- Basim's report was exactly that: a
+  // typed "انهاء المهمة" with two eligible tasks got the same broken
+  // numbered-list "clarify" text twice in a row instead of ever offering a
+  // real choice.
   const legendChoice = event.choice && event.choice.questionId === "LGDQ" && ["LGDFINISH", "LGDTRANSFER", "LGDNOTE"].includes(event.choice.optionId) ? event.choice : null;
   if (legendChoice && actor.active === 1 && event.groupId === null && !event.replyToMessageId) {
     return transaction(db, () => {
@@ -1150,9 +1182,16 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
       if (!config.enabled || !fresh || JSON.stringify(fresh) !== JSON.stringify(actor)) return { status: "denied", reply: "" };
       const duplicate = lookup(db, event, fresh, stateFor(db, fresh)); if (duplicate) return duplicate;
       const candidates = legendCandidates(stateFor(db, fresh), fresh.name, legendChoice.optionId);
-      const reply = candidates.length === 0 ? LEGEND_NO_TASK[legendChoice.optionId]
-        : `${LEGEND_MANY_TASK}\n${candidates.map(t => `• ${clean(t.title, 150)}`).join("\n")}`;
-      return save(db, event, fresh, { status: "clarify", reply }, [], now);
+      if (candidates.length === 0) return save(db, event, fresh, { status: "clarify", reply: LEGEND_NO_TASK[legendChoice.optionId] }, [], now);
+      const kind = legendChoice.optionId === "LGDFINISH" ? "close_request" : legendChoice.optionId === "LGDTRANSFER" ? "task_transfer_request" : "comment";
+      const token = randomBytes(3).toString("hex").toUpperCase();
+      // Same upsert as the close_request/task_transfer_request/comment
+      // branches further below -- a stale unconsumed row for this
+      // conversation must be replaced, never collide with the new one.
+      db.prepare("INSERT INTO secretary_task_choice VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(conversation_key) DO UPDATE SET token=excluded.token,kind=excluded.kind,candidate_ids=excluded.candidate_ids,fields_json=excluded.fields_json,original_text=excluded.original_text,source_message_id=excluded.source_message_id,expires_at=excluded.expires_at")
+        .run(key, token, kind, JSON.stringify(candidates.map(t => t.id)), JSON.stringify({}), event.text, event.messageId, now + CONFIRM_MS);
+      log(db, fresh, event, "secretary_task_choice", { summary: "عرض اختيار المهمة قبل التنفيذ", kind, candidateIds: candidates.map(t => t.id) }, now);
+      return save(db, event, fresh, { status: "clarify", reply: `${LEGEND_MANY_TASK}\n${candidates.map(t => `• ${clean(t.title, 150)}`).join("\n")}`, choices: taskChoicePoll(token, candidates, now) }, candidates.map(t => "t:" + t.id), now);
     });
   }
   // A tap on taskChoicePoll (see the close_request/task_transfer_request/
