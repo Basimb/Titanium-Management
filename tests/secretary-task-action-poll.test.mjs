@@ -121,6 +121,33 @@ test('a FINISH tap that succeeds sends Basim a real 🟢/🔴 decision poll, not
   assert.equal(choices.id, `TCLQ${PROGRESS}`);
   assert.deepEqual(choices.options.map(o => o.id), [`TCL${PROGRESS}Y`, `TCL${PROGRESS}N`]);
 });
+// Basim's exact report: "تجربة نسخة سكرتير مطور بانتظار اعتماد باسم مع اني
+// اقفلتها" -- he finished a task he does himself (owner === "باسم") over
+// WhatsApp, and it sat stuck "بانتظار الاعتماد" forever with no poll and no
+// way to ever act on it. Root cause: dispatchManagementNotice's self-notice
+// skip ("don't tell him about his own action") wrongly covered "submit" too,
+// even though a submit is never just an FYI -- it is the one action that
+// always needs his actual decision, exactly like it does for every employee
+// above (see the previous test). This must reach him whether he is the
+// actor, the task's current owner, or -- as here -- both at once.
+test('Basim submitting a task he owns himself still gets a real decision poll -- a submit is never skipped as a self-notice', async t => {
+  const f = fixture(t); const admin = { senderNumber: '12025550103' };
+  const SELF = '44444444-4444-4444-8444-444444444444';
+  f.db.prepare("INSERT INTO tasks (id,title,details,priority,status,owner,suggested_owner,started_at,due_date,completed_at,rejection_reason,created_at,updated_at,archived_at,archived_by) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
+    .run(SELF, 'تجربة نسخة سكرتير مطور', '', 'red', 'progress', 'باسم', 'باسم', 1, null, null, null, 1, 1, null, null);
+  f.db.prepare("INSERT INTO comments VALUES(2,?,?,?,?)").run(SELF, 'باسم', 'انتهت التجربة', f.now - 1000);
+  const tapped = await f.run(undefined, { ...admin, ...tap(`TSKQ${SELF}`, `TSK${SELF}FINISH`) },
+    async () => { throw Error('a FINISH tap must resolve directly, never ask the model'); });
+  assert.equal(tapped.status, 'applied');
+  assert.equal(f.db.prepare('SELECT status FROM tasks WHERE id=?').get(SELF).status, 'approval');
+  const toBasim = f.db.prepare("SELECT text, choices_json AS choicesJson FROM agent_outbox WHERE to_user='basem'").all();
+  assert.equal(toBasim.length, 1, 'exactly one private message -- not silence, and not a duplicate FYI plus the decision poll');
+  assert.match(toBasim[0].text, /بانتظار اعتماد باسم/);
+  assert.ok(toBasim[0].choicesJson, 'Basim must get the same real tappable poll any employee\'s submit already gets, even for his own');
+  const choices = JSON.parse(toBasim[0].choicesJson);
+  assert.equal(choices.id, `TCLQ${SELF}`);
+  assert.deepEqual(choices.options.map(o => o.id), [`TCL${SELF}Y`, `TCL${SELF}N`]);
+});
 test('a plain "claim" notice to Basim never carries the task-close decision poll -- only "submit" does', async t => {
   const f = fixture(t);
   await f.run(undefined, tap(`TSKQ${OPEN}`, `TSK${OPEN}CLAIM`), async () => { throw Error('must not ask the model'); });

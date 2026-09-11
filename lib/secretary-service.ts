@@ -1736,15 +1736,28 @@ export function dispatchManagementNotice(db: DatabaseSync, actor: ChatUser, stat
   // should reach Basim directly, not only the group broadcast. Skipped when
   // he is the one who just acted (no self-notice) or already the private
   // target above (he already got the richer version with the action poll).
-  // A "submit" specifically needs his actual DECISION, not just an FYI --
+  // "submit" is handled separately below -- it needs his actual DECISION,
+  // never just an FYI, so it must never be skipped as a self-notice.
+  if (result.notification.action !== "submit" && actor.id !== "basem" && targetId !== "basem") {
+    enqueueAgentMessage(db, { toUser: "basem", text: notice }, now);
+  }
+  // A "submit" always needs Basim's actual decision, so -- unlike every
+  // other action, gated above -- this must reach him even when he is the one
+  // who just submitted (a task he does himself) or the task's own current
+  // owner. Basim's report: "تجربة نسخة سكرتير مطور بانتظار اعتماد باسم مع
+  // اني اقفلتها" -- he submitted his own task ("انهي مهمه"), which the
+  // self-notice skip above silently swallowed, leaving it stuck "بانتظار
+  // الاعتماد" with no poll and no way to ever act on it from WhatsApp.
   // requestTaskClose's text-typed close flow already attaches a real
   // approvalDecisionPoll via its own approvals-table row, but a submit that
-  // reaches here (a FINISH tap above all) never created one, so without this
-  // he'd have no tap-based way to approve/reject it at all. taskCloseDecisionPoll
-  // is the parallel, approvals-table-free equivalent for exactly this case.
-  if (actor.id !== "basem" && targetId !== "basem") {
-    const choices = result.notification.action === "submit" && taskId ? taskCloseDecisionPoll(taskId, now) : undefined;
-    enqueueAgentMessage(db, { toUser: "basem", text: notice, ...(choices ? { choices } : {}) }, now);
+  // reaches here (a FINISH tap above all, or Basim finishing his own task)
+  // never created one, so without this there'd be no tap-based way to
+  // approve/reject it at all. taskCloseDecisionPoll is the parallel,
+  // approvals-table-free equivalent for exactly this case. This is the only
+  // place a submit notifies basem -- the block above deliberately excludes
+  // it to avoid a second, redundant message for the very same event.
+  if (result.notification.action === "submit" && taskId) {
+    enqueueAgentMessage(db, { toUser: "basem", text: notice, choices: taskCloseDecisionPoll(taskId, now) }, now);
   }
 }
 // On-demand "remind everyone now" broadcast (Basim asking directly, not the
