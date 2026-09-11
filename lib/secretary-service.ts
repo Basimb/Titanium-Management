@@ -1607,12 +1607,15 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
     // eligible task open let the model's own taskId guess through untested --
     // close_request and task_transfer_request are exactly the employee
     // self-service kinds legendCandidates' LGDFINISH/LGDTRANSFER filters were
-    // built for (never applied to Basim's own admin flows, hence freshActor.id
-    // !== "basem" here), so reuse them: one real candidate silently corrects
-    // whatever taskId the model returned (no guess left standing even when it
-    // happened to be right), several candidates stop here for a real tappable
-    // choice instead of ever trusting that guess.
-    if ((plan.kind === "close_request" || plan.kind === "task_transfer_request") && freshActor.id !== "basem" && plan.taskId) {
+    // built for, so reuse them: one real candidate silently corrects whatever
+    // taskId the model returned (no guess left standing even when it happened
+    // to be right), several candidates stop here for a real tappable choice
+    // instead of ever trusting that guess. Basim explicitly asked for this to
+    // apply to him too -- legendCandidates filters by task.owner===actorName,
+    // so for him it only ever fires on tasks HE personally owns as a worker
+    // (see close_request's own "owner" branch below), never on the team's
+    // tasks in general, which is what makes this safe to leave unguarded.
+    if ((plan.kind === "close_request" || plan.kind === "task_transfer_request") && plan.taskId) {
       const candidates = legendCandidates(state, freshActor.name, plan.kind === "close_request" ? "LGDFINISH" : "LGDTRANSFER");
       if (candidates.length === 1) plan = { ...plan, taskId: candidates[0].id };
       else if (candidates.length > 1) {
@@ -1648,7 +1651,10 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
       // reaches here as a plain command action (close_request is the normal
       // path for employees now, but nothing stops the model from emitting a
       // bare submit instead) -- both are the other two commands Basim named.
-      if (freshActor.id !== "basem" && (command.action === "comment" || command.action === "submit") && typeof command.taskId === "string") {
+      // Also unguarded for Basim himself per his explicit request: LGDNOTE
+      // and LGDFINISH both filter legendCandidates by task.owner===actorName,
+      // so for him this only ever matches tasks HE personally owns.
+      if ((command.action === "comment" || command.action === "submit") && typeof command.taskId === "string") {
         const candidates = legendCandidates(state, freshActor.name, command.action === "comment" ? "LGDNOTE" : "LGDFINISH");
         if (candidates.length === 1) command.taskId = candidates[0].id;
         else if (candidates.length > 1) {

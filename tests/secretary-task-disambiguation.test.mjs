@@ -22,7 +22,7 @@ const OPEN = '11111111-1111-4111-8111-111111111111';
 const A = '22222222-2222-4222-8222-222222222222';
 const B = '33333333-3333-4333-8333-333333333333';
 
-function fixture(t, { secondTask = true } = {}) {
+function fixture(t, { secondTask = true, owner = 'خالد' } = {}) {
   const db = new DatabaseSync(':memory:'); t.after(() => db.close());
   db.exec(`PRAGMA foreign_keys=ON;
     CREATE TABLE users(id TEXT PRIMARY KEY,name TEXT UNIQUE,role TEXT,active INTEGER,pin_hash TEXT,created_at INTEGER,updated_at INTEGER);
@@ -34,8 +34,8 @@ function fixture(t, { secondTask = true } = {}) {
     INSERT INTO users VALUES('basem','باسم','admin',1,NULL,1,1),('member','خالد','member',1,NULL,1,1),('other','شادي','member',1,NULL,1,1);
     INSERT INTO projects VALUES('p','مشروع تجريبي','active','باسم',1,NULL,NULL,NULL);
     INSERT INTO tasks VALUES('${OPEN}','p','مهمة مقترحة','','yellow','open',NULL,'خالد',NULL,NULL,NULL,NULL,1,1,NULL,NULL),
-      ('${A}','p','لوحة','تفاصيل تنفيذ','red','progress','خالد','خالد',1,'2026-01-01',NULL,NULL,1,1,NULL,NULL)
-      ${secondTask ? `,('${B}','p','تسليم التقرير','','yellow','progress','خالد','خالد',1,NULL,NULL,NULL,1,1,NULL,NULL)` : ''};`);
+      ('${A}','p','لوحة','تفاصيل تنفيذ','red','progress','${owner}','${owner}',1,'2026-01-01',NULL,NULL,1,1,NULL,NULL)
+      ${secondTask ? `,('${B}','p','تسليم التقرير','','yellow','progress','${owner}','${owner}',1,NULL,NULL,NULL,1,1,NULL,NULL)` : ''};`);
   migrateSecretary(db);
   const config = { enabled: true, sharedKey: 'ab'.repeat(32), contacts: [{ userId: 'basem', number: '12025550103' }, { userId: 'member', number: '12025550101' }, { userId: 'other', number: '12025550102' }], allowedGroupIds: ['12345@g.us'] };
   let count = 0; const now = 1788580000000;
@@ -167,12 +167,51 @@ test('a stale/expired disambiguation poll tap is refused cleanly instead of thro
   assert.equal(r.status, 'clarify');
   assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM approvals').get().n, 0);
 });
-test('Basim himself is never subject to this disambiguation -- close_request/task_transfer_request from him pass through exactly as before', async t => {
+test('Basim closing an employee task he does not own himself is unaffected -- legendCandidates only ever matches tasks HE personally owns, never the team\'s', async t => {
   const f = fixture(t); const admin = { senderNumber: '12025550103' };
-  // Basim closing خالد's own task directly (he can be a task's own worker,
-  // see close_request's "owner" branch) must never be blocked by a poll --
-  // legendCandidates was only ever meant for an employee's OWN self-service
-  // commands, never Basim's admin flow.
+  // A/B are owned by خالد here (default fixture owner), not باسم, so
+  // legendCandidates(state, 'باسم', ...) finds zero candidates of Basim's
+  // own and this fix must not touch his admin flow against خالد's task.
   const r = await f.run(closeRequest(A, 'تم الانتهاء'), { ...admin, text: 'خلصت اللوحة' });
   assert.notEqual(r.status, 'clarify');
+});
+// Basim asked explicitly for this to also apply when HE is the task's own
+// worker (وضحلنا: "نعم، طبقها علي كمان"). legendCandidates filters by
+// task.owner === actorName, so once Basim personally owns 2+ progress tasks
+// the same ambiguity he reported for خالد can happen to him too.
+test('with two eligible tasks Basim personally owns, close_request stops for the same disambiguation poll instead of trusting the guessed taskId', async t => {
+  const f = fixture(t, { owner: 'باسم' }); const admin = { senderNumber: '12025550103' };
+  const r = await f.run(closeRequest(A, 'خلصت التنفيذ'), { ...admin, text: 'انهيت المهمة' });
+  assert.equal(r.status, 'clarify');
+  assert.ok(r.choices, 'must offer a real tappable poll for Basim too, not trust the guessed taskId');
+  assert.equal(r.choices.id.slice(0, 3), 'TDQ');
+  assert.deepEqual(r.choices.options.map(o => o.label), ['لوحة', 'تسليم التقرير']);
+});
+test('tapping that poll as Basim resolves through close_request\'s own "owner" branch (a confirmation to close_direct/approve), never crashing or misrouting to the employee approval flow', async t => {
+  const f = fixture(t, { owner: 'باسم' }); const admin = { senderNumber: '12025550103' };
+  const first = await f.run(closeRequest(A, 'خلصت التنفيذ بالكامل'), { ...admin, text: 'انهيت المهمة' });
+  const tapped = await f.run(undefined, { ...admin, ...tap(first.choices.id, first.choices.options[1].id) },
+    async () => { throw Error('a disambiguation tap must resolve directly, never ask the model'); });
+  assert.equal(tapped.status, 'confirmation', 'Basim owns the task himself, so this is his own close_direct/approve confirmation, not an employee\'s task_close approval request');
+  assert.equal(tapped.taskId, B, 'must resolve against the TAPPED task (تسليم التقرير), never A');
+  assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM approvals').get().n, 0, 'no employee-style approval should be filed for Basim\'s own task');
+});
+// task_transfer_request is the self-service "give up my task" REQUEST an
+// employee files for Basim's approval -- it has no meaning for Basim
+// himself (he reassigns directly, a plain "command" action, never a
+// request), so validateSecretaryIntent already refuses it for any
+// admin/basem actor unconditionally, before the plan ever reaches this
+// file's legendCandidates disambiguation check. That upstream refusal --
+// not this fix -- is why Basim never sees a disambiguation poll here, even
+// when he personally owns 2+ candidate tasks; confirm the guard removal
+// above did not accidentally open a poll for a flow that must stay closed
+// to him.
+test('task_transfer_request from Basim is refused before it ever reaches the disambiguation check, even when he personally owns 2+ candidate tasks', async t => {
+  const f = fixture(t, { owner: 'باسم' }); const admin = { senderNumber: '12025550103' };
+  const r = await f.run(transferRequest(A, 'other'), { ...admin, text: 'بدي احول المهمة لشادي' });
+  assert.equal(r.status, 'clarify');
+  assert.match(r.reply, /تعيد تعيين المهمة مباشرة/);
+  assert.equal(r.choices, undefined, 'must never offer a disambiguation poll for this flow');
+  assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM secretary_task_choice').get().n, 0);
+  assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM approvals').get().n, 0);
 });
