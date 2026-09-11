@@ -262,8 +262,9 @@ export function createBridgeRuntime({ config, store, auth, makeWASocket, jidNorm
       // a poll failure here must never retry the successful send or fail
       // this background delivery job.
       if (polls && choices) {
+        let outcome;
         try {
-          await polls.sendQuestion({ choices, chatJid: `${number}@s.whatsapp.net`, senderNumber: number, messageId }, {
+          const result = await polls.sendQuestion({ choices, chatJid: `${number}@s.whatsapp.net`, senderNumber: number, messageId }, {
             identity: { normalizeJid: jidNormalizedUser, lookupPhoneForLid: value => current.signalRepository.lidMapping.getPNForLID(value) },
             creatorJids: [current.user?.id || auth.state.creds.me?.id, auth.state.creds.me?.lid].filter(Boolean),
             authorize: async sender => ready && !stopped && current === socket && config.tasksEnabled !== false
@@ -272,9 +273,18 @@ export function createBridgeRuntime({ config, store, auth, makeWASocket, jidNorm
               if (signal.aborted || !ready || stopped || current !== socket) throw new Error('poll_unavailable');
               return current.relayMessage(to, content, options);
             },
-            log: reason => output.info(`Titanium choices (outbox): ${reason}; text fallback retained.`),
+            log: reason => { output.info(`Titanium choices (outbox): ${reason}; text fallback retained.`); outcome = reason; },
           });
-        } catch { output.info('Titanium choices (outbox): unavailable; text fallback retained.'); }
+          outcome = outcome || result?.status;
+        } catch { output.info('Titanium choices (outbox): unavailable; text fallback retained.'); outcome = outcome || 'threw_before_log'; }
+        // TEMP diagnostic: a poll that silently never renders is otherwise
+        // indistinguishable from a normal successful send (Basim: "الزر ما
+        // ظهر"). No server log access this round, so surface the exact
+        // rejection reason right in the chat instead, once, then remove this
+        // once the real cause is found and fixed.
+        if (outcome && outcome !== 'sent' && outcome !== 'existing' && ready && !stopped && current === socket) {
+          try { await current.sendMessage(`${number}@s.whatsapp.net`, { text: `🔧 تشخيص الاستطلاع: ${outcome}` }, {}); } catch { /* best-effort only */ }
+        }
       }
     }, signal);
   }
