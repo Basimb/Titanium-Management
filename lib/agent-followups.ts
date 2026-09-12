@@ -194,8 +194,17 @@ export function planFollowups(db: DatabaseSync, config: FollowupConfig, at: numb
         text: `⏳ يا ${clean(responsible)}، مهمة «${clean(task.title)}» لسا بانتظار ردك.${staleNote}\n\n${TASK_COMMANDS_LEGEND}`, ...(choices ? { choices } : {}) });
     } else if (ownerNumber) {
       if (alreadySent(db, "unowned_task", owner.id, task.id, at - HOUR)) continue;
+      // Same resend/supersession hazard as unclaimed_task just above (see its
+      // own comment): this nudge repeats hourly while the task stays unowned,
+      // and each resend supersedes the previous WhatsApp poll bubble server-side
+      // even though WhatsApp itself never marks the old bubble as expired.
+      // Basim hit this for real (2026-09-12): he tapped an older "حددلها موظف
+      // مسؤول" bubble and it silently registered his WhatsApp vote client-side
+      // while the server rejected it as stale, with no explanation. Spell out
+      // which bubble is live, exactly like unclaimed_task already does.
+      const staleNote = "\n⚠️ إذا في استطلاع تصويت أقدم من هذه الرسالة لنفس المهمة، هو منتهي الصلاحية — رد من استطلاع هذه الرسالة تحديدًا.";
       plans.push({ id: randomBytes(8).toString("hex"), kind: "unowned_task", targetUser: owner.id, entityId: task.id, to: `${ownerNumber}@s.whatsapp.net`,
-        text: `⚠️ يا باسم، مهمة «${clean(task.title)}» ما إلها موظف مسؤول.`, choices: unownedTaskPoll(task.id, users, owner.id, at) });
+        text: `⚠️ يا باسم، مهمة «${clean(task.title)}» ما إلها موظف مسؤول.${staleNote}`, choices: unownedTaskPoll(task.id, users, owner.id, at) });
     }
   }
 

@@ -103,6 +103,22 @@ test('the unclaimed-task nudge to the suggested owner carries the five-command l
   assert.match(mine.text, /5️⃣ 🔴 انهاء المهمة/);
 });
 
+// 2026-09-12, Basim tapped an older "حددلها موظف مسؤول" poll bubble for an
+// unowned task -- WhatsApp showed it as a registered vote (green check) but
+// the server rejected it as stale, because a later resend of this same
+// hourly nudge had already superseded that bubble server-side while
+// WhatsApp's own UI never marks the old bubble as expired ("شو هذا ازهقت
+// اعدل اخطاء ياخي"). The unowned-task nudge now carries the same explicit
+// warning the unclaimed-task nudge already had, telling Basim only the poll
+// attached to THIS message is live.
+test('the unowned-task escalation to Basim warns that only the poll on this message is live (mirrors the unclaimed-task nudge)', t => {
+  const { db, config } = fixture(t);
+  db.exec(`INSERT INTO tasks VALUES('t2','مهمة بلا موظف','','red','open',NULL,NULL,NULL,NULL,NULL,NULL,1,1,NULL,NULL)`);
+  const plans = planFollowups(db, config, NIGHT);
+  const toBasim = plans.find(p => p.kind === 'unowned_task' && p.targetUser === 'basem' && p.entityId === 't2');
+  assert.match(toBasim.text, /أقدم من هذه الرسالة لنفس المهمة، هو منتهي الصلاحية/);
+});
+
 test('a task already claimed (owner set) triggers neither the unclaimed nor the unowned nudge', t => {
   const { db, config } = fixture(t);
   db.exec(`INSERT INTO tasks VALUES('t3','مهمة مستلمة','','yellow','progress','خالد','خالد',1,NULL,NULL,NULL,1,1,NULL,NULL)`);

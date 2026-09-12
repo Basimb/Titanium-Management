@@ -95,6 +95,23 @@ test('tapping the LGDEXTEND disambiguation poll names the tapped task and asks f
   assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM secretary_task_choice').get().n, 0);
 });
 
+// Basim (2026-09-12): "بعد ما يسالك بدك تمدد كم يوم بتحط مثلا رقم 1 او 2 او
+// 3 وهيك بتتفعل القائمه الرئيسيه وهذا غلط" -- the very next bare-digit reply
+// to "لأي مدة أو تاريخ بدك تمدد؟" used to get rewritten by the LEGEND_DIGIT_OPTIONS
+// shortcut (3 => LGDTRANSFER) before it ever reached the model, silently
+// turning "3" (days) into a transfer request instead of a duration answer.
+test('a bare digit reply to "how many days" is never hijacked as a main-menu shortcut -- it reaches the model unchanged, focused on the just-picked task', async t => {
+  const f = fixture(t, { withTasks: true });
+  const first = await f.run(undefined, undefined, tap('LGDQ', 'LGDEXTEND'));
+  const designOption = first.choices.options.find(o => o.label === 'تصميم');
+  const tapped = await f.run(undefined, undefined, tap(first.choices.id, designOption.id));
+  assert.equal(tapped.taskId, PROGRESS2);
+  let seenText, seenFocus;
+  await f.run('3', async input => { seenText = input.text; seenFocus = input.focusedTaskId; return emptySecretaryIntent('clarify', 'تمام، مددتها.'); });
+  assert.equal(seenText, '3', 'the bare digit must reach the model as-is, never rewritten to a legend command');
+  assert.equal(seenFocus, PROGRESS2, 'must stay focused on the task just picked via the poll, not re-ask which task');
+});
+
 test('tapping LGDEXTEND with zero eligible tasks resolves deterministically to the "no task" reply, exactly like FINISH/NOTE/TRANSFER, never asking the model', async t => {
   const f = fixture(t, { withTasks: false }); // خالد owns nothing here
   const r = await f.run(undefined, undefined, tap('LGDQ', 'LGDEXTEND'));

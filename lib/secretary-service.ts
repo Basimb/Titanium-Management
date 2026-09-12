@@ -241,7 +241,21 @@ function resolveTaskCommandsLegendChoice(db: DatabaseSync, event: Event, config:
   // down (the legendChoice branch, ~line 1130) -- that branch was never
   // itself gated on identity, only this bare-digit entry point was.
   const digitActor = digitOptionId ? actorFor(db, event, config) : null;
-  const digitIsSafe = digitOptionId !== null && digitActor !== null
+  // Basim (2026-09-12): "بعد ما يسالك بدك تمدد كم يوم بتحط مثلا رقم 1 او 2 او
+  // 3 وهيك بتتفعل القائمه الرئيسيه وهذا غلط" -- once the extension flow has
+  // asked "لأي مدة أو تاريخ بدك تمدد؟" (see the "extension_pick" branches
+  // below, which stash this exact marker), the actor's very next bare digit
+  // is almost always the day count itself, not a request to open the
+  // five-command menu. Without this check "3" would get rewritten to
+  // LGDTRANSFER (digit 3 in LEGEND_DIGIT_OPTIONS) and silently hijack the
+  // extension into a transfer request instead. The marker is deleted the
+  // moment this same digit falls through to the ordinary focusedTaskId/model
+  // pipeline (see the secretary_note_followup consumption below), so it only
+  // ever suppresses the shortcut for that one pending answer.
+  const pendingExtensionAnswer = digitOptionId !== null && digitActor !== null
+    ? db.prepare("SELECT 1 FROM secretary_note_followup WHERE conversation_key=? AND action='extension' AND expires_at>?").get(conversation(event, digitActor), now)
+    : null;
+  const digitIsSafe = digitOptionId !== null && digitActor !== null && !pendingExtensionAnswer
     && (digitActor.id === "basem" || digitActor.role === "admin"
       ? true
       : ownershipCandidates(stateFor(db, digitActor), now).length === 0);
@@ -1293,6 +1307,13 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
         // "٣" alone), which then completes the extension against the RIGHT
         // task instead of re-asking which one.
         if (row.kind === "extension_pick") {
+          // Marker only -- see resolveTaskCommandsLegendChoice's own comment.
+          // It stops a bare "3" reply from being hijacked as the LGDTRANSFER
+          // menu shortcut; the answer itself is still handled by the ordinary
+          // focusedTaskId/model pipeline once this marker is cleared there,
+          // never by this table's own generic comment/transfer consumption.
+          db.prepare("INSERT INTO secretary_note_followup VALUES(?,?,?,?,?) ON CONFLICT(conversation_key) DO UPDATE SET action=excluded.action,task_id=excluded.task_id,expires_at=excluded.expires_at,source_message_id=excluded.source_message_id")
+            .run(key, "extension", task.id, now + CONFIRM_MS, event.messageId);
           return save(db, event, fresh, { status: "clarify", reply: `تمام، لأي مدة أو تاريخ بدك تمدد موعد «${clean(task.title, 150)}»؟ اكتب عدد الأيام (مثل 3) أو التاريخ الجديد.`, taskId: task.id }, ["t:" + task.id], now);
         }
         if (row.kind === "comment" || row.kind === "submit") {
@@ -1369,7 +1390,17 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
   // such follow-up (Basim, 2026-09-12: he'd rather finishing a task never
   // wait on a free-text answer at all -- see close_request's own comment).
   const noteFollowup = db.prepare("SELECT * FROM secretary_note_followup WHERE conversation_key=?").get(key) as { action: string; task_id: string; expires_at: number } | undefined;
-  if (noteFollowup && event.choice === undefined && !event.replyToMessageId && event.groupId === null && event.inputKind !== "voice" && event.text.trim()) {
+  const noteFollowupApplies = Boolean(noteFollowup) && event.choice === undefined && !event.replyToMessageId && event.groupId === null && event.inputKind !== "voice" && event.text.trim();
+  // "extension" rows are a digit-shortcut suppression marker only (see
+  // resolveTaskCommandsLegendChoice and the extension_pick branches that
+  // write it) -- they carry no stashed field to fill in here, unlike
+  // "comment"/"task_transfer_request" below. Once the marker has done its one
+  // job of keeping THIS reply out of the LGD digit shortcut, clear it and
+  // fall through to the ordinary focusedTaskId/model pipeline further down,
+  // which already knows how to parse a duration/date answer -- never treat
+  // the marker itself as something to consume.
+  if (noteFollowupApplies && noteFollowup && noteFollowup.action === "extension") db.prepare("DELETE FROM secretary_note_followup WHERE conversation_key=?").run(key);
+  if (noteFollowupApplies && noteFollowup && noteFollowup.action !== "extension") {
     return transaction(db, () => {
       const fresh = actorFor(db, event, config);
       if (!config.enabled || !fresh || JSON.stringify(fresh) !== JSON.stringify(actor) || fresh.active !== 1) return { status: "denied", reply: "" };
@@ -1900,6 +1931,14 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
             : fuzzyOptionId === "LGDFINISH" ? `تقصد مهمة «${title}»؟ شو نتيجتها بالضبط؟`
             : fuzzyOptionId === "LGDEXTEND" ? `تقصد مهمة «${title}»؟ لأي مدة أو تاريخ بدك تمدد موعدها؟`
             : `تقصد مهمة «${title}»؟ اذكر اسم الزميل المقصود، أو قل «مش مسؤوليتي» بدون تحديد حدا.`;
+          // Same LGDEXTEND digit-shortcut marker as the tapped-poll branch
+          // above (see resolveTaskCommandsLegendChoice's comment) -- this
+          // fuzzy single-candidate path asks the exact same "لأي مدة..."
+          // question and is just as likely to get a bare "3" back.
+          if (fuzzyOptionId === "LGDEXTEND") {
+            db.prepare("INSERT INTO secretary_note_followup VALUES(?,?,?,?,?) ON CONFLICT(conversation_key) DO UPDATE SET action=excluded.action,task_id=excluded.task_id,expires_at=excluded.expires_at,source_message_id=excluded.source_message_id")
+              .run(key, "extension", candidates[0].id, now + CONFIRM_MS, event.messageId);
+          }
           return save(db, event, freshActor, { status: "clarify", reply, taskId: candidates[0].id }, ["t:" + candidates[0].id], now);
         }
         const token = randomBytes(3).toString("hex").toUpperCase();
