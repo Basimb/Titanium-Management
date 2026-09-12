@@ -224,22 +224,47 @@ test('Basim finishing his own task with no result/details supplied also skips st
   assert.doesNotMatch(r.reply, /نتيجتها|نتيجة/);
   assert.equal(r.taskId, A);
 });
-// task_transfer_request is the self-service "give up my task" REQUEST an
-// employee files for Basim's approval -- it has no meaning for Basim
-// himself (he reassigns directly, a plain "command" action, never a
-// request), so validateSecretaryIntent already refuses it for any
-// admin/basem actor unconditionally, before the plan ever reaches this
-// file's legendCandidates disambiguation check. That upstream refusal --
-// not this fix -- is why Basim never sees a disambiguation poll here, even
-// when he personally owns 2+ candidate tasks; confirm the guard removal
-// above did not accidentally open a poll for a flow that must stay closed
-// to him.
-test('task_transfer_request from Basim is refused before it ever reaches the disambiguation check, even when he personally owns 2+ candidate tasks', async t => {
+// 2026-09-12, Basim's own live test: task_transfer_request used to refuse
+// ANY admin/basem actor outright, even for a task he personally holds as
+// its own current worker -- "هذا الجواب مال امه داعي يجي تصويت باسماء
+// الموظفين ويروح لباسم اعتماد وبعدها تنتقل المهمه للموظف" (this reply is
+// nonsense; it should show a poll of colleagues and go to Basim for
+// approval, then the task moves to the employee). validateSecretaryIntent's
+// admin refusal (secretary-intent.ts) now only fires when the task ISN'T
+// his -- so once he personally owns 2+ candidate tasks, this file's own
+// disambiguation check (the very same one close_request already gets, see
+// the earlier test in this file) is what runs next, exactly like it does
+// for close_request.
+test('task_transfer_request from Basim now reaches the same disambiguation poll as close_request when he personally owns 2+ candidate tasks, instead of the old blanket refusal', async t => {
   const f = fixture(t, { owner: 'باسم' }); const admin = { senderNumber: '12025550103' };
   const r = await f.run(transferRequest(A, 'other'), { ...admin, text: 'بدي احول المهمة لشادي' });
   assert.equal(r.status, 'clarify');
+  assert.ok(r.choices, 'must offer a real tappable poll for Basim too, not the old flat refusal');
+  assert.equal(r.choices.id.slice(0, 3), 'TDQ');
+  assert.deepEqual(r.choices.options.map(o => o.label), ['لوحة', 'تسليم التقرير']);
+  assert.doesNotMatch(r.reply, /تعيد تعيين المهمة مباشرة/);
+});
+test('tapping that poll as Basim carries the transfer through to his own approval poll directly (ownerMessage/choices as the reply), since the usual notify-basem side channel never fires when the actor notifying is basem himself', async t => {
+  const f = fixture(t, { owner: 'باسم' }); const admin = { senderNumber: '12025550103' };
+  const first = await f.run(transferRequest(A, 'other'), { ...admin, text: 'بدي احول المهمة لشادي' });
+  const reportOption = first.choices.options.find(o => o.label === 'تسليم التقرير');
+  const tapped = await f.run(undefined, { ...admin, ...tap(first.choices.id, reportOption.id) },
+    async () => { throw Error('a disambiguation tap must resolve directly, never ask the model'); });
+  assert.equal(tapped.status, 'applied');
+  assert.ok(tapped.choices, 'must hand Basim the real 🟢/🔴 approval poll directly as this reply');
+  const approval = f.db.prepare("SELECT entity_id AS entityId, payload FROM approvals WHERE type='task_transfer'").get();
+  assert.equal(approval.entityId, B, 'must file against the TAPPED task (تسليم التقرير), never A');
+  assert.match(JSON.parse(approval.payload).suggestedOwnerName ?? '', /شادي/);
+});
+// Someone ELSE's task is still not his to hand off this way -- he has the
+// direct "reassign" command for that instead. This is the guard that must
+// keep working even though the two tests above now let his OWN task through.
+test('Basim transferring a task he does NOT personally own is still refused and redirected to the direct reassign command', async t => {
+  const f = fixture(t, { secondTask: false }); const admin = { senderNumber: '12025550103' }; // A is owned by خالد (default fixture owner), not باسم
+  const r = await f.run(transferRequest(A, 'other'), { ...admin, text: 'بدي احول المهمة لشادي' });
+  assert.equal(r.status, 'clarify');
   assert.match(r.reply, /تعيد تعيين المهمة مباشرة/);
-  assert.equal(r.choices, undefined, 'must never offer a disambiguation poll for this flow');
+  assert.equal(r.choices, undefined, 'must never offer a disambiguation poll for someone else\'s task');
   assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM secretary_task_choice').get().n, 0);
   assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM approvals').get().n, 0);
 });

@@ -74,6 +74,22 @@ test('an open task with no suggested owner at all escalates to Basim hourly, inc
   assert.equal(plans.filter(p => p.kind === 'unclaimed_task' && p.entityId === 't2').length, 0, 'no suggested owner -- never the employee-facing nag');
 });
 
+// 2026-09-12, Basim: "وهاي التنبهات قلتلك تيجي تصويت مش هيك نصوص" -- this
+// nudge must carry a real tappable poll, not just plain text (see
+// unownedTaskPoll in agent-followups.ts and its resolution,
+// parseUnownedTaskPollChoice, in secretary-service.ts).
+test('the unowned-task escalation to Basim carries a real tappable poll -- a colleague-name option per active employee plus a self-claim option', t => {
+  const { db, config } = fixture(t);
+  db.exec(`INSERT INTO tasks VALUES('t2','مهمة بلا موظف','','red','open',NULL,NULL,NULL,NULL,NULL,NULL,1,1,NULL,NULL)`);
+  const plans = planFollowups(db, config, NIGHT);
+  const toBasim = plans.find(p => p.kind === 'unowned_task' && p.targetUser === 'basem' && p.entityId === 't2');
+  assert.ok(toBasim.choices, 'must attach a tappable poll, not bare text');
+  assert.equal(toBasim.choices.id, 'UNOWNQt2');
+  assert.deepEqual(toBasim.choices.options.map(o => o.label), ['خالد', '🙋 تولاها بنفسك']);
+  assert.equal(toBasim.choices.options[0].id, 'UNOWNt2_member');
+  assert.equal(toBasim.choices.options[1].id, 'UNOWNt2_SELF');
+});
+
 test('a task already claimed (owner set) triggers neither the unclaimed nor the unowned nudge', t => {
   const { db, config } = fixture(t);
   db.exec(`INSERT INTO tasks VALUES('t3','مهمة مستلمة','','yellow','progress','خالد','خالد',1,NULL,NULL,NULL,1,1,NULL,NULL)`);

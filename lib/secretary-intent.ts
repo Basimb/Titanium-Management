@@ -269,7 +269,16 @@ export function validateSecretaryIntent(value: unknown, input: SecretaryModelInp
     } else if (plan.action !== null) return emptySecretaryIntent("clarify", "وضحلي بجملة وحدة شو بالضبط بدك تنفذ.");
     if ((plan.kind === "extension" || plan.kind === "priority_change" || plan.kind === "close_request" || plan.kind === "task_transfer_request") && (plan.taskId === null || !input.tasks.some(t => t.id === plan.taskId))) return emptySecretaryIntent("clarify", "أي مهمة تقصد؟ اذكر اسمها.");
     if (plan.kind === "ownership_request" && (input.actor.id === "basem" || input.actor.role === "admin")) return emptySecretaryIntent("clarify", "أنت تقدر تعيّن المسؤول مباشرة. اذكر المهمة واسم الموظف.");
-    if (plan.kind === "task_transfer_request" && (input.actor.id === "basem" || input.actor.role === "admin")) return emptySecretaryIntent("clarify", "أنت تقدر تعيد تعيين المهمة مباشرة. اذكر المهمة واسم الموظف الجديد.");
+    // Basim (2026-09-12): this used to refuse him outright, every time -- but
+    // he can also personally hold a task as its own current worker (the same
+    // ownership signal ownershipCandidates already carries via `assignee`),
+    // and for THAT case he explicitly wants the normal self-service flow:
+    // colleague poll, an approval that comes back to him, then an actual
+    // handoff once he taps it -- not a flat "use reassign instead". Someone
+    // ELSE's task still redirects him to the direct reassign command, and the
+    // ownership re-check just below (shared with every other actor) is what
+    // actually enforces this either way.
+    if (plan.kind === "task_transfer_request" && (input.actor.id === "basem" || input.actor.role === "admin") && !input.ownershipCandidates?.some(t => t.id === plan.taskId && t.assignee === input.actor.name)) return emptySecretaryIntent("clarify", "أنت تقدر تعيد تعيين المهمة مباشرة. اذكر المهمة واسم الموظف الجديد.");
     // WhatsApp renders Arabic right-to-left text around bare numbers inconsistently.
     // When an employee explicitly says "رقم 12", resolve that number against the
     // server-issued candidate list instead of trusting the model's interpretation.

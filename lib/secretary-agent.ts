@@ -276,9 +276,20 @@ export function handleAgentIntent(plan: SecretaryIntent, ctx: AgentContext): Age
         return { status: "applied", reply: `📨 رفعت طلبك لباسم: ${request.approval.summary}. ما تغير المسؤول قبل موافقته.`, taskId: plan.taskId, notify: [{ userId: "basem", text: request.ownerMessage, choices: request.choices }], groupNotice: null };
       }
       case "task_transfer_request": {
-        if (owner) return { status: "clarify", reply: "أنت تقدر تعيد تعيين المهمة مباشرة. اذكر المهمة واسم الموظف الجديد." };
         if (!plan.taskId) return { status: "clarify", reply: "أي مهمة بدك تحوّل أو تعتذر عنها؟" };
         const task = ctx.tasks.find(candidate => candidate.id === plan.taskId);
+        // Basim (2026-09-12): he's only turned away here when the task isn't
+        // actually his to hand off -- someone else's task still goes through
+        // his direct "reassign" command instead. But when he personally
+        // holds a task as its own current worker (exactly what LGDTRANSFER's
+        // own legendCandidates scoping already lets him reach), this is now
+        // the same self-service request/colleague-poll/approval flow every
+        // employee gets, ending in an actual handoff once he approves it --
+        // requestTaskTransfer below carries the matching (and fuller --
+        // ctx.tasks here doesn't carry suggestedOwner) ownership check.
+        if (owner && task?.owner !== actor.name) {
+          return { status: "clarify", reply: "أنت تقدر تعيد تعيين المهمة مباشرة. اذكر المهمة واسم الموظف الجديد." };
+        }
         // Basim: a transfer must always carry a reason, so Basim's decision
         // is never blind ("نعرف سبب التحويل"). Same one-field-at-a-time shape
         // as close_request's own missing-result question just above.
@@ -313,6 +324,17 @@ export function handleAgentIntent(plan: SecretaryIntent, ctx: AgentContext): Age
           }
         }
         const request = requestTaskTransfer(db, actor, { taskId: plan.taskId, suggestedOwnerId, reason }, { now });
+        if (actor.id === "basem") {
+          // He's both the requester and the approver for his own task's
+          // transfer -- the usual "notify basem" side channel below never
+          // actually fires when the notify target IS the actor themself
+          // (see deliverAgentSideEffects' own `item.userId !== actor.id`
+          // dedup, there to avoid echoing someone's own action back at
+          // them), so hand him the real ownerMessage/approval poll directly
+          // as this reply instead, exactly like the poll any employee's
+          // transfer request would put in front of him.
+          return { status: "applied", reply: request.ownerMessage, taskId: plan.taskId, choices: request.choices, groupNotice: null };
+        }
         const reply = suggestedOwnerId
           ? `📨 رفعت طلب التحويل لباسم: ${request.approval.summary}. ما تغير المسؤول قبل موافقته.`
           : `📨 رفعت لباسم إنها مش مسؤوليتك. ما تغير شي قبل قراره.`;

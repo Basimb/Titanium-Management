@@ -170,8 +170,15 @@ export function requestTaskOwnership(db: DatabaseSync, claimed: ManagementActor,
 export function requestTaskTransfer(db: DatabaseSync, claimed: ManagementActor, input: { taskId: string; suggestedOwnerId?: string | null; reason?: string }, options: { now?: number } = {}): { approval: Approval; ownerMessage: string; choices: SecretaryChoices } {
   migrateManagementActions(db);
   const actor = resolveManagementActor(db, claimed);
-  if (isOwner(actor as PermissionActor)) return fail(400, "employee_only", "أنت تقدر تعيد تعيين المهمة مباشرة");
   const task = visibleTask(db, actor, input.taskId);
+  // Basim (2026-09-12): this used to hard-refuse any admin/owner actor here,
+  // full stop -- but he can also personally hold a task as its own current
+  // worker, and for that case he explicitly wants this exact self-service
+  // flow (colleague poll, an approval that comes back to him, an actual
+  // handoff once he taps it), same as every other employee. The ownership
+  // check just below already scopes this correctly for everyone: someone
+  // ELSE's task still isn't his to transfer this way (he has the direct
+  // "reassign" command for that), while his own task passes through.
   if (task.owner !== actor.name && task.suggestedOwner !== actor.name) return fail(403, "not_owned", "تحويل المهمة متاح للمسؤول عنها فقط");
   if (task.status === "completed" || task.status === "approval") return fail(409, "invalid_transition", "المهمة منتهية أو بانتظار الاعتماد");
   // A plain user-existence/name lookup, never the actor's own visibility-scoped

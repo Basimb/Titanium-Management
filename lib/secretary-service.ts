@@ -759,6 +759,23 @@ function parseTaskActionPollChoice(event: Event): { taskId: string; action: "cla
   const action = ACTIONS[choice.optionId.slice(prefix.length)];
   return action ? { taskId, action } : null;
 }
+// Basim (2026-09-12): "قلتلك تيجي تصويت مش هيك نصوص" -- the unowned_task
+// nudge's own poll (unownedTaskPoll in agent-followups.ts) carries the task
+// id and either a colleague's user id or the literal "SELF" sentinel
+// directly in its option id, so -- like parseApprovalPollChoice/
+// parseTaskCloseDecisionPollChoice above -- a tap resolves deterministically
+// with nothing to look up against a model and no live state that could have
+// gone stale.
+function parseUnownedTaskPollChoice(event: Event): { taskId: string; target: string } | null {
+  const choice = event.choice;
+  if (!choice || !choice.questionId.startsWith("UNOWNQ")) return null;
+  const taskId = choice.questionId.slice(6);
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(taskId)) return null;
+  const prefix = `UNOWN${taskId}_`;
+  if (!choice.optionId.startsWith(prefix)) return null;
+  const target = choice.optionId.slice(prefix.length);
+  return target ? { taskId, target } : null;
+}
 // Inverse of taskActionPoll's NOTE/TRANSFER/EXTEND options. Unlike CLAIM/
 // FINISH, these three cannot resolve on the tap alone -- rewrite the tap,
 // once, at the very top (same spot resolveConfirmChoice already runs),
@@ -1083,6 +1100,38 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
       if (!task) return save(db, event, fresh, { status: "clarify", reply: "هاي المهمة ما عادت متاحة." }, [], now);
       try {
         const result = executeManagementAction(db, fresh, { action: "approve", taskId: task.id } as ManagementCommand,
+          { now, source: "whatsapp_secretary", auditContext: { originalText: event.text, sourceMessageId: event.messageId, confirmationRequired: false } });
+        dispatchManagementNotice(db, fresh, state, result, {}, now);
+        return save(db, event, fresh, { status: "applied", reply: `✅ ${result.message}`, taskId: task.id }, ["t:" + task.id], now);
+      } catch (error) {
+        if (!(error instanceof ManagementActionError)) throw error;
+        return save(db, event, fresh, { status: "clarify", reply: error.message }, [], now);
+      }
+    });
+  }
+  // An unowned-task nudge's poll (see unownedTaskPoll in agent-followups.ts
+  // and parseUnownedTaskPollChoice above) -- resolves directly for the same
+  // reason parseApprovalPollChoice/taskCloseDecisionChoice do: the option id
+  // already carries the exact task and target, nothing to look up against a
+  // model. "SELF" claims the task for Basim outright (he's admin, so "claim"
+  // sets him as owner immediately, no separate acceptance step); a named
+  // colleague goes through the normal reassign -- pending their own claim,
+  // exactly like "عيّنها لـ..." already works today.
+  const unownedTaskChoice = parseUnownedTaskPollChoice(event);
+  if (unownedTaskChoice && actor.id === "basem" && actor.role === "admin" && event.groupId === null && !event.replyToMessageId) {
+    return transaction(db, () => {
+      const fresh = actorFor(db, event, config);
+      if (!config.enabled || !fresh || JSON.stringify(fresh) !== JSON.stringify(actor)) return { status: "denied", reply: "" };
+      const duplicate = lookup(db, event, fresh, stateFor(db, fresh)); if (duplicate) return duplicate;
+      const state = stateFor(db, fresh);
+      const task = state.tasks.find(t => t.id === unownedTaskChoice.taskId);
+      if (!task) return save(db, event, fresh, { status: "clarify", reply: "هاي المهمة ما عادت متاحة." }, [], now);
+      if (task.owner || task.suggestedOwner) return save(db, event, fresh, { status: "clarify", reply: `«${clean(task.title)}» صار إلها مسؤول (${clean(task.owner || task.suggestedOwner || "")}) قبل ما تضغط.`, taskId: task.id }, ["t:" + task.id], now);
+      try {
+        const command = (unownedTaskChoice.target === "SELF"
+          ? { action: "claim", taskId: task.id }
+          : { action: "reassign", taskId: task.id, ownerId: unownedTaskChoice.target }) as ManagementCommand;
+        const result = executeManagementAction(db, fresh, command,
           { now, source: "whatsapp_secretary", auditContext: { originalText: event.text, sourceMessageId: event.messageId, confirmationRequired: false } });
         dispatchManagementNotice(db, fresh, state, result, {}, now);
         return save(db, event, fresh, { status: "applied", reply: `✅ ${result.message}`, taskId: task.id }, ["t:" + task.id], now);

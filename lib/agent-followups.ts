@@ -80,6 +80,21 @@ function autoReminderPoll(tasks: ManagementTask[], actorName: string, now: numbe
   return options.length >= 2 ? { id: `TSKQ${task.id}`, title: "\u0634\u0648 \u0628\u062f\u0643 \u062a\u0639\u0645\u0644 \u0628\u0647\u0627\u0644\u0645\u0647\u0645\u0629\u061f", expiresAt: now + 60 * 60_000, options } : undefined;
 }
 
+// Basim (2026-09-12): "قلتلك تيجي تصويت مش هيك نصوص" -- an unowned task (no
+// owner AND no suggested owner either) used to nudge him with plain text
+// and nothing to tap. Give him a real poll instead, same convention as
+// taskActionPoll/autoReminderPoll above: each active employee's name
+// assigns the task straight to them (a normal reassign, pending their own
+// claim, exactly like naming someone via "عيّنها لـ..." today), and a
+// dedicated "تولاها بنفسك" option claims it for Basim directly -- he's
+// admin, so a tap resolves this deterministically, see
+// parseUnownedTaskPollChoice in secretary-service.ts.
+function unownedTaskPoll(taskId: string, users: Array<{ id: string; name: string; active: number }>, ownerId: string, now: number): SecretaryChoices {
+  const employees = users.filter(user => user.active !== 0 && user.id !== ownerId).slice(0, 11);
+  const options = [...employees.map(user => ({ id: `UNOWN${taskId}_${user.id}`, label: user.name })),
+    { id: `UNOWN${taskId}_SELF`, label: "🙋 تولاها بنفسك" }];
+  return { id: `UNOWNQ${taskId}`, title: "حددلها موظف مسؤول:", expiresAt: now + 60 * 60_000, options };
+}
 function ownerActor(db: DatabaseSync): ManagementActor | null {
   const row = db.prepare("SELECT id,name,role,active,department FROM users WHERE id='basem' AND role='admin' AND active=1").get() as ManagementActor | undefined;
   return row ?? null;
@@ -171,7 +186,7 @@ export function planFollowups(db: DatabaseSync, config: FollowupConfig, at: numb
     } else if (ownerNumber) {
       if (alreadySent(db, "unowned_task", owner.id, task.id, at - HOUR)) continue;
       plans.push({ id: randomBytes(8).toString("hex"), kind: "unowned_task", targetUser: owner.id, entityId: task.id, to: `${ownerNumber}@s.whatsapp.net`,
-        text: `⚠️ يا باسم، مهمة «${clean(task.title)}» ما إلها موظف مسؤول. حددلها موظف أو تولاها بنفسك.` });
+        text: `⚠️ يا باسم، مهمة «${clean(task.title)}» ما إلها موظف مسؤول.`, choices: unownedTaskPoll(task.id, users, owner.id, at) });
     }
   }
 
