@@ -66,18 +66,40 @@ test('tapping LGDEXTEND with exactly one eligible task rewrites deterministicall
   assert.equal(seen, 'بدي أمدد موعد مهمة «لوحة»');
 });
 
-test('tapping LGDEXTEND with two eligible tasks falls back to the generic, un-named extend sentence -- the model still gets asked which one', async t => {
+// Basim (2026-09-12): "لما تظهر زي هاي الحالة ما يستخدم ارقام المهام...
+// عدلها" -- with 2+ eligible tasks, letting the model free-associate "which
+// task?" produced a wall of full task titles (sometimes its own separate
+// ad-hoc poll) instead of the real numbered tap-to-choose list FINISH/
+// TRANSFER/NOTE already give, and it asked "كم يوم؟" before ever resolving
+// which task. LGDEXTEND now takes the exact same deterministic path.
+test('tapping LGDEXTEND with two eligible tasks offers the same real numbered poll FINISH/TRANSFER/NOTE already give, instead of ever asking the model', async t => {
   const f = fixture(t, { withTasks: true }); // خالد owns two progress tasks here
-  let seen;
-  await f.run(undefined, async input => { seen = input.text; return emptySecretaryIntent('clarify', 'أي مهمة؟'); }, tap('LGDQ', 'LGDEXTEND'));
-  assert.equal(seen, 'بدي أمدد موعد مهمة', 'no task named -- unlike FINISH/TRANSFER/NOTE, EXTEND never uses the deterministic multi-candidate poll');
+  const r = await f.run(undefined, undefined, tap('LGDQ', 'LGDEXTEND'));
+  assert.equal(r.status, 'clarify');
+  assert.match(r.reply, /أكثر من مهمة/);
+  assert.ok(r.choices, 'must offer a real tappable poll, not a free-text bullet list');
+  assert.equal(r.choices.id.slice(0, 3), 'TDQ');
+  assert.deepEqual(r.choices.options.map(o => o.label), ['لوحة', 'تصميم']);
 });
 
-test('tapping LGDEXTEND with zero eligible tasks also falls back to the model, never the FINISH/NOTE/TRANSFER "no task" reply', async t => {
+test('tapping the LGDEXTEND disambiguation poll names the tapped task and asks for the new date, carrying its id as taskId for the next plain message', async t => {
+  const f = fixture(t, { withTasks: true });
+  const first = await f.run(undefined, undefined, tap('LGDQ', 'LGDEXTEND'));
+  const designOption = first.choices.options.find(o => o.label === 'تصميم');
+  const tapped = await f.run(undefined, undefined, tap(first.choices.id, designOption.id));
+  assert.equal(tapped.status, 'clarify');
+  assert.match(tapped.reply, /تصميم/);
+  assert.match(tapped.reply, /مدة|تاريخ/);
+  assert.equal(tapped.taskId, PROGRESS2, 'must carry the TAPPED task (تصميم), so the very next plain message (e.g. "٣") resolves against it via focusedTaskId, never re-asking which task');
+  // The poll is single-use.
+  assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM secretary_task_choice').get().n, 0);
+});
+
+test('tapping LGDEXTEND with zero eligible tasks resolves deterministically to the "no task" reply, exactly like FINISH/NOTE/TRANSFER, never asking the model', async t => {
   const f = fixture(t, { withTasks: false }); // خالد owns nothing here
-  let seen;
-  await f.run(undefined, async input => { seen = input.text; return emptySecretaryIntent('clarify', 'ما في مهمة'); }, tap('LGDQ', 'LGDEXTEND'));
-  assert.equal(seen, 'بدي أمدد موعد مهمة');
+  const r = await f.run(undefined, undefined, tap('LGDQ', 'LGDEXTEND'));
+  assert.equal(r.status, 'clarify');
+  assert.match(r.reply, /ما عندك مهمة قيد التنفيذ حاليًا لتمديد موعدها/);
 });
 
 test('typing the bare phrase "تمديد الموعد" resolves exactly like tapping LGDEXTEND', async t => {
@@ -95,8 +117,9 @@ test('a bare digit "1".."5" resolves to the matching quick command when the empl
   const finish = await f.run('5'); // LGDFINISH with zero candidates resolves deterministically, no model call
   assert.equal(finish.status, 'clarify');
   assert.match(finish.reply, /ما عندك مهمة قيد التنفيذ حاليًا لإنهائها/);
-  let seenExtend; await f.run('4', async input => { seenExtend = input.text; return emptySecretaryIntent('clarify', 'شو الموعد؟'); });
-  assert.equal(seenExtend, 'بدي أمدد موعد مهمة', 'digit 4 -- تمديد التاريخ, no task to name');
+  const extend = await f.run('4'); // LGDEXTEND with zero candidates now also resolves deterministically, no model call
+  assert.equal(extend.status, 'clarify');
+  assert.match(extend.reply, /ما عندك مهمة قيد التنفيذ حاليًا لتمديد موعدها/);
 });
 
 // The critical regression: an employee who actually has tasks visible to

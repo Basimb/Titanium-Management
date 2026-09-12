@@ -79,14 +79,28 @@ const LEGEND_NO_TASK: Record<string, string> = {
   LGDFINISH: "ما عندك مهمة قيد التنفيذ حاليًا لإنهائها.",
   LGDNOTE: "ما عندك مهمة قيد التنفيذ حاليًا لإضافة ملاحظة عليها.",
   LGDTRANSFER: "ما عندك مهمة مفتوحة أو قيد التنفيذ حاليًا لتحويلها.",
+  LGDEXTEND: "ما عندك مهمة قيد التنفيذ حاليًا لتمديد موعدها.",
 };
-// LGDEXTEND deliberately isn't in the map above: an extension always needs a
-// new date the person hasn't given yet, so unlike FINISH/NOTE/TRANSFER's
-// zero/multiple-candidate cases it never enters the deterministic
-// taskChoicePoll branch below (see resolveTaskCommandsLegendChoice) --
-// zero/several eligible tasks both just fall back to the plain, already-
-// working "بدي أمدد موعد مهمة" sentence, which the normal model-driven flow
-// already knows how to ask a clarifying "أي مهمة؟" about on its own.
+// LGDEXTEND used to be deliberately left out of this deterministic poll
+// (an extension always needs a new date the person hasn't given yet, so the
+// thinking was: let the zero/multiple-candidate cases fall back to the
+// plain "بدي أمدد موعد مهمة" sentence and let the normal model-driven flow
+// ask "أي مهمة؟" on its own). Basim's report (2026-09-12): with 2+ eligible
+// tasks, that model-driven "أي مهمة؟" came back as a wall of full task
+// titles (sometimes even attached as its own separate ad-hoc poll) instead
+// of the real numbered tap-to-choose list FINISH/TRANSFER/NOTE already give
+// -- and worse, the model asked "كم يوم؟" BEFORE ever resolving which task,
+// so by the time it discovered the ambiguity the day count was already
+// stranded with nothing to attach it to. LGDEXTEND now takes the exact same
+// deterministic path as FINISH/NOTE below: 0 candidates -> LEGEND_NO_TASK,
+// 1 -> auto-resolved and named inline (legendRewriteText, just below), 2+ ->
+// the real taskChoicePoll. Once the tap picks a task ("extension_pick" kind,
+// see its branch further down), the reply asking "لأي مدة؟" carries that
+// task's id as `taskId`, which the ordinary focusedTaskId mechanism (see
+// historyRows/focusResult near the bottom of handleSecretaryEvent) then
+// hands back to the model on the very next plain message -- so "٣" alone is
+// enough for the model to complete the extension against the RIGHT task,
+// never re-asking which one.
 const LEGEND_MANY_TASK = "عندك أكثر من مهمة تنطبق، أي وحدة بالضبط؟";
 // Basim: typing "انهاء المهمة"/"تحويل المهمة"/"اضافة ملاحظة" (close_request/
 // task_transfer_request/comment, below) without clearly naming which task let
@@ -240,10 +254,10 @@ function resolveTaskCommandsLegendChoice(db: DatabaseSync, event: Event, config:
   if (!actor) return { ...event, choice: undefined };
   const candidates = legendCandidates(stateFor(db, actor), actor.name, choice.optionId);
   if (candidates.length === 1) return { ...event, text: legendRewriteText(choice.optionId, candidates[0].title), choice: undefined };
-  // LGDEXTEND never carries the leftover `choice` forward (unlike FINISH/
-  // TRANSFER/NOTE just below) -- see LEGEND_NO_TASK's own comment for why an
-  // extension can't reuse that deterministic multi-candidate poll machinery.
-  if (choice.optionId === "LGDEXTEND") return { ...event, text: "بدي أمدد موعد مهمة", choice: undefined };
+  // 0 or 2+ candidates: leave `choice` set (including for LGDEXTEND now --
+  // see LEGEND_NO_TASK's own comment) so the dedicated branch in
+  // handleSecretaryEvent asks by name/poll instead of ever letting the model
+  // guess.
   return { ...event, choice };
 }
 /** Queues the command legend as its own WhatsApp message (never in the same
@@ -1200,7 +1214,7 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
   // typed "انهاء المهمة" with two eligible tasks got the same broken
   // numbered-list "clarify" text twice in a row instead of ever offering a
   // real choice.
-  const legendChoice = event.choice && event.choice.questionId === "LGDQ" && ["LGDFINISH", "LGDTRANSFER", "LGDNOTE"].includes(event.choice.optionId) ? event.choice : null;
+  const legendChoice = event.choice && event.choice.questionId === "LGDQ" && ["LGDFINISH", "LGDTRANSFER", "LGDNOTE", "LGDEXTEND"].includes(event.choice.optionId) ? event.choice : null;
   if (legendChoice && actor.active === 1 && event.groupId === null && !event.replyToMessageId) {
     return transaction(db, () => {
       const fresh = actorFor(db, event, config);
@@ -1208,7 +1222,7 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
       const duplicate = lookup(db, event, fresh, stateFor(db, fresh)); if (duplicate) return duplicate;
       const candidates = legendCandidates(stateFor(db, fresh), fresh.name, legendChoice.optionId);
       if (candidates.length === 0) return save(db, event, fresh, { status: "clarify", reply: LEGEND_NO_TASK[legendChoice.optionId] }, [], now);
-      const kind = legendChoice.optionId === "LGDFINISH" ? "close_request" : legendChoice.optionId === "LGDTRANSFER" ? "task_transfer_request" : "comment";
+      const kind = legendChoice.optionId === "LGDFINISH" ? "close_request" : legendChoice.optionId === "LGDTRANSFER" ? "task_transfer_request" : legendChoice.optionId === "LGDEXTEND" ? "extension_pick" : "comment";
       const token = randomBytes(3).toString("hex").toUpperCase();
       // Same upsert as the close_request/task_transfer_request/comment
       // branches further below -- a stale unconsumed row for this
@@ -1267,6 +1281,20 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
       if (!task) return save(db, event, fresh, { status: "clarify", reply: "هاي المهمة ما عادت متاحة." }, [], now);
       const stashedFields = JSON.parse(row.fields_json) as Record<string, unknown>;
       try {
+        // Basim (2026-09-12): resolving WHICH task an extension applies to
+        // must never fall back to the model's own free-text guess once 2+ of
+        // the actor's own tasks qualify (see LEGEND_MANY_TASK's comment
+        // above for the exact bug report). Unlike close_request/
+        // task_transfer_request, an extension has no extra field to collect
+        // right here (no secretary_note_followup needed) -- the reply below
+        // just names the now-unambiguous task and asks for the new date,
+        // carrying taskId so the ordinary focusedTaskId mechanism hands it
+        // straight back to the model on the very next plain message (e.g.
+        // "٣" alone), which then completes the extension against the RIGHT
+        // task instead of re-asking which one.
+        if (row.kind === "extension_pick") {
+          return save(db, event, fresh, { status: "clarify", reply: `تمام، لأي مدة أو تاريخ بدك تمدد موعد «${clean(task.title, 150)}»؟ اكتب عدد الأيام (مثل 3) أو التاريخ الجديد.`, taskId: task.id }, ["t:" + task.id], now);
+        }
         if (row.kind === "comment" || row.kind === "submit") {
           // The fuzzy bare-phrase fallback (legendFuzzyPhraseOption below)
           // never captured any note text before offering this poll -- it
@@ -1870,11 +1898,17 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
           const title = clean(candidates[0].title, 150);
           const reply = fuzzyOptionId === "LGDNOTE" ? `تقصد مهمة «${title}»؟ اكتب نص الملاحظة.`
             : fuzzyOptionId === "LGDFINISH" ? `تقصد مهمة «${title}»؟ شو نتيجتها بالضبط؟`
+            : fuzzyOptionId === "LGDEXTEND" ? `تقصد مهمة «${title}»؟ لأي مدة أو تاريخ بدك تمدد موعدها؟`
             : `تقصد مهمة «${title}»؟ اذكر اسم الزميل المقصود، أو قل «مش مسؤوليتي» بدون تحديد حدا.`;
           return save(db, event, freshActor, { status: "clarify", reply, taskId: candidates[0].id }, ["t:" + candidates[0].id], now);
         }
         const token = randomBytes(3).toString("hex").toUpperCase();
-        const kind = fuzzyOptionId === "LGDFINISH" ? "close_request" : fuzzyOptionId === "LGDTRANSFER" ? "task_transfer_request" : "comment";
+        // Basim (2026-09-12): LGDEXTEND used to fall through to the final
+        // "comment" default here -- a fuzzy "مدد" guess for an ambiguous
+        // extension silently turned into a note-taking flow instead. Route
+        // it to the same extension_pick kind the exact-typed-phrase/tapped-
+        // legend branches above already use.
+        const kind = fuzzyOptionId === "LGDFINISH" ? "close_request" : fuzzyOptionId === "LGDTRANSFER" ? "task_transfer_request" : fuzzyOptionId === "LGDEXTEND" ? "extension_pick" : "comment";
         // Same upsert as the exact-typed-phrase/tapped-legend branches
         // above -- a stale unconsumed row for this conversation must be
         // replaced, never collide with the new one.
