@@ -64,6 +64,29 @@ test('a verb-less plain reply fills in the title when the model itself fails to 
   assert.equal(saved(f).title,'باسم تجربة ٢');
 });
 
+// 2026-09-12, Basim hit this live: pressed the "1" legend shortcut (=> "اضافة
+// مهمة"), got asked "شو المهمة أو الشغل المطلوب بالضبط؟"، then answered with
+// a full sentence phrased like an instruction ("شادي يكلم رند ويبلغها انه
+// اجالها طلب سحب ملف جوجل خليها توافق") -- and the model reclassified it as
+// message_team (an explicit "send this now" request) instead of using it as
+// the title, per its own prompt's "a different action ends the draft" rule.
+// The task silently never got created. Basim's own explicit fix request: once
+// a draft is missing ONLY its title, the very next plain reply must ALWAYS
+// become the title -- the model's own kind classification must never even be
+// consulted for that one turn.
+test('a message-team-flavored reply still becomes the task title when title is the only missing field -- the model is never asked to reclassify it',async t=>{
+  const f=fixture(t);
+  assert.match((await f.run(draft({}))).reply,/الشغل المطلوب/);
+  const text='شادي يكلم رند ويبلغها انه اجالها طلب سحب ملف جوجل خليها توافق';
+  // asyncNoMutation(null) throws if invoked at all -- proves the model's own
+  // kind classification (which previously said message_team) is never
+  // reached for this turn.
+  const result=await f.run(null,{text});
+  assert.match(result.reply,/مين بدك/,'moves on to the next missing field (owner), a real task draft in progress');
+  assert.doesNotMatch(result.reply,/طابور الإرسال|سيُرسل|المستلمون/,'must never fall into the message_team preview flow');
+  assert.equal(saved(f).title,text);
+});
+
 test('all facts in one request still need a separate approval or matching quoted preview',async t=>{
   const f=fixture(t);const preview=await f.run(draft({...complete,details:'تفاصيل محفوظة كاملة'}),{responseMessageId:'EXACT-PREVIEW'});
   assert.equal(preview.status,'confirmation');assert.match(preview.reply,/تفاصيل محفوظة كاملة/);assert.equal(tasks(f).length,1);

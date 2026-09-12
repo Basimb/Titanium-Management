@@ -1692,6 +1692,25 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
     knowledgeContext: event.groupId === null ? safeKnowledge(db, actor, review?.question || event.text)
       .slice(0, 3).map(hit => ({ title: hit.title, snippet: hit.snippet.slice(0, 600) })) : [] };
   const directCreation = !review && event.inputKind !== "voice" && !event.replyToMessageId ? directTaskCreationIntent(input) : null;
+  // Basim (2026-09-12): pressed "1" (LGDADD => "اضافة مهمة"), got asked "شو
+  // المهمة أو الشغل المطلوب بالضبط؟", then answered with a full sentence
+  // ("شادي يكلم رند ويبلغها انه اجالها طلب سحب ملف جوجل خليها توافق") that
+  // reads exactly like an explicit "send this message now" instruction --
+  // message_team's own definition. The model is allowed by its own prompt to
+  // end an active draft for "a different action", and did, silently dropping
+  // the task he'd just started. His own explicit ask: once a draft is
+  // missing ONLY its title, the very next plain reply must ALWAYS become
+  // that title -- never re-interpreted as message_team or anything else --
+  // the same deterministic trust level the comment/transfer/extension
+  // followups above already give their own single missing field. Skip the
+  // model's kind classification entirely for this one turn; taskIntake's own
+  // fallback (see its "existingDraft.title" comment) already knows how to
+  // take a plain reply as the title once it's the only gap, so this just
+  // reaches that path directly instead of trusting the model to route there.
+  const directContinuation = !review && event.inputKind !== "voice" && !event.replyToMessageId && event.groupId === null
+    && taskDraft && !taskDraft.title && event.text.trim() && event.text.trim().length <= 200 && !isCancellation(event.text)
+    ? { ...emptySecretaryIntent("task_draft"), intakeMode: "continue" as const, fields: { ...emptySecretaryIntent().fields, title: event.text.trim() } }
+    : null;
   // A bare color can answer an active creation question; explicit list requests switch topic.
   const readQuestion = review?.question || event.text;
   const priorityQuery = review ? priorityTaskQuery(readQuestion, input)
@@ -1716,7 +1735,8 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
   const workloadQuery = !review && !taskDraft && !event.replyToMessageId && (actor.role === "admin" || actor.role === "manager")
     && /مهام|شغل|مشغول/.test(listText) && /أكثر|اكثر/.test(listText) && /مين|من |موظف|حدا|واحد|مشغول/.test(listText);
   try {
-    plan = workloadQuery ? emptySecretaryIntent("report", "WORKLOAD_LEADERBOARD")
+    plan = directContinuation ? directContinuation
+      : workloadQuery ? emptySecretaryIntent("report", "WORKLOAD_LEADERBOARD")
       : priorityQuery ? emptySecretaryIntent(priorityQuery.kind === "clarify" ? "clarify" : "summary", priorityQuery.kind === "clarify" ? priorityQuery.reply : null)
       : directTaskList ? emptySecretaryIntent("summary")
         : bareOwnershipCandidate ? { ...emptySecretaryIntent("ownership_request"), taskId: bareOwnershipCandidate.id }
