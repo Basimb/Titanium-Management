@@ -110,6 +110,29 @@ test('new start does not inherit previous draft answers absent from the new supp
   assert.equal(result.fields.dueDate, null);
 });
 
+// 2026-09-12, from a live report: Basim opened a draft ("1" -> اضافة مهمة),
+// the assistant asked "شو المهمة؟", and his plain answer -- just a title,
+// with no "أضف"/"اضافة"/any creation verb in it at all -- got classified by
+// the provider as intakeMode 'start' instead of 'continue'. Before this fix
+// that bounced him back to "بدك أضيف مهمة جديدة؟" and threw the title away;
+// a draft being active must make this behave like 'continue' regardless.
+test('a plain verb-less answer to an active draft continues it instead of repeating "بدك تضيف مهمة جديدة؟"', () => {
+  const result = validateSecretaryIntent(draft({ title: 'باسم تجربة نهائية' }),
+    context('باسم تجربة نهائية', { taskDraft: fullDraft() }));
+  assert.equal(result.kind, 'task_draft');
+  assert.equal(result.intakeMode, 'continue');
+  assert.equal(result.fields.title, 'باسم تجربة نهائية');
+  // The rest of the old draft's answers are still there to be merged by
+  // taskIntake (this layer only decides start vs. continue, not merging).
+});
+// The same verb-less answer with NO active draft at all must still ask,
+// exactly as before -- this fix only ever fires when a draft is open.
+test('a plain verb-less answer with no active draft still asks whether a new task is wanted', () => {
+  const result = validateSecretaryIntent(draft({ title: 'باسم تجربة نهائية' }), context('باسم تجربة نهائية'));
+  assert.equal(result.kind, 'clarify');
+  assert.match(result.message, /بدك أضيف مهمة جديدة؟/);
+});
+
 test('continue requires an active server draft; conversational history is not a substitute', () => {
   const fields = fullDraft();
   for (const taskDraft of [undefined, null]) {

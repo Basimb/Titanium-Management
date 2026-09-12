@@ -341,9 +341,25 @@ export function validateSecretaryIntent(value: unknown, input: SecretaryModelInp
     if (plan.taskId !== null || plan.message !== null || plan.recipientIds.length || ["name", "reason", "body", "remindAt"].some(key => plan.fields[key as keyof SecretaryIntent["fields"]] !== null))
       return emptySecretaryIntent("clarify", "وضحلي بجملة وحدة شو المهمة الجديدة يلي بدك تفتحها.");
     if (plan.kind === "task_draft" && plan.action !== null) return emptySecretaryIntent("clarify", "بدك تفتح مهمة جديدة، ولا تنفذ إجراء على مهمة موجودة أصلًا؟ وضحلي المقصود.");
-    const mode = plan.intakeMode ?? (input.taskDraft ? "continue" : "start");
+    let mode = plan.intakeMode ?? (input.taskDraft ? "continue" : "start");
     if (mode === "continue" && !input.taskDraft) return emptySecretaryIntent("clarify", "ما في مسودة مهمة نشطة؛ احكيلي المهمة الجديدة المطلوبة.");
-    if (mode === "start" && !/(?:ضيف|اضف|اضيف|اضافه|اضافة|انشئ|انشي|انشاء|اعمل|نعمل|سجل|افتح|جهز|مهم[هة]\s+جديد[هة]|\b(?:add|create|new)\b)/u.test(normalizedArabic(input.text))) return emptySecretaryIntent("clarify", "بدك أضيف مهمة جديدة؟ اذكر الشغل المطلوب حتى ما أرجع لطلب قديم بالغلط.");
+    if (mode === "start" && !/(?:ضيف|اضف|اضيف|اضافه|اضافة|انشئ|انشي|انشاء|اعمل|نعمل|سجل|افتح|جهز|مهم[هة]\s+جديد[هة]|\b(?:add|create|new)\b)/u.test(normalizedArabic(input.text))) {
+      // The model sometimes tags a plain, verb-less answer to the intake
+      // question it JUST asked (e.g. a bare task title, no "أضف"/"اضافة"
+      // anywhere in it) as a fresh "start" instead of "continue", even
+      // though a draft is already open and waiting on exactly that field --
+      // Basim hit this live (2026-09-12): "1" opened a draft, the assistant
+      // asked "شو المهمة؟", and his plain title-only reply got bounced back
+      // to "بدك تضيف مهمة جديدة؟" instead of being accepted, discarding the
+      // answer he'd just given. When a draft is genuinely active, treat this
+      // exactly like intakeMode had come back null (continue) instead of
+      // repeating the same question. A real restart-with-a-different-task
+      // request is untouched by this: it always still contains one of the
+      // creation verbs above (e.g. "اترك الأولى وأضف مهمة ثانية"), so it
+      // never reaches this branch in the first place.
+      if (!input.taskDraft) return emptySecretaryIntent("clarify", "بدك أضيف مهمة جديدة؟ اذكر الشغل المطلوب حتى ما أرجع لطلب قديم بالغلط.");
+      mode = "continue";
+    }
     if (plan.fields.dueDate !== null && plan.fields.dueDate !== "unscheduled" && (!/^\d{4}-\d{2}-\d{2}$/.test(plan.fields.dueDate) || !Number.isFinite(Date.parse(plan.fields.dueDate + "T00:00:00Z")) || new Date(plan.fields.dueDate + "T00:00:00Z").toISOString().slice(0, 10) !== plan.fields.dueDate)) return emptySecretaryIntent("clarify", "شو الموعد بالتاريخ الصحيح؟ أو بتحب تتركها بدون موعد حاليًا؟");
     return { ...plan, kind: "task_draft", action: null, intakeMode: mode };
   }
