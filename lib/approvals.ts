@@ -130,17 +130,21 @@ export function requestPriorityChange(db: DatabaseSync, claimed: ManagementActor
 }
 
 /** Employee says the work is done. Task moves to approval (existing submit) and a durable request is filed. */
-export function requestTaskClose(db: DatabaseSync, claimed: ManagementActor, input: { taskId: string; result: string }, options: { now?: number } = {}): { approval: Approval; ownerMessage: string; effect: ManagementResult; choices: SecretaryChoices } {
+export function requestTaskClose(db: DatabaseSync, claimed: ManagementActor, input: { taskId: string; result?: string }, options: { now?: number } = {}): { approval: Approval; ownerMessage: string; effect: ManagementResult; choices: SecretaryChoices } {
   migrateManagementActions(db);
   const actor = resolveManagementActor(db, claimed);
   const task = visibleTask(db, actor, input.taskId);
-  const result = text(input.result, "نتيجة التنفيذ", 4000);
+  // Optional per Basim (2026-09-12): finishing a task no longer requires
+  // explaining what happened first -- see close_request's own comment in
+  // secretary-agent.ts. Only leave a "نتيجة التنفيذ" trail on the task, and
+  // only mention a result to Basim, when one was actually given.
+  const result = text(input.result, "نتيجة التنفيذ", 4000, true);
   const at = now(options);
-  if (task.status === "progress") executeManagementAction(db, actor, { action: "comment", taskId: task.id, comment: `نتيجة التنفيذ: ${result}` }, { now: at, source: "approval" });
+  if (task.status === "progress" && result) executeManagementAction(db, actor, { action: "comment", taskId: task.id, comment: `نتيجة التنفيذ: ${result}` }, { now: at, source: "approval" });
   const effect = task.status === "approval" ? null : executeManagementAction(db, actor, { action: "submit", taskId: task.id }, { now: at, source: "approval" });
   const summary = `إغلاق «${task.title}»`;
   const approval = insert(db, actor, { type: "task_close", entityType: "task", entityId: task.id, summary, payload: { result, taskTitle: task.title } }, at);
-  const ownerMessage = `${actor.name} يقول إن مهمة «${task.title}» انتهت.\nالنتيجة: ${result}${APPROVAL_CHOICE_HINT}\n(لو رفضت، اذكر السبب)`;
+  const ownerMessage = `${actor.name} يقول إن مهمة «${task.title}» انتهت.${result ? `\nالنتيجة: ${result}` : ""}${APPROVAL_CHOICE_HINT}\n(لو رفضت، اذكر السبب)`;
   return { approval, ownerMessage, effect: effect ?? { ok: true, action: "submit", entityType: "task", entityId: task.id, message: "المهمة بانتظار الاعتماد", deletedObjectKeys: [] }, choices: approvalDecisionPoll(approval, at) };
 }
 

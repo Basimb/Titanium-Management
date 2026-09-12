@@ -12,8 +12,9 @@ import { handleSecretaryEvent, migrateSecretary } from '../lib/secretary-service
 import { emptySecretaryIntent } from '../lib/secretary-intent.ts';
 
 const A = '22222222-2222-4222-8222-222222222222';
+const C = '44444444-4444-4444-8444-444444444444';
 
-function fixture(t, { colleagues = true } = {}) {
+function fixture(t, { colleagues = true, secondTask = false } = {}) {
   const db = new DatabaseSync(':memory:'); t.after(() => db.close());
   db.exec(`PRAGMA foreign_keys=ON;
     CREATE TABLE users(id TEXT PRIMARY KEY,name TEXT UNIQUE,role TEXT,active INTEGER,pin_hash TEXT,created_at INTEGER,updated_at INTEGER);
@@ -23,7 +24,8 @@ function fixture(t, { colleagues = true } = {}) {
     CREATE TABLE audit_logs(id INTEGER PRIMARY KEY,actor_user_id TEXT,actor_name TEXT,action TEXT,entity_type TEXT,entity_id TEXT,details TEXT,created_at INTEGER);
     INSERT INTO users VALUES('basem','باسم','admin',1,NULL,1,1),('member','خالد','member',1,NULL,1,1)
       ${colleagues ? `,('other','شادي','member',1,NULL,1,1),('third','أيمن','member',1,NULL,1,1)` : ''};
-    INSERT INTO tasks VALUES('${A}','لوحة','تفاصيل تنفيذ','red','progress','خالد','خالد',1,'2026-01-01',NULL,NULL,1,1,NULL,NULL);`);
+    INSERT INTO tasks VALUES('${A}','لوحة','تفاصيل تنفيذ','red','progress','خالد','خالد',1,'2026-01-01',NULL,NULL,1,1,NULL,NULL)
+      ${secondTask ? `,('${C}','تسليم التقرير','','yellow','progress','خالد','خالد',1,NULL,NULL,NULL,1,1,NULL,NULL)` : ''};`);
   migrateSecretary(db);
   const config = { enabled: true, sharedKey: 'ab'.repeat(32), contacts: [{ userId: 'basem', number: '12025550103' }, { userId: 'member', number: '12025550101' }, { userId: 'other', number: '12025550102' }, { userId: 'third', number: '12025550104' }], allowedGroupIds: ['12345@g.us'] };
   let count = 0; const now = 1788580000000;
@@ -102,4 +104,59 @@ test('with no active colleagues to offer, a reason-only transfer request files t
   assert.equal(r.choices, undefined);
   const approval = f.db.prepare("SELECT payload FROM approvals WHERE type='task_transfer'").get();
   assert.equal(JSON.parse(approval.payload).suggestedOwnerId, null);
+});
+
+// 2026-09-12 follow-up, Basim's own live test: with two eligible tasks open,
+// typing "تحويل المهمة" (or tapping LGDTRANSFER) correctly offers a real
+// poll of the TASKS first (which one?), same as LGDFINISH/LGDNOTE. But
+// tapping one used to dead-end exactly like the note bug: the "شو سبب
+// التحويل؟" question that follows never remembered which task was just
+// picked, so the actor's very next message (the reason itself) went back
+// through the model, which (correctly, by design) never trusts its own
+// taskId guess once 2+ of the actor's tasks qualify -- so it just reopened
+// the same "which task?" poll again, forever. Per Basim: unlike finishing a
+// task, he explicitly wants the reason question KEPT for transfers, just
+// answered once and carried straight through to the colleague poll and the
+// approval he gets -- never re-asked.
+test('tapping the deterministic transfer poll (two eligible tasks) asks for the reason naming the tapped task, never the model', async t => {
+  const f = fixture(t, { secondTask: true });
+  const first = await handleSecretaryEvent(f.db, f.event({ text: 'تحويل المهمة' }), f.config, { infer: async () => { throw new Error('a bare typed legend phrase must resolve deterministically, never ask the model'); }, now: () => f.now });
+  assert.equal(first.status, 'clarify');
+  assert.ok(first.choices, 'must offer a real tappable poll of the two eligible tasks');
+  const reportOption = first.choices.options.find(o => o.label === 'تسليم التقرير');
+  const tapped = await f.tap(first.choices.id, reportOption.id);
+  assert.equal(tapped.status, 'clarify');
+  assert.match(tapped.reply, /سبب تحويل/);
+  assert.match(tapped.reply, /تسليم التقرير/);
+  assert.equal(tapped.taskId, C);
+  assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM approvals').get().n, 0, 'nothing filed before the reason is known');
+});
+
+test('the very next plain message after that completes the transfer deterministically -- it never reopens the "which task?" poll, and the reason reaches the colleague poll and the approval', async t => {
+  const f = fixture(t, { secondTask: true });
+  const first = await handleSecretaryEvent(f.db, f.event({ text: 'تحويل المهمة' }), f.config, { infer: async () => { throw new Error('must not ask the model'); }, now: () => f.now });
+  const reportOption = first.choices.options.find(o => o.label === 'تسليم التقرير');
+  await f.tap(first.choices.id, reportOption.id);
+  const answered = await handleSecretaryEvent(f.db, f.event({ text: 'مشغول بمهمة ثانية' }), f.config, { infer: async () => { throw new Error('the follow-up reason must be captured deterministically, never sent back through the model'); }, now: () => f.now });
+  assert.equal(answered.status, 'clarify');
+  assert.ok(answered.choices, 'the reason is known now -- it must move straight to the colleague poll, not ask again which task');
+  const aymanOption = answered.choices.options.find(o => o.label === 'أيمن');
+  const tapped = await f.tap(answered.choices.id, aymanOption.id);
+  assert.equal(tapped.status, 'applied');
+  const approval = f.db.prepare("SELECT payload FROM approvals WHERE type='task_transfer'").get();
+  const payload = JSON.parse(approval.payload);
+  assert.equal(payload.suggestedOwnerName, 'أيمن');
+  assert.equal(payload.reason, 'مشغول بمهمة ثانية');
+  assert.equal(payload.taskTitle, 'تسليم التقرير');
+});
+
+test('explicitly cancelling instead of supplying the transfer reason drops the pending follow-up cleanly', async t => {
+  const f = fixture(t, { secondTask: true });
+  const first = await handleSecretaryEvent(f.db, f.event({ text: 'تحويل المهمة' }), f.config, { infer: async () => { throw new Error('must not ask the model'); }, now: () => f.now });
+  const reportOption = first.choices.options.find(o => o.label === 'تسليم التقرير');
+  await f.tap(first.choices.id, reportOption.id);
+  const cancelled = await handleSecretaryEvent(f.db, f.event({ text: 'الغاء' }), f.config, { infer: async () => { throw new Error('a cancellation must resolve directly, never ask the model'); }, now: () => f.now });
+  assert.equal(cancelled.status, 'cancelled');
+  assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM approvals').get().n, 0);
+  assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM secretary_note_followup').get().n, 0, 'the follow-up row must not linger after cancellation');
 });

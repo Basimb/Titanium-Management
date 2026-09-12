@@ -84,19 +84,21 @@ test('Basim\'s own casual phrasing ("انهاء مهمه"/"انهيت مهمه"/
     assert.equal(r.choices.id.slice(0, 3), 'TDQ');
   }
 });
-test('tapping the deterministic finish poll resolves against the tapped task and asks for the missing result instead of guessing one', async t => {
+test('tapping the deterministic finish poll resolves against the tapped task and files it for Basim\'s approval right away, without asking for a result first', async t => {
   const f = fixture(t);
   const first = await f.run({ text: 'انهاء المهمة' });
   const tapped = await f.run(tap(first.choices.id, first.choices.options[1].id), neverAsk);
-  // A bare "انهاء المهمة" never said WHAT was finished -- close_request always
-  // needs a result (see secretary-agent.ts's own "شو نتيجة..." clarify), so
-  // this is the correct, graceful next question, not a bug: the important
-  // part already happened deterministically -- it asks about the TAPPED
-  // task (تسليم التقرير), never A, and the model was never consulted.
-  assert.equal(tapped.status, 'clarify');
+  // A bare "انهاء المهمة" never said WHAT was finished, and per Basim
+  // (2026-09-12) that's fine now -- close_request no longer waits on an
+  // open-ended "شو نتيجتها؟" answer first (that free-text round trip used to
+  // dead-end into a repeat "which task?" poll; he'd rather this go straight
+  // to a plain approval). The important part still happened
+  // deterministically: it's the TAPPED task (تسليم التقرير), never A, and
+  // the model was never consulted.
+  assert.equal(tapped.status, 'applied');
   assert.match(tapped.reply, /تسليم التقرير/);
   assert.equal(tapped.taskId, B);
-  assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM approvals').get().n, 0);
+  assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM approvals').get().n, 1);
 });
 test('retyping the same bare phrase again before tapping replaces the stale poll instead of colliding with it', async t => {
   const f = fixture(t);

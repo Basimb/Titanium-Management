@@ -1244,6 +1244,26 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
           }
           return perform(db, event, fresh, state, { action: row.kind, taskId: task.id, ...(row.kind === "comment" ? { comment: stashedFields.comment } : {}) }, now, { originalText: row.original_text, sourceMessageId: row.source_message_id, confirmationRequired: false });
         }
+        // Same gap as the comment/LGDNOTE case just above, for LGDTRANSFER's
+        // own required "شو سبب التحويل؟" field: the fuzzy/legend poll tap
+        // never captured a reason either, and calling handleAgentIntent
+        // straight away would return that same clarify with no way to ever
+        // finish it -- any free-text reply afterward reaches the model,
+        // which (correctly, by design -- see plan.kind==="task_transfer_request"
+        // a few hundred lines below) never trusts its own taskId guess once
+        // 2+ of the actor's own tasks qualify, so it just re-opens the same
+        // "which task?" poll again. Per Basim (2026-09-12): unlike
+        // close_request just below, he wants this question KEPT -- a
+        // transfer must always carry a reason -- but answered once and
+        // attached to the approval he gets, never re-asked. Persist which
+        // task was just picked so the very next plain message completes it
+        // (see the secretary_note_followup check further down, which this
+        // reuses for both kinds now).
+        if (row.kind === "task_transfer_request" && !String(stashedFields.reason || "").trim()) {
+          db.prepare("INSERT INTO secretary_note_followup VALUES(?,?,?,?,?) ON CONFLICT(conversation_key) DO UPDATE SET action=excluded.action,task_id=excluded.task_id,expires_at=excluded.expires_at,source_message_id=excluded.source_message_id")
+            .run(key, "task_transfer_request", task.id, now + CONFIRM_MS, event.messageId);
+          return save(db, event, fresh, { status: "clarify", reply: `شو سبب تحويل «${clean(task.title, 150)}» بالضبط؟ لازم نعرف السبب قبل ما أرفع الطلب لباسم.`, taskId: task.id }, ["t:" + task.id], now);
+        }
         const base = emptySecretaryIntent(row.kind as "close_request" | "task_transfer_request");
         const syntheticPlan: SecretaryIntent = row.kind === "close_request"
           ? { ...base, taskId: task.id, message: (stashedFields.message as string | null) ?? null, fields: { ...base.fields, details: (stashedFields.details as string | null) ?? null } }
@@ -1260,14 +1280,17 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
       }
     });
   }
-  // Consumes the "تمام، اكتب نص الملاحظة..." follow-up stashed just above:
-  // the actor's very next plain message on this task IS the note text, by
-  // definition, the same trust level task-intake's own free-text answers
-  // already get -- never re-derived through the model (which would only
-  // re-open the same "which task?" poll, see the comment above). A bare
-  // digit is handled by resolveTaskCommandsLegendChoice before this point
-  // and arrives here as event.choice, not text, so it never falls through
-  // to be swallowed as note text; explicit cancellation is honored too.
+  // Consumes the "تمام، اكتب نص الملاحظة..." / "شو سبب تحويل...؟" follow-up
+  // stashed just above: the actor's very next plain message on this task IS
+  // the missing field (note text, or a transfer's reason), by definition,
+  // the same trust level task-intake's own free-text answers already get --
+  // never re-derived through the model (which would only re-open the same
+  // "which task?" poll, see the comments above). A bare digit is handled by
+  // resolveTaskCommandsLegendChoice before this point and arrives here as
+  // event.choice, not text, so it never falls through to be swallowed as an
+  // answer; explicit cancellation is honored too. close_request carries no
+  // such follow-up (Basim, 2026-09-12: he'd rather finishing a task never
+  // wait on a free-text answer at all -- see close_request's own comment).
   const noteFollowup = db.prepare("SELECT * FROM secretary_note_followup WHERE conversation_key=?").get(key) as { action: string; task_id: string; expires_at: number } | undefined;
   if (noteFollowup && event.choice === undefined && !event.replyToMessageId && event.groupId === null && event.inputKind !== "voice" && event.text.trim()) {
     return transaction(db, () => {
@@ -1275,10 +1298,21 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
       if (!config.enabled || !fresh || JSON.stringify(fresh) !== JSON.stringify(actor) || fresh.active !== 1) return { status: "denied", reply: "" };
       const state = stateFor(db, fresh); const duplicate = lookup(db, event, fresh, state); if (duplicate) return duplicate;
       db.prepare("DELETE FROM secretary_note_followup WHERE conversation_key=?").run(key);
-      if (noteFollowup.expires_at <= now) return save(db, event, fresh, { status: "clarify", reply: "خلص وقت طلب الملاحظة يلي كان مفتوح؛ اذكر المهمة والملاحظة من جديد." }, [], now);
-      if (isCancellation(event.text)) return save(db, event, fresh, { status: "cancelled", reply: "ألغيت طلب الملاحظة، ما تغيّرت المهمة." }, [], now);
+      const isTransfer = noteFollowup.action === "task_transfer_request";
+      if (noteFollowup.expires_at <= now) return save(db, event, fresh, { status: "clarify", reply: isTransfer ? "خلص وقت طلب سبب التحويل يلي كان مفتوح؛ اذكر المهمة والسبب من جديد." : "خلص وقت طلب الملاحظة يلي كان مفتوح؛ اذكر المهمة والملاحظة من جديد." }, [], now);
+      if (isCancellation(event.text)) return save(db, event, fresh, { status: "cancelled", reply: isTransfer ? "ألغيت طلب التحويل، ما تغيّرت المهمة." : "ألغيت طلب الملاحظة، ما تغيّرت المهمة." }, [], now);
       const task = state.tasks.find(t => t.id === noteFollowup.task_id);
       if (!task) return save(db, event, fresh, { status: "clarify", reply: "هاي المهمة ما عادت متاحة." }, [], now);
+      if (isTransfer) {
+        const base = emptySecretaryIntent("task_transfer_request");
+        const syntheticPlan: SecretaryIntent = { ...base, taskId: task.id, fields: { ...base.fields, reason: event.text.trim() } };
+        const result = handleAgentIntent(syntheticPlan, { db, actor: fresh, now, inputKind: event.inputKind, text: event.text, messageId: event.messageId, suppressNotices: event.groupId === null && /(?:لا|ما)\s+(?:تبعت|تبعث|ترسل)|بدون\s+(?:رسائل|إشعارات|اشعارات)/u.test(event.text), users: state.users, tasks: state.tasks,
+          conversationKey: key,
+          stash: command => { const stashToken = "T" + randomBytes(3).toString("hex").toUpperCase(); db.prepare("INSERT INTO secretary_pending VALUES(?,?,?,?,?,?,?)").run(key, stashToken, JSON.stringify(command), initialHash, event.text, event.messageId, now + CONFIRM_MS); log(db, fresh, event, "secretary_proposal", { summary: "عرض تغييرًا ينتظر التأكيد", proposedCommand: command, confirmationRequired: true }, now); return stashToken; } });
+        if (!result) return save(db, event, fresh, { status: "clarify", reply: "ما قدرت أكمل هذا الطلب." }, [], now);
+        deliverAgentSideEffects(db, fresh, result, now);
+        return save(db, event, fresh, { status: result.status, reply: result.reply, ...(result.taskId ? { taskId: result.taskId } : {}), ...(result.choices ? { choices: result.choices } : {}) }, [...(result.taskId ? ["t:" + result.taskId] : [])], now);
+      }
       return perform(db, event, fresh, state, { action: noteFollowup.action, taskId: task.id, comment: event.text.trim() }, now, { originalText: event.text, sourceMessageId: event.messageId, confirmationRequired: false });
     });
   }

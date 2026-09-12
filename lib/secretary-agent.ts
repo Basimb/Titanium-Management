@@ -245,8 +245,15 @@ export function handleAgentIntent(plan: SecretaryIntent, ctx: AgentContext): Age
       case "close_request": {
         const task = ctx.tasks.find(candidate => candidate.id === plan.taskId);
         if (!task) return { status: "clarify", reply: "أي مهمة خلصت؟" };
+        // Basim (2026-09-12): don't gate finishing a task on an open-ended
+        // "what happened" question anymore -- that free-text round trip is
+        // exactly what used to dead-end into a repeat "which task?" poll
+        // (same class of bug already fixed for notes, and for a transfer's
+        // reason just below). He'd rather this go straight to a plain
+        // approval prompt every time. `result` is still recorded as a bonus
+        // when it was already supplied in the same message (e.g. a typed
+        // "خلصت المهمة، تم التوقيع" in one go); it's just never required.
         const result = clean(plan.fields.details, 4000) || clean(plan.message, 4000);
-        if (!result) return { status: "clarify", reply: `شو نتيجة «${clean(task.title)}» بالضبط؟ تم التوقيع/التسليم؟ في ملف أو صورة؟ في شي متبقي؟`, taskId: task.id };
         if (owner) {
           if (task.status === "completed") return { status: "clarify", reply: `«${clean(task.title)}» مكتملة خلص.`, taskId: task.id };
           // "approve" only ever applies to a task already sitting in approval
@@ -260,7 +267,7 @@ export function handleAgentIntent(plan: SecretaryIntent, ctx: AgentContext): Age
           return { status: "confirmation", reply: `اعتماد إغلاق «${clean(task.title)}».\nاكتب «موافق ${token}» للتنفيذ.`, taskId: task.id };
         }
         const request = requestTaskClose(db, actor, { taskId: task.id, result }, { now });
-        return { status: "applied", reply: `✅ سجّلت النتيجة ورفعت «${clean(task.title)}» لاعتماد باسم. بخبرك بقراره.`, taskId: task.id, notify: [{ userId: "basem", text: request.ownerMessage, choices: request.choices }], groupNotice: `📤 ${actor.name} أنهى «${clean(task.title)}» وبانتظار اعتماد باسم` };
+        return { status: "applied", reply: `✅ ${result ? "سجّلت النتيجة و" : ""}رفعت «${clean(task.title)}» لاعتماد باسم. بخبرك بقراره.`, taskId: task.id, notify: [{ userId: "basem", text: request.ownerMessage, choices: request.choices }], groupNotice: `📤 ${actor.name} أنهى «${clean(task.title)}» وبانتظار اعتماد باسم` };
       }
       case "ownership_request": {
         if (owner) return { status: "clarify", reply: "أنت تقدر تعيّن المسؤول مباشرة. اذكر المهمة واسم الموظف." };

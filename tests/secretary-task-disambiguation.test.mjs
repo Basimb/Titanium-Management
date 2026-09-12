@@ -155,6 +155,21 @@ test('with exactly one eligible task, close_request silently uses it and ignores
   assert.equal(f.db.prepare('SELECT status FROM tasks WHERE id=?').get(A).status, 'approval');
   assert.equal(f.db.prepare('SELECT status FROM tasks WHERE id=?').get(OPEN).status, 'open', 'the wrongly guessed task must be completely untouched');
 });
+// 2026-09-12, Basim's own live test: finishing a task must never wait on an
+// open-ended "شو نتيجتها؟" answer anymore (that free-text round trip is what
+// used to dead-end into a repeat "which task?" poll once 2+ candidates were
+// in play -- see secretary-transfer-flow.test.mjs for the same class of bug,
+// still fixed a different way, on the transfer side). With no details/result
+// supplied at all, close_request must go straight to filing for approval.
+test('close_request with no result/details supplied at all still files for approval right away, never asks "شو نتيجتها؟"', async t => {
+  const f = fixture(t, { secondTask: false }); // one real candidate -- no poll to get in the way
+  const r = await f.run(closeRequest(A, null), { text: 'انهيت المهمة' });
+  assert.equal(r.status, 'applied');
+  assert.doesNotMatch(r.reply, /نتيجتها|نتيجة/);
+  const approval = f.db.prepare("SELECT entity_id AS entityId, payload FROM approvals WHERE type='task_close'").get();
+  assert.equal(approval.entityId, A);
+  assert.equal(JSON.parse(approval.payload).result, '');
+});
 test('with no eligible task at all, the disambiguation check does not fire and the normal (existing) close_request handling still applies', async t => {
   const f = fixture(t); const noTasks = { senderNumber: '12025550102' }; // شادي owns nothing here
   const r = await f.run(closeRequest(A, 'خلصت'), { ...noTasks, text: 'انهيت المهمة' });
@@ -201,6 +216,13 @@ test('tapping that poll as Basim resolves through close_request\'s own "owner" b
   assert.equal(tapped.status, 'confirmation', 'Basim owns the task himself, so this is his own close_direct/approve confirmation, not an employee\'s task_close approval request');
   assert.equal(tapped.taskId, B, 'must resolve against the TAPPED task (تسليم التقرير), never A');
   assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM approvals').get().n, 0, 'no employee-style approval should be filed for Basim\'s own task');
+});
+test('Basim finishing his own task with no result/details supplied also skips straight to the close_direct/approve confirmation, never asking "شو نتيجتها؟"', async t => {
+  const f = fixture(t, { owner: 'باسم', secondTask: false }); const admin = { senderNumber: '12025550103' };
+  const r = await f.run(closeRequest(A, null), { ...admin, text: 'انهيت المهمة' });
+  assert.equal(r.status, 'confirmation');
+  assert.doesNotMatch(r.reply, /نتيجتها|نتيجة/);
+  assert.equal(r.taskId, A);
 });
 // task_transfer_request is the self-service "give up my task" REQUEST an
 // employee files for Basim's approval -- it has no meaning for Basim
