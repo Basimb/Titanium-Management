@@ -53,19 +53,44 @@ test('tapping that fallback poll adds the note to the tapped task once the text 
   const reportOption = first.choices.options.find(o => o.label === 'تسليم التقرير');
   const tapped = await handleSecretaryEvent(f.db, f.event({ choice: { questionId: first.choices.id, optionId: reportOption.id } }), f.config,
     { infer: async () => { throw new Error('a poll tap must resolve directly, never ask the model'); }, now: () => f.now });
-  // No note text was ever typed -- executeManagementAction's own comment
-  // validation asks for it next, exactly like the pre-existing exact-typed-
-  // phrase path already does for the same situation.
+  // No note text was ever typed. This used to hand back executeManagementAction's
+  // raw "التعليق مطلوب" validation error with no memory of which task it was
+  // about (empty scope, no taskId) -- so ANY next message, including the
+  // actual note text, went back through the model, which never trusts its
+  // own taskId guess once more than one of the actor's own tasks qualify
+  // (by design) and just reopened the same "which task?" poll forever.
+  // Basim hit this live (2026-09-12): "غلط المفروض يقول تم اضافة الملاحظه
+  // ويقفل الحوار هذا" (wrong, it should say the note was added and close
+  // this). Now the picked task is remembered deterministically (see
+  // secretary_note_followup) so the very next plain message completes the
+  // note directly, without ever going back through the model.
   assert.equal(tapped.status, 'clarify');
-  assert.match(tapped.reply, /التعليق مطلوب/);
-  // Basim hit this live (2026-09-12): this reply used to drop task focus
-  // entirely (no taskId, empty scope), so his very next message -- whether
-  // it was the missing note text or something unrelated -- got treated as a
-  // fresh, contextless message (a generic greeting) instead of a
-  // continuation of this exact outstanding request. The reported-on task
-  // must stay in focus, exactly like the single-candidate fallback already
-  // preserves it in its own "تقصد مهمة «..»؟ اكتب نص الملاحظة." reply.
+  assert.match(tapped.reply, /اكتب نص الملاحظة/);
   assert.equal(tapped.taskId, B);
+  const done = await handleSecretaryEvent(f.db, f.event({ text: 'تم التواصل مع العميل وبانتظار رده' }), f.config,
+    { infer: async () => { throw new Error('the follow-up note text must be captured deterministically, never sent back through the model'); }, now: () => f.now });
+  assert.equal(done.status, 'applied');
+  assert.match(done.reply, /أضاف تعليق/);
+  assert.equal(f.db.prepare('SELECT body FROM comments WHERE task_id=?').get(B).body, 'تم التواصل مع العميل وبانتظار رده');
+});
+
+test('explicitly cancelling instead of supplying the note text drops the pending follow-up cleanly', async t => {
+  const f = fixture(t);
+  const first = await f.run('ضيف ملاحظه', genericClarify('أي مهمة تقصد؟'));
+  const reportOption = first.choices.options.find(o => o.label === 'تسليم التقرير');
+  await handleSecretaryEvent(f.db, f.event({ choice: { questionId: first.choices.id, optionId: reportOption.id } }), f.config,
+    { infer: async () => { throw new Error('a poll tap must resolve directly, never ask the model'); }, now: () => f.now });
+  const cancelled = await handleSecretaryEvent(f.db, f.event({ text: 'الغاء' }), f.config,
+    { infer: async () => { throw new Error('a cancellation must resolve directly, never ask the model'); }, now: () => f.now });
+  assert.equal(cancelled.status, 'cancelled');
+  assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM comments WHERE task_id=?').get(B).n, 0);
+  assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM secretary_note_followup').get().n, 0, 'the follow-up row must not linger after cancellation');
+  // A follow-up message after cancelling reaches the model fresh, exactly
+  // like any other unrelated message -- the dropped follow-up grants no
+  // lingering authority.
+  const after = await f.run('اضافة ملاحظة', genericClarify('أي مهمة تقصد؟'));
+  assert.equal(after.status, 'clarify');
+  assert.ok(after.choices);
 });
 
 test('with exactly one eligible task, the fallback asks a single grounded question naming that task instead of a poll', async t => {

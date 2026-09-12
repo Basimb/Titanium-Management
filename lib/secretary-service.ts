@@ -321,6 +321,7 @@ export function migrateSecretary(db: DatabaseSync) {
     CREATE TABLE IF NOT EXISTS secretary_task_choice (conversation_key TEXT PRIMARY KEY,token TEXT NOT NULL,kind TEXT NOT NULL,candidate_ids TEXT NOT NULL,fields_json TEXT NOT NULL,original_text TEXT NOT NULL,source_message_id TEXT NOT NULL,expires_at INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS secretary_confirmation_views (conversation_key TEXT PRIMARY KEY,token TEXT NOT NULL,preview_event_key TEXT NOT NULL,requires_restatement INTEGER NOT NULL DEFAULT 0);
     CREATE TABLE IF NOT EXISTS secretary_task_intake (conversation_key TEXT PRIMARY KEY,draft_json TEXT NOT NULL,last_event_key TEXT NOT NULL,expires_at INTEGER NOT NULL);
+    CREATE TABLE IF NOT EXISTS secretary_note_followup (conversation_key TEXT PRIMARY KEY,action TEXT NOT NULL,task_id TEXT NOT NULL,expires_at INTEGER NOT NULL,source_message_id TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS secretary_reminders (id TEXT PRIMARY KEY,actor_id TEXT NOT NULL,sender_number TEXT NOT NULL,group_id TEXT,task_id TEXT NOT NULL,due_at INTEGER NOT NULL,state TEXT NOT NULL DEFAULT 'pending',created_at INTEGER NOT NULL,sent_at INTEGER,sending_at INTEGER,responded_at INTEGER,reply_message_id TEXT NOT NULL);
     CREATE INDEX IF NOT EXISTS secretary_reminders_due ON secretary_reminders(state,due_at);
     CREATE TABLE IF NOT EXISTS secretary_playbook (id TEXT PRIMARY KEY,body TEXT NOT NULL,updated_by TEXT NOT NULL,updated_at INTEGER NOT NULL);`);
@@ -1218,6 +1219,29 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
       const stashedFields = JSON.parse(row.fields_json) as Record<string, unknown>;
       try {
         if (row.kind === "comment" || row.kind === "submit") {
+          // The fuzzy bare-phrase fallback (legendFuzzyPhraseOption below)
+          // never captured any note text before offering this poll -- it
+          // only guessed the ACTION from a bare keyword like "ملاحظة", so
+          // stashedFields.comment is empty here. Calling perform() straight
+          // away used to dead-end on "التعليق مطلوب" with no way to ever
+          // finish: any free-text reply afterward went back through the
+          // model, which re-derives legendCandidates for "command"/comment
+          // and (correctly, by design -- see the comment a few hundred
+          // lines below) never trusts its own taskId guess when the actor
+          // has more than one eligible task, so it just re-opened the same
+          // "which task?" poll again -- forever. Basim hit this live
+          // (2026-09-12): "غلط المفروض يقول تم اضافة الملاحظه ويقفل
+          // الحوار هذا" (wrong, it should say the note was added and close
+          // this). Persist which task was just picked so the VERY NEXT
+          // plain message completes it directly (see the
+          // secretary_note_followup check right after this block), the
+          // same deterministic-continuation approach already used for
+          // task-intake's own missing fields.
+          if (row.kind === "comment" && !String(stashedFields.comment || "").trim()) {
+            db.prepare("INSERT INTO secretary_note_followup VALUES(?,?,?,?,?) ON CONFLICT(conversation_key) DO UPDATE SET action=excluded.action,task_id=excluded.task_id,expires_at=excluded.expires_at,source_message_id=excluded.source_message_id")
+              .run(key, "comment", task.id, now + CONFIRM_MS, event.messageId);
+            return save(db, event, fresh, { status: "clarify", reply: `تمام، اكتب نص الملاحظة على مهمة «${clean(task.title, 150)}» الآن.`, taskId: task.id }, ["t:" + task.id], now);
+          }
           return perform(db, event, fresh, state, { action: row.kind, taskId: task.id, ...(row.kind === "comment" ? { comment: stashedFields.comment } : {}) }, now, { originalText: row.original_text, sourceMessageId: row.source_message_id, confirmationRequired: false });
         }
         const base = emptySecretaryIntent(row.kind as "close_request" | "task_transfer_request");
@@ -1234,6 +1258,28 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
         if (!(error instanceof ManagementActionError)) throw error;
         return save(db, event, fresh, { status: "clarify", reply: error.message }, [], now);
       }
+    });
+  }
+  // Consumes the "تمام، اكتب نص الملاحظة..." follow-up stashed just above:
+  // the actor's very next plain message on this task IS the note text, by
+  // definition, the same trust level task-intake's own free-text answers
+  // already get -- never re-derived through the model (which would only
+  // re-open the same "which task?" poll, see the comment above). A bare
+  // digit is handled by resolveTaskCommandsLegendChoice before this point
+  // and arrives here as event.choice, not text, so it never falls through
+  // to be swallowed as note text; explicit cancellation is honored too.
+  const noteFollowup = db.prepare("SELECT * FROM secretary_note_followup WHERE conversation_key=?").get(key) as { action: string; task_id: string; expires_at: number } | undefined;
+  if (noteFollowup && event.choice === undefined && !event.replyToMessageId && event.groupId === null && event.inputKind !== "voice" && event.text.trim()) {
+    return transaction(db, () => {
+      const fresh = actorFor(db, event, config);
+      if (!config.enabled || !fresh || JSON.stringify(fresh) !== JSON.stringify(actor) || fresh.active !== 1) return { status: "denied", reply: "" };
+      const state = stateFor(db, fresh); const duplicate = lookup(db, event, fresh, state); if (duplicate) return duplicate;
+      db.prepare("DELETE FROM secretary_note_followup WHERE conversation_key=?").run(key);
+      if (noteFollowup.expires_at <= now) return save(db, event, fresh, { status: "clarify", reply: "خلص وقت طلب الملاحظة يلي كان مفتوح؛ اذكر المهمة والملاحظة من جديد." }, [], now);
+      if (isCancellation(event.text)) return save(db, event, fresh, { status: "cancelled", reply: "ألغيت طلب الملاحظة، ما تغيّرت المهمة." }, [], now);
+      const task = state.tasks.find(t => t.id === noteFollowup.task_id);
+      if (!task) return save(db, event, fresh, { status: "clarify", reply: "هاي المهمة ما عادت متاحة." }, [], now);
+      return perform(db, event, fresh, state, { action: noteFollowup.action, taskId: task.id, comment: event.text.trim() }, now, { originalText: event.text, sourceMessageId: event.messageId, confirmationRequired: false });
     });
   }
   const pending = db.prepare("SELECT * FROM secretary_pending WHERE conversation_key=?").get(key) as Pending | undefined;

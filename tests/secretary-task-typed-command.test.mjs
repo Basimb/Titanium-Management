@@ -151,18 +151,22 @@ test('a bare comment phrase ("اضافة ملاحظة"/"عندي تحديث") wi
   assert.equal(first.status, 'clarify'); assert.ok(first.choices);
   const picked = first.choices.options[0];
   const tapped = await f.run(tap(first.choices.id, picked.id), neverAsk);
-  // No note text was ever typed -- executeManagementAction's own comment
-  // validation asks for it, exactly as it already does for the model-driven
-  // path when the model itself extracts no body text.
+  // No note text was ever typed. This used to hand back the raw "التعليق
+  // مطلوب" validation error with no task focus (empty scope, no taskId), so
+  // the actual note text typed next went back through the model, which
+  // never trusts its own taskId guess with more than one eligible task (by
+  // design) and just reopened the same "which task?" poll forever -- Basim
+  // hit this live (2026-09-12): "غلط المفروض يقول تم اضافة الملاحظه ويقفل
+  // الحوار هذا". The picked task is now remembered deterministically (see
+  // secretary_note_followup) so the very next plain message completes the
+  // note directly instead of ever reaching the model again.
   assert.equal(tapped.status, 'clarify');
-  assert.match(tapped.reply, /التعليق مطلوب/);
-  // Basim hit this live (2026-09-12): this reply used to drop task focus
-  // entirely (no taskId, empty scope), so his very next message -- whether
-  // it was the missing note text or something unrelated -- got treated as a
-  // fresh, contextless message instead of a continuation of this exact
-  // outstanding request. The picked task must stay in focus, exactly like
-  // every other "still need one more thing about this task" clarify does.
-  assert.equal(tapped.taskId, picked.label === 'لوحة' ? A : B);
+  assert.match(tapped.reply, /اكتب نص الملاحظة/);
+  const pickedTaskId = picked.label === 'لوحة' ? A : B;
+  assert.equal(tapped.taskId, pickedTaskId);
+  const done = await f.run({ text: 'تم التواصل مع العميل وبانتظار رده' }, neverAsk);
+  assert.equal(done.status, 'applied');
+  assert.equal(f.db.prepare('SELECT body FROM comments WHERE task_id=?').get(pickedTaskId).body, 'تم التواصل مع العميل وبانتظار رده');
   const f2 = fixture(t); const r2 = await f2.run({ text: 'عندي تحديث' });
   assert.equal(r2.status, 'clarify'); assert.ok(r2.choices);
 });
