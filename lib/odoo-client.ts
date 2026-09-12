@@ -54,9 +54,16 @@ function formatAmount(value: number): string {
 
 export type SalesSummary = { orderCount: number; totalAmount: number };
 export type LowStockItem = { name: string; qty: number };
+export type LocationSales = { location: string; orderCount: number; totalAmount: number };
+// "مشتريات" = posted vendor bills (account.move, move_type=in_invoice); "مرتجعات
+// للموردين" = posted vendor credit notes (move_type=in_refund) -- confirmed
+// 2026-09-12 with Basim ("مرتجعات للموردين", not customer/POS returns).
+export type PurchaseSummary = { purchaseCount: number; purchaseAmount: number; returnCount: number; returnAmount: number };
 
 export type OdooSession = {
   salesSummary(sinceIso: string, untilIso: string): Promise<SalesSummary>;
+  salesByLocation(sinceIso: string, untilIso: string): Promise<LocationSales[]>;
+  purchaseSummary(sinceIso: string, untilIso: string): Promise<PurchaseSummary>;
   lowStock(thresholdQty: number, limit?: number): Promise<LowStockItem[]>;
   activeProductCount(): Promise<number>;
 };
@@ -73,6 +80,31 @@ export async function openOdooSession(config: OdooConfig, fetcher: Fetcher = fet
       const groups = (await execute("pos.order", "read_group", [domain, ["amount_total"], []])) as Array<Record<string, unknown>> | undefined;
       const row = Array.isArray(groups) ? groups[0] : undefined;
       return { orderCount: Number(row?.__count ?? 0), totalAmount: Number(row?.amount_total ?? 0) };
+    },
+    async salesByLocation(sinceIso, untilIso) {
+      const domain = [["date_order", ">=", sinceIso], ["date_order", "<", untilIso], ["state", "in", ["paid", "done", "invoiced"]]];
+      const groups = (await execute("pos.order", "read_group", [domain, ["amount_total"], ["location_id"]])) as Array<Record<string, unknown>> | undefined;
+      return (Array.isArray(groups) ? groups : []).map(row => {
+        const locationId = row.location_id;
+        const location = Array.isArray(locationId) && typeof locationId[1] === "string" ? locationId[1] : "?";
+        return { location, orderCount: Number(row.__count ?? 0), totalAmount: Number(row.amount_total ?? 0) };
+      });
+    },
+    async purchaseSummary(sinceIso, untilIso) {
+      // account.move's invoice_date is an Odoo Date field, not a datetime --
+      // compare on the plain YYYY-MM-DD portion, inclusive on both ends.
+      const since = sinceIso.slice(0, 10), until = untilIso.slice(0, 10);
+      const domain = (moveType: string) => [["move_type", "=", moveType], ["state", "=", "posted"], ["invoice_date", ">=", since], ["invoice_date", "<=", until]];
+      const [purchases, returns] = await Promise.all([
+        execute("account.move", "read_group", [domain("in_invoice"), ["amount_total"], []]) as Promise<Array<Record<string, unknown>> | undefined>,
+        execute("account.move", "read_group", [domain("in_refund"), ["amount_total"], []]) as Promise<Array<Record<string, unknown>> | undefined>,
+      ]);
+      const purchaseRow = Array.isArray(purchases) ? purchases[0] : undefined;
+      const returnRow = Array.isArray(returns) ? returns[0] : undefined;
+      return {
+        purchaseCount: Number(purchaseRow?.__count ?? 0), purchaseAmount: Number(purchaseRow?.amount_total ?? 0),
+        returnCount: Number(returnRow?.__count ?? 0), returnAmount: Number(returnRow?.amount_total ?? 0),
+      };
     },
     async lowStock(thresholdQty, limit = 20) {
       const domain = [["sale_ok", "=", true], ["active", "=", true], ["qty_available", "<=", thresholdQty]];

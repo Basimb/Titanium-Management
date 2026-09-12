@@ -9,7 +9,7 @@ const SETTINGS_KEYS = new Set(['TEAM_CHAT_ENABLED', 'TEAM_CHAT_SHARED_KEY', 'TEA
   'WHATSAPP_LOGIN_SECRET', 'WHATSAPP_LOGIN_DATABASE', 'WHATSAPP_LOGIN_ORIGIN',
   'SECRETARY_ENABLED', 'SECRETARY_WEB_ENABLED', 'SECRETARY_VOICE_ENABLED', 'SECRETARY_FOLLOWUP_ENABLED', 'TITANIUM_PUBLIC_URL', 'DASHBOARD_READONLY',
   'ODOO_REPORT_ENABLED', 'ODOO_URL', 'ODOO_DB', 'ODOO_USERNAME', 'ODOO_API_KEY', 'ODOO_LOW_STOCK_THRESHOLD', 'ODOO_CURRENCY_LABEL',
-  'ODOO_REPORT_DAILY_HOUR', 'ODOO_REPORT_WEEKLY_DAY', 'ODOO_REPORT_WEEKLY_HOUR']);
+  'ODOO_REPORT_DAILY_HOUR', 'ODOO_REPORT_WEEKLY_DAY', 'ODOO_REPORT_WEEKLY_HOUR', 'ODOO_REPORT_PURCHASES_WEEKLY_HOUR']);
 const MAX_BYTES = 32_768;
 const SERVICE_DIRECTORY = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -144,6 +144,7 @@ export function bridgeChildEnvironment(settings, env, pair, serviceDirectory = S
     if (/^([0-9]|1[0-9]|2[0-3])$/.test(settings.ODOO_REPORT_DAILY_HOUR || '')) childEnv.ODOO_REPORT_DAILY_HOUR = settings.ODOO_REPORT_DAILY_HOUR;
     if (/^[0-6]$/.test(settings.ODOO_REPORT_WEEKLY_DAY || '')) childEnv.ODOO_REPORT_WEEKLY_DAY = settings.ODOO_REPORT_WEEKLY_DAY;
     if (/^([0-9]|1[0-9]|2[0-3])$/.test(settings.ODOO_REPORT_WEEKLY_HOUR || '')) childEnv.ODOO_REPORT_WEEKLY_HOUR = settings.ODOO_REPORT_WEEKLY_HOUR;
+    if (/^([0-9]|1[0-9]|2[0-3])$/.test(settings.ODOO_REPORT_PURCHASES_WEEKLY_HOUR || '')) childEnv.ODOO_REPORT_PURCHASES_WEEKLY_HOUR = settings.ODOO_REPORT_PURCHASES_WEEKLY_HOUR;
   }
   // Phone/user mapping only; no names or AI key. launchPrivate separately grants
   // the validated settings path for fresh outbox authorization, never from an override.

@@ -37,6 +37,42 @@ test("salesSummary reads the aggregated total and count from read_group", async 
   assert.deepEqual(summary, { orderCount: 8, totalAmount: 1234.5 });
 });
 
+test("salesByLocation reads per-location totals and counts from a location_id-grouped read_group", async () => {
+  const fake = fetcher((url, body) => {
+    if (body.params.service === "common") return { result: 1 };
+    assert.equal(body.params.args[4], "read_group");
+    assert.deepEqual(body.params.args[5][2], ["location_id"]);
+    return { result: [
+      { location_id: [12, "NAOOR/Stock"], amount_total: 1863.71, __count: 177 },
+      { location_id: [7, "SAFOT/Stock"], amount_total: 467.9, __count: 58 },
+    ] };
+  });
+  const session = await openOdooSession(config, fake);
+  assert.deepEqual(await session.salesByLocation("2026-09-11T00:00:00.000Z", "2026-09-12T00:00:00.000Z"), [
+    { location: "NAOOR/Stock", orderCount: 177, totalAmount: 1863.71 },
+    { location: "SAFOT/Stock", orderCount: 58, totalAmount: 467.9 },
+  ]);
+});
+
+test("purchaseSummary reads posted vendor bills (in_invoice) and vendor credit notes (in_refund) separately, by plain date", async () => {
+  const calls = [];
+  const fake = fetcher((url, body) => {
+    if (body.params.service === "common") return { result: 1 };
+    calls.push(body.params.args[5][0]);
+    return body.params.args[5][0].some(clause => clause[0] === "move_type" && clause[2] === "in_refund")
+      ? { result: [{ amount_total: 150, __count: 2 }] }
+      : { result: [{ amount_total: 900, __count: 5 }] };
+  });
+  const session = await openOdooSession(config, fake);
+  const summary = await session.purchaseSummary("2026-09-01T00:00:00.000Z", "2026-09-12T18:30:00.000Z");
+  assert.deepEqual(summary, { purchaseCount: 5, purchaseAmount: 900, returnCount: 2, returnAmount: 150 });
+  for (const domain of calls) {
+    assert.equal(domain.find(clause => clause[0] === "state")[2], "posted");
+    assert.deepEqual(domain.find(clause => clause[0] === "invoice_date" && clause[1] === ">="), ["invoice_date", ">=", "2026-09-01"]);
+    assert.deepEqual(domain.find(clause => clause[0] === "invoice_date" && clause[1] === "<="), ["invoice_date", "<=", "2026-09-12"]);
+  }
+});
+
 test("lowStock maps search_read rows and activeProductCount reads search_count", async () => {
   const fake = fetcher((url, body) => {
     if (body.params.service === "common") return { result: 1 };

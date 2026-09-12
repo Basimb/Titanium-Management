@@ -64,6 +64,7 @@ async function main() {
         dailyHour: process.env.ODOO_REPORT_DAILY_HOUR ? Number(process.env.ODOO_REPORT_DAILY_HOUR) : undefined,
         weeklyDay: process.env.ODOO_REPORT_WEEKLY_DAY ? Number(process.env.ODOO_REPORT_WEEKLY_DAY) : undefined,
         weeklyHour: process.env.ODOO_REPORT_WEEKLY_HOUR ? Number(process.env.ODOO_REPORT_WEEKLY_HOUR) : undefined,
+        purchasesWeeklyHour: process.env.ODOO_REPORT_PURCHASES_WEEKLY_HOUR ? Number(process.env.ODOO_REPORT_PURCHASES_WEEKLY_HOUR) : undefined,
       }) });
     }
   }
