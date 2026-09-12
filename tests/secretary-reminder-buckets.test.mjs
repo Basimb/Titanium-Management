@@ -56,6 +56,27 @@ test('a single-task reminder attaches that task\'s own action poll', async t2 =>
   assert.deepEqual(plans[0].choices.options.map(o => o.id), ['TSKsoloFINISH', 'TSKsoloNOTE', 'TSKsoloTRANSFER', 'TSKsoloEDIT', 'TSKsoloEXTEND']);
 });
 
+// 2026-09-12, Basim (after previewing the exact merged text and approving
+// it -- "طيب كويس طبق"): the twice-daily private reminder to an employee now
+// carries the same five-command legend (🧭 أوامر المهام السريعة) inline, as
+// its own single message -- never a separate follow-up. The GROUP copy of
+// this same reminder (one post per owner, further down in planFollowups)
+// is untouched: Basim only asked for this on messages TO the employee.
+test('the twice-daily private auto reminder carries the five-command legend inline; the group copy of the same reminder does not', async t2 => {
+  const db = new DatabaseSync(':memory:'); t2.after(() => db.close());
+  schema(db);
+  db.exec(`INSERT INTO tasks VALUES ${t('solo', '2026-09-11')}`);
+  migrateManagementActions(db);
+  const config = { enabled: true, contacts: [{ userId: 'basem', number: '966500000000' }, { userId: 'member', number: '962770000000' }], groupId: '123@g.us' };
+  const morning = Date.UTC(2026, 8, 10, 5, 0);
+  const plans = planFollowups(db, config, morning).filter(p => p.kind === 'auto_reminder_morning');
+  const toMember = plans.find(p => p.targetUser === 'member');
+  const toGroup = plans.find(p => p.targetUser === 'group');
+  assert.match(toMember.text, /🧭 أوامر المهام السريعة/);
+  assert.match(toMember.text, /5️⃣ 🔴 انهاء المهمة/);
+  assert.ok(toGroup, 'the group post for this owner must still exist');
+  assert.doesNotMatch(toGroup.text, /🧭 أوامر المهام السريعة/, 'the group copy is not a message to the employee -- no legend there');
+});
 test('the on-demand "ابعت تذكير المهام الآن" broadcast also buckets by due date', async t2 => {
   const db = new DatabaseSync(':memory:'); t2.after(() => db.close());
   schema(db);

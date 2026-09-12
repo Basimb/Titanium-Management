@@ -90,6 +90,19 @@ test('the unowned-task escalation to Basim carries a real tappable poll -- a col
   assert.equal(toBasim.choices.options[1].id, 'UNOWNt2_SELF');
 });
 
+// 2026-09-12, Basim (after previewing the exact merged text and approving
+// it -- "طيب كويس طبق"): the "come claim this task" nudge to the suggested
+// owner now carries the same five-command legend (🧭 أوامر المهام السريعة)
+// inline, appended once at the end -- never a separate follow-up message.
+test('the unclaimed-task nudge to the suggested owner carries the five-command legend inline', t => {
+  const { db, config } = fixture(t);
+  db.exec(`INSERT INTO tasks VALUES('t1','مهمة خالد','','yellow','open',NULL,'خالد',NULL,NULL,NULL,NULL,1,1,NULL,NULL)`);
+  const plans = planFollowups(db, config, NIGHT);
+  const mine = plans.find(p => p.kind === 'unclaimed_task' && p.targetUser === 'member' && p.entityId === 't1');
+  assert.match(mine.text, /🧭 أوامر المهام السريعة/);
+  assert.match(mine.text, /5️⃣ 🔴 انهاء المهمة/);
+});
+
 test('a task already claimed (owner set) triggers neither the unclaimed nor the unowned nudge', t => {
   const { db, config } = fixture(t);
   db.exec(`INSERT INTO tasks VALUES('t3','مهمة مستلمة','','yellow','progress','خالد','خالد',1,NULL,NULL,NULL,1,1,NULL,NULL)`);

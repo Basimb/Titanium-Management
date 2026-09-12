@@ -22,6 +22,15 @@ const clean = (value: string) => value.replace(/[\x00-\x1f\u202a-\u202e\u2066-\u
 // imported, since secretary-service.ts already imports enqueueAgentMessage
 // from this file -- importing back from it would be circular).
 const PRIORITY_ICON: Record<string, string> = { red: "\ud83d\udd34", yellow: "\ud83d\udfe1", green: "\ud83d\udfe2" };
+// Basim (2026-09-12): the same five-command legend he already sees elsewhere
+// (TASK_COMMANDS_LEGEND in secretary-service.ts -- duplicated here rather
+// than imported, same reason PRIORITY_ICON/STATUS_LABEL are: that file
+// already imports enqueueAgentMessage FROM this one), appended directly onto
+// the two message kinds he asked for: the "come claim this" nudge and the
+// twice-daily digest -- never as a separate follow-up message, just inline
+// once at the end. Approved verbatim (see his own "\u0643\u0648\u064a\u0633 \u0637\u0628\u0642" after seeing a
+// preview of both messages with this attached).
+const TASK_COMMANDS_LEGEND = "\ud83e\udded \u0623\u0648\u0627\u0645\u0631 \u0627\u0644\u0645\u0647\u0627\u0645 \u0627\u0644\u0633\u0631\u064a\u0639\u0629 \u2014 \u0627\u0631\u0633\u0644 \u0627\u0644\u0631\u0642\u0645 \u0645\u0628\u0627\u0634\u0631\u0629:\n\n1\ufe0f\u20e3 \ud83d\udfe2 \u0627\u0636\u0627\u0641\u0629 \u0645\u0647\u0645\u0629\n2\ufe0f\u20e3 \ud83d\udd35 \u0627\u0636\u0627\u0641\u0629 \u0645\u0644\u0627\u062d\u0638\u0629\n3\ufe0f\u20e3 \ud83d\udfe3 \u062a\u062d\u0648\u064a\u0644 \u0627\u0644\u0645\u0647\u0645\u0629\n4\ufe0f\u20e3 \ud83d\udfe0 \u062a\u0645\u062f\u064a\u062f \u0627\u0644\u062a\u0627\u0631\u064a\u062e\n5\ufe0f\u20e3 \ud83d\udd34 \u0627\u0646\u0647\u0627\u0621 \u0627\u0644\u0645\u0647\u0645\u0629";
 const STATUS_LABEL: Record<string, string> = { open: "\u0628\u0627\u0646\u062a\u0638\u0627\u0631 \u0627\u0644\u0627\u0633\u062a\u0644\u0627\u0645", progress: "\u0642\u064a\u062f \u0627\u0644\u062a\u0646\u0641\u064a\u0630", approval: "\u0628\u0627\u0646\u062a\u0638\u0627\u0631 \u0627\u0639\u062a\u0645\u0627\u062f \u0628\u0627\u0633\u0645" };
 function autoReminderGroups(snapshot: { tasks: ManagementTask[] }, userIdByName: Map<string, string>): Map<string, ManagementTask[]> {
   const groups = new Map<string, ManagementTask[]>();
@@ -134,7 +143,7 @@ export function planFollowups(db: DatabaseSync, config: FollowupConfig, at: numb
       if (number && !alreadySent(db, kind, userId, null, at - DAY)) {
         const choices = autoReminderPoll(tasks, user.name, at);
         plans.push({ id: randomBytes(8).toString("hex"), kind, targetUser: userId, entityId: null, to: `${number}@s.whatsapp.net`,
-          text: `📋 تذكير بمهامك الحالية يا ${clean(user.name)} (${tasks.length}):\n\n${lines}`, ...(choices ? { choices } : {}) });
+          text: `📋 تذكير بمهامك الحالية يا ${clean(user.name)} (${tasks.length}):\n\n${lines}\n\n${TASK_COMMANDS_LEGEND}`, ...(choices ? { choices } : {}) });
       }
       // One group post per owner (never one combined message), same
       // convention as the on-demand "ابعت تذكير المهام الآن" broadcast --
@@ -182,7 +191,7 @@ export function planFollowups(db: DatabaseSync, config: FollowupConfig, at: numb
       // guess.
       const staleNote = choices ? "\n⚠️ إذا في استطلاع تصويت أقدم من هذه الرسالة لنفس المهمة، هو منتهي الصلاحية — رد من استطلاع هذه الرسالة تحديدًا." : "";
       plans.push({ id: randomBytes(8).toString("hex"), kind: "unclaimed_task", targetUser: userId, entityId: task.id, to: `${number}@s.whatsapp.net`,
-        text: `⏳ يا ${clean(responsible)}، مهمة «${clean(task.title)}» لسا بانتظار ردك.${staleNote}`, ...(choices ? { choices } : {}) });
+        text: `⏳ يا ${clean(responsible)}، مهمة «${clean(task.title)}» لسا بانتظار ردك.${staleNote}\n\n${TASK_COMMANDS_LEGEND}`, ...(choices ? { choices } : {}) });
     } else if (ownerNumber) {
       if (alreadySent(db, "unowned_task", owner.id, task.id, at - HOUR)) continue;
       plans.push({ id: randomBytes(8).toString("hex"), kind: "unowned_task", targetUser: owner.id, entityId: task.id, to: `${ownerNumber}@s.whatsapp.net`,
