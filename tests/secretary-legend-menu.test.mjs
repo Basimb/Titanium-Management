@@ -120,9 +120,46 @@ test('a bare digit never hijacks the ordinal task-picker for an employee who has
   assert.ok(toBasim, 'Basim must be notified of the ownership request');
 });
 
-test('Basim himself never gets the digit-menu treatment -- bare digits from him are left untouched', async t => {
+// 2026-09-12 follow-up, per Basim's own explicit live-test complaint: he
+// wants "1".."5" to work exactly the same for him as for an employee with no
+// tasks -- the earlier admin/basem exclusion below was only ever there to
+// avoid colliding with bareOwnershipOrdinal (which he never uses anyway,
+// since it unconditionally excludes basem/admin too), so exempting him from
+// the ownershipCandidates-empty gate reintroduces no ambiguity.
+test('Basim himself now gets the same digit-menu shortcut as an employee with no tasks -- "1" always means اضافة مهمة for him', async t => {
   const f = fixture(t, { withTasks: false });
   let seenText;
-  const result = await handleSecretaryEvent(f.db, f.event({ text: '1', senderNumber: '12025550103' }), f.config, { infer: async input => { seenText = input.text; return emptySecretaryIntent('chat', 'تمام'); }, now: () => f.now });
-  assert.equal(seenText, '1', 'the digit must reach the model untouched for Basim, never rewritten to اضافة مهمة');
+  await handleSecretaryEvent(f.db, f.event({ text: '1', senderNumber: '12025550103' }), f.config, { infer: async input => { seenText = input.text; return emptySecretaryIntent('clarify', 'أي مشروع؟'); }, now: () => f.now });
+  assert.equal(seenText, 'اضافة مهمة', 'digit 1 always starts add-task for Basim too, per his 2026-09-12 request');
+});
+
+test('Basim: a digit with exactly one of his own eligible tasks (e.g. "5" -- finish) resolves deterministically by name', async t => {
+  const f = fixture(t, { withTasks: false });
+  f.db.exec(`INSERT INTO tasks (id,title,details,priority,status,owner,suggested_owner,started_at,created_at,updated_at) VALUES('${PROGRESS}','لوحة باسم','تفاصيل','red','progress','باسم','باسم',1,1,1)`);
+  let seen;
+  await handleSecretaryEvent(f.db, f.event({ text: '5', senderNumber: '12025550103' }), f.config, { infer: async input => { seen = input.text; return emptySecretaryIntent('clarify', 'شو نتيجتها؟'); }, now: () => f.now });
+  assert.equal(seen, 'خلصت مهمة «لوحة باسم»');
+});
+
+test('Basim: a digit with two or more of his own eligible tasks opens a real tappable poll instead of asking the model', async t => {
+  const f = fixture(t, { withTasks: false });
+  f.db.exec(`INSERT INTO tasks (id,title,details,priority,status,owner,suggested_owner,started_at,created_at,updated_at) VALUES
+    ('${PROGRESS}','لوحة باسم','تفاصيل','red','progress','باسم','باسم',1,1,1),
+    ('${PROGRESS2}','تصميم باسم','تفاصيل','yellow','progress','باسم','باسم',1,1,1)`);
+  const result = await handleSecretaryEvent(f.db, f.event({ text: '2', senderNumber: '12025550103' }), f.config, { infer: async () => { throw Error('must not invoke the model -- a real poll must be offered instead'); }, now: () => f.now });
+  assert.equal(result.status, 'clarify');
+  assert.ok(result.choices, 'a real tappable poll must be attached, not just text');
+  assert.equal(result.choices.options.length, 2, 'both of his own eligible tasks must be offered as tappable options');
+});
+
+test('the ordinal task-picker still never fires for Basim -- exempting him from the digit-menu gate reintroduces no old ambiguity', async t => {
+  const f = fixture(t, { withTasks: false });
+  // A task he only watches: exactly the shape that would trigger
+  // bareOwnershipOrdinal for an employee -- bareOwnershipOrdinal itself
+  // still unconditionally excludes basem/admin (unchanged), so this must
+  // still resolve via the digit menu, never via an ownership_request.
+  f.db.exec(`INSERT INTO tasks (id,title,details,priority,status,owner,suggested_owner,watcher,created_at,updated_at) VALUES('${PROGRESS}','مهمة مرصودة','تفاصيل','yellow','open',NULL,NULL,'باسم',1,1)`);
+  let seen;
+  await handleSecretaryEvent(f.db, f.event({ text: '1', senderNumber: '12025550103' }), f.config, { infer: async input => { seen = input.text; return emptySecretaryIntent('clarify', 'أي مشروع؟'); }, now: () => f.now });
+  assert.equal(seen, 'اضافة مهمة', 'still resolves to the digit-menu action, never an ownership_request for a watched task');
 });

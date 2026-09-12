@@ -215,12 +215,22 @@ function resolveTaskCommandsLegendChoice(db: DatabaseSync, event: Event, config:
   const typedOptionId = isBareCommand ? legendTypedPhraseOption(event.text) : null;
   const digitOptionId = isBareCommand && !typedOptionId ? legendDigitOptionId(event.text) : null;
   // Only fetched/used when a bare digit might apply -- see legendDigitOptionId's
-  // own comment for why this must confirm ownershipCandidates is empty (and
-  // the actor is a real employee, never Basim/admin, same as bareOwnershipOrdinal)
-  // before a typed "1".."5" is allowed to preempt the ordinal task picker.
+  // own comment for why an employee's typed "1".."5" must confirm
+  // ownershipCandidates is empty before preempting the ordinal task picker.
+  // Basim himself is exempt from that check, per his own explicit request
+  // (2026-09-12): bareOwnershipOrdinal already never fires for him (line
+  // ~1493, unconditionally excludes basem/admin), so there is no ordinal
+  // picker for a bare digit to collide with in his own chat -- his "1".."5"
+  // should always reach the same five actions, exactly like an employee with
+  // zero tasks. The multi-candidate case (e.g. "2" with several of his own
+  // open tasks) already has a real tappable poll waiting for it further
+  // down (the legendChoice branch, ~line 1130) -- that branch was never
+  // itself gated on identity, only this bare-digit entry point was.
   const digitActor = digitOptionId ? actorFor(db, event, config) : null;
-  const digitIsSafe = digitOptionId !== null && digitActor !== null && digitActor.id !== "basem" && digitActor.role !== "admin"
-    && ownershipCandidates(stateFor(db, digitActor), now).length === 0;
+  const digitIsSafe = digitOptionId !== null && digitActor !== null
+    && (digitActor.id === "basem" || digitActor.role === "admin"
+      ? true
+      : ownershipCandidates(stateFor(db, digitActor), now).length === 0);
   const choice = event.choice ?? (typedOptionId ? { questionId: "LGDQ", optionId: typedOptionId }
     : digitIsSafe ? { questionId: "LGDQ", optionId: digitOptionId as string } : undefined);
   if (!choice || choice.questionId !== "LGDQ") return event;
