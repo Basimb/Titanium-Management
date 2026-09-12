@@ -269,7 +269,7 @@ test('GCM tampering, wrong authenticated aliases, unknown hashes, multiple selec
   assert.equal(f.store.db.prepare('SELECT count(*) AS n FROM inbox').get().n, 0);
 });
 
-test('freshness, expiry, superseded questions and active-user changes remain fail closed', async t => {
+test('freshness, expiry, resent questions and active-user changes remain fail closed', async t => {
   const f = fixture(t); await f.send();
   const stale = f.vote(); stale.message.pollUpdateMessage.senderTimestampMs -= 600_000;
   assert.equal(await f.accept(stale), false);
@@ -278,11 +278,34 @@ test('freshness, expiry, superseded questions and active-user changes remain fai
   f.setActive(false); assert.equal(await f.accept(f.vote()), false); f.setActive(true);
   let checks = 0;
   assert.equal(await f.accept(f.vote(), { type: 'notify' }, { authorize: async () => ++checks === 1 }), false);
-  const oldVote = f.vote(); await f.send(choices('Q_NEW'));
+  // A genuine resend of the exact same question (fresh messageId, same
+  // choices.id) still replaces the old attempt -- a vote referencing the
+  // stale one no longer resolves. (An unrelated, different question sent to
+  // the same sender must NOT have this effect -- see the dedicated test
+  // below; that used to be the bug.)
+  const oldVote = f.vote(); await f.send(choices(), { messageId: 'MSG_RESEND' });
   assert.equal(await f.accept(oldVote), false);
   const latest = f.vote(); f.tick(300_001);
   assert.equal(await f.accept(latest), false);
   assert.equal(f.polls.outgoingMessage({ id: f.sent.at(-1).options.messageId, remoteJid: `${MEMBER}@s.whatsapp.net` }), undefined);
+});
+
+// Basim (2026-09-12): "مش راضي يتحدد مسوول اجتني ١٠ مرات ومش عارف شو اعمل" --
+// he tapped the still-current poll assigning an owner to one task and it was
+// rejected as stale, because an unrelated poll (a different task, an
+// approval) had been sent to his number moments later. sendQuestion used to
+// mark *every* other live poll for that sender superseded whenever any new
+// poll was sent to them, on the assumption a phone number only ever has one
+// question pending at a time -- an assumption Basim's real usage broke long
+// ago (task actions, approvals, unowned/unclaimed nudges and task-draft
+// field polls are all legitimately concurrent for him). One poll must never
+// kill another, unrelated one's tap-ability just by being sent afterward.
+test('an unrelated poll sent to the same phone number never invalidates a different, still-live question', async t => {
+  const f = fixture(t);
+  assert.equal((await f.send(choices('Q_A'))).status, 'sent');
+  const voteA = f.vote();
+  assert.equal((await f.send(choices('Q_B'))).status, 'sent');
+  assert.equal(await f.accept(voteA), true, 'Q_A must still be tappable after an unrelated Q_B was sent to the same number');
 });
 
 test('poll failure and interrupted send are terminal, secret-backed vote can prove an uncertain poll existed', async t => {

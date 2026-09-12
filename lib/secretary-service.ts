@@ -280,22 +280,26 @@ function resolveTaskCommandsLegendChoice(db: DatabaseSync, event: Event, config:
  * task-related message/notice an employee receives, per Basim's request.
  *
  * withPoll=false sends the legend as plain text only, no attached poll.
- * The WhatsApp bridge (polls.mjs sendQuestion) treats a poll as one-per-
- * phone-number: sending ANY new poll to a sender immediately supersedes
- * (invalidates the tap-ability of) whatever poll was still live for that
- * same sender, even one sent a moment earlier for an unrelated purpose --
- * a deliberate anti-replay guard, not a bug in that file. Basim hit this
- * for real: reassigning him a task queues a task-specific CLAIM/TRANSFER/
- * EDIT poll to the new owner, and this legend used to follow it one
- * millisecond later as a SECOND poll to that same person -- silently
- * killing the CLAIM poll's tap-ability (or its WhatsApp-side delivery
- * retry) before he ever got to tap it, so "استلمت المهمة" never appeared
- * to actually work. Callers that already attached a task-specific poll to
- * the message the employee just received must pass withPoll=false here so
- * the legend never competes with it -- the legend's own commands mostly
- * overlap that poll's options anyway (TRANSFER/EDIT), and the plain-text
- * reminder is still enough to point them at "اضافة مهمة" for anything the
- * task poll doesn't cover. */
+ * Before 2026-09-12, the WhatsApp bridge (polls.mjs sendQuestion) treated a
+ * poll as one-per-phone-number: sending ANY new poll to a sender
+ * immediately superseded (invalidated the tap-ability of) whatever poll
+ * was still live for that same sender, even one sent a moment earlier for
+ * an unrelated purpose. Basim hit this for real, twice: reassigning him a
+ * task queues a task-specific CLAIM/TRANSFER/EDIT poll to the new owner,
+ * and this legend used to follow it one millisecond later as a SECOND poll
+ * to that same person -- silently killing the CLAIM poll's tap-ability
+ * before he ever got to tap it, so "استلمت المهمة" never appeared to
+ * actually work; separately, his own unowned-task assignment polls kept
+ * losing tap-ability to unrelated polls (other tasks, approvals) sent to
+ * him moments later ("مش راضي يتحدد مسوول اجتني ١٠ مرات"). polls.mjs now
+ * only supersedes a genuine resend of the exact same question, so two
+ * independent polls to the same person no longer fight each other -- but
+ * withPoll=false is kept here anyway: the legend's own commands mostly
+ * overlap a just-sent task poll's options already (TRANSFER/EDIT), so a
+ * second, competing poll in the same breath is still confusing UX even
+ * though it's no longer destructive, and the plain-text reminder is still
+ * enough to point them at "اضافة مهمة" for anything the task poll doesn't
+ * cover. */
 function notifyTaskLegend(db: DatabaseSync, toUser: string, now: number, withPoll = true) {
   if (toUser === "basem" || toUser === "group") return;
   enqueueAgentMessage(db, { toUser, text: TASK_COMMANDS_LEGEND, ...(withPoll ? { choices: taskCommandsLegendPoll(now) } : {}) }, now);

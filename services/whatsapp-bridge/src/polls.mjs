@@ -106,12 +106,26 @@ export function createPollChoices({ store, config, proto, generateWAMessageConte
     const bytes = Buffer.from(proto.Message.encode(content).finish());
     const claimed = store.transaction(() => {
       if (db.prepare('SELECT id FROM choice_polls WHERE id=?').get(id)) return false;
-      db.prepare("UPDATE choice_polls SET state='superseded',message_proto=NULL WHERE sender=? AND state IN ('sent','sending','uncertain')").run(senderNumber);
-      // UNIQUE(sender,question_id) exists only to keep one row per question per
-      // sender -- it must never be what permanently blocks a fresh, intentional
-      // resend of that very question. The previous row for this exact question
-      // (whatever its state -- it was just superseded above if it was still
-      // live) is replaced, not accumulated forever.
+      // Only replace a previous attempt of THIS SAME question -- never touch
+      // other live polls for this sender. This used to be a blanket
+      // "UPDATE ... WHERE sender=?" that marked *every* other live poll for
+      // the sender superseded, on the theory that a phone number only ever
+      // has one question pending at a time. Basim's real usage broke that
+      // assumption long ago (task-action polls, approvals, unowned/unclaimed
+      // task nudges, close decisions and task-draft field polls can all be
+      // legitimately live for him at once) -- and on 2026-09-12 it cost him a
+      // real task assignment: he tapped the poll for "مزاولات جميع الصيادلة"
+      // (still his most recent message for that task, green-checked by
+      // WhatsApp) and it was rejected as stale, because some unrelated poll
+      // (a different task, an approval) had been sent to him a moment later
+      // and silently invalidated it first ("مش راضي يتحدد مسوول اجتني ١٠
+      // مرات"). UNIQUE(sender,question_id) still guarantees at most one live
+      // row per question per sender; the DELETE below is what actually
+      // replaces a genuine resend of this exact question (an explicit nudge,
+      // or the hourly unclaimed/unowned-task reminders in agent-followups.ts,
+      // which reuse the same choices.id every time on purpose) -- there was
+      // nothing left for the sender-wide UPDATE to do that isn't already
+      // covered by it.
       db.prepare('DELETE FROM choice_polls WHERE sender=? AND question_id=?').run(senderNumber, choices.id);
       db.prepare('INSERT INTO choice_polls(id,question_id,sender,chat_jid,recipient_jids,creator_jids,choices_json,message_proto,created_at,expires_at,state) VALUES(?,?,?,?,?,?,?,?,?,?,?)')
         .run(id, choices.id, senderNumber, canonical, JSON.stringify(recipients), JSON.stringify(creators), JSON.stringify(choices), bytes, now(), choices.expiresAt, 'sending');
