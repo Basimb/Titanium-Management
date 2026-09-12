@@ -889,6 +889,19 @@ function taskIntake(db: DatabaseSync, event: Event, actor: ChatUser, state: Snap
     for (const field of Object.keys(proposed) as Array<keyof TaskDraft>) {
       if (proposed[field] === null) Object.assign(proposed, { [field]: existingDraft[field] });
     }
+    // The model can recognize a reply as continuing the draft (intakeMode
+    // "continue") yet still fail to extract a title from it -- Basim hit
+    // this live (2026-09-12): "باسم تجربة ٢", typed straight back in answer
+    // to this very question, came back with no title at all and repeated
+    // "شو المهمة؟" verbatim, looking like the app was stuck. When title is
+    // the ONLY thing this draft is still missing, the plain reply IS the
+    // title by definition -- same trust level already given to the
+    // dueDate/ownerId free-text answers below (freeTextField) -- so use it
+    // rather than ask the exact same question again with nothing changed.
+    if (!existingDraft.title && !proposed.title) {
+      const asTitle = event.text.trim();
+      if (asTitle && asTitle.length <= 200) proposed.title = asTitle;
+    }
   }
   // An employee always opens a task for himself -- there is no one else to
   // assign it to from this flow -- so the owner question never applies to him.

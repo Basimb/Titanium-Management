@@ -50,6 +50,20 @@ test('intake asks one missing field at a time and preserves omitted known answer
   assert.equal(task.title,complete.title);assert.equal(task.priority,'yellow');assert.equal(task.suggested_owner,'خالد');assert.equal(task.status,'open');
 });
 
+test('a verb-less plain reply fills in the title when the model itself fails to extract one and title is the only thing still missing',async t=>{
+  const f=fixture(t);
+  assert.match((await f.run(draft({}))).reply,/الشغل المطلوب/);
+  // The model recognizes this as a continuation of the open draft (intakeMode
+  // "continue") but -- exactly like Basim hit live on 2026-09-12 with "باسم
+  // تجربة ٢" -- still comes back with no title extracted at all. Since title
+  // is the only field this draft is missing, the raw reply must be trusted as
+  // the title itself instead of repeating the same question forever.
+  const result=await f.run(draft({},'continue'),{text:'باسم تجربة ٢'});
+  assert.doesNotMatch(result.reply,/الشغل المطلوب/,'must not repeat the same title question verbatim');
+  assert.match(result.reply,/مين بدك/,'moves on to the next missing field (owner), same as a successful title extraction would');
+  assert.equal(saved(f).title,'باسم تجربة ٢');
+});
+
 test('all facts in one request still need a separate approval or matching quoted preview',async t=>{
   const f=fixture(t);const preview=await f.run(draft({...complete,details:'تفاصيل محفوظة كاملة'}),{responseMessageId:'EXACT-PREVIEW'});
   assert.equal(preview.status,'confirmation');assert.match(preview.reply,/تفاصيل محفوظة كاملة/);assert.equal(tasks(f).length,1);
