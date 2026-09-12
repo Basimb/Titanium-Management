@@ -58,6 +58,14 @@ test('tapping that fallback poll adds the note to the tapped task once the text 
   // phrase path already does for the same situation.
   assert.equal(tapped.status, 'clarify');
   assert.match(tapped.reply, /التعليق مطلوب/);
+  // Basim hit this live (2026-09-12): this reply used to drop task focus
+  // entirely (no taskId, empty scope), so his very next message -- whether
+  // it was the missing note text or something unrelated -- got treated as a
+  // fresh, contextless message (a generic greeting) instead of a
+  // continuation of this exact outstanding request. The reported-on task
+  // must stay in focus, exactly like the single-candidate fallback already
+  // preserves it in its own "تقصد مهمة «..»؟ اكتب نص الملاحظة." reply.
+  assert.equal(tapped.taskId, B);
 });
 
 test('with exactly one eligible task, the fallback asks a single grounded question naming that task instead of a poll', async t => {

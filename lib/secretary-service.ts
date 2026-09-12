@@ -1970,7 +1970,22 @@ function perform(db: DatabaseSync, event: Event, actor: ChatUser, state: Snapsho
     return save(db, event, actor, { status: "applied", reply: `✅ ${result.message}`, ...(taskId ? { taskId } : {}) }, scope, now);
   } catch (error) {
     if (!(error instanceof ManagementActionError)) throw error;
-    return save(db, event, actor, { status: "clarify", reply: error.message }, [], now);
+    // A validation failure here (missing comment text, invalid transition,
+    // ...) still concerns the very task the actor was just acting on --
+    // dropping taskId/scope on this path (unlike the success path just
+    // above) left the NEXT turn with no memory of which task was in play.
+    // Basim hit this live (2026-09-12): tapping a task from the "اضافة
+    // ملاحظة" poll got back "التعليق مطلوب" (comment required) with no task
+    // focus preserved, so his very next message -- which should have either
+    // been understood as the missing comment text, or at least handled with
+    // that context in mind -- got treated as a brand new, contextless
+    // message instead (a generic greeting reply, ignoring the outstanding
+    // request entirely). Preserve focus here exactly like every other
+    // "clarify that still needs more info about this task" reply already
+    // does (the single-candidate LGDNOTE/LGDFINISH fallbacks a few hundred
+    // lines up, closeDirect below).
+    const failedTaskId = typeof command.taskId === "string" && state.tasks.some(t => t.id === command.taskId) ? command.taskId : undefined;
+    return save(db, event, actor, { status: "clarify", reply: error.message, ...(failedTaskId ? { taskId: failedTaskId } : {}) }, failedTaskId ? ["t:" + failedTaskId] : [], now);
   }
 }
 
@@ -1999,7 +2014,12 @@ function closeDirect(db: DatabaseSync, event: Event, actor: ChatUser, state: Sna
     return save(db, event, actor, { status: "applied", reply: `✅ ${approved.message}`, taskId }, ["t:" + taskId], now);
   } catch (error) {
     if (!(error instanceof ManagementActionError)) throw error;
-    return save(db, event, actor, { status: "clarify", reply: error.message }, [], now);
+    // Same fix as perform() above -- preserve task focus on a validation
+    // failure too (task already elsewhere, invalid transition, ...), not
+    // only on success, so a follow-up message about the same task isn't
+    // read as a fresh, contextless one.
+    const failedTaskId = state.tasks.some(t => t.id === taskId) ? taskId : undefined;
+    return save(db, event, actor, { status: "clarify", reply: error.message, ...(failedTaskId ? { taskId: failedTaskId } : {}) }, failedTaskId ? ["t:" + failedTaskId] : [], now);
   }
 }
 // "claim_multiple" (see secretary-intent.ts) resolves one or several list

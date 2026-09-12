@@ -149,12 +149,20 @@ test('a bare comment phrase ("اضافة ملاحظة"/"عندي تحديث") wi
   const f = fixture(t);
   const first = await f.run({ text: 'اضافة ملاحظة' });
   assert.equal(first.status, 'clarify'); assert.ok(first.choices);
-  const tapped = await f.run(tap(first.choices.id, first.choices.options[0].id), neverAsk);
+  const picked = first.choices.options[0];
+  const tapped = await f.run(tap(first.choices.id, picked.id), neverAsk);
   // No note text was ever typed -- executeManagementAction's own comment
   // validation asks for it, exactly as it already does for the model-driven
   // path when the model itself extracts no body text.
   assert.equal(tapped.status, 'clarify');
   assert.match(tapped.reply, /التعليق مطلوب/);
+  // Basim hit this live (2026-09-12): this reply used to drop task focus
+  // entirely (no taskId, empty scope), so his very next message -- whether
+  // it was the missing note text or something unrelated -- got treated as a
+  // fresh, contextless message instead of a continuation of this exact
+  // outstanding request. The picked task must stay in focus, exactly like
+  // every other "still need one more thing about this task" clarify does.
+  assert.equal(tapped.taskId, picked.label === 'لوحة' ? A : B);
   const f2 = fixture(t); const r2 = await f2.run({ text: 'عندي تحديث' });
   assert.equal(r2.status, 'clarify'); assert.ok(r2.choices);
 });
