@@ -332,7 +332,16 @@ export function executeManagementAction(sqlite: DatabaseSync, claimed: Managemen
             const inserted = sqlite.prepare("INSERT INTO comments (task_id,author,body,created_at) VALUES (?,?,?,?)").run(task.id, actor.name, comment, at);
             changes.last_update_at = at;
             message = `أضاف تعليق #${String(inserted.lastInsertRowid)} على المهمة: ${task.title}`; auditAction = "comment";
-            notification = { action: "comment", title: task.title, actor: actor.name, extra: comment.slice(0, 300) }; break;
+            // Basim (2026-09-13): the group notice carried only the note just
+            // added, so the group saw each note in isolation with no thread --
+            // read back the newest two (the insert above is the first of them)
+            // and carry both, matching what every task card now shows over
+            // WhatsApp (see taskNotesBlock in lib/secretary-service.ts).
+            const recent = sqlite.prepare("SELECT author,body FROM comments WHERE task_id=? ORDER BY created_at DESC,id DESC LIMIT 2")
+              .all(task.id) as Array<{ author: string; body: string }>;
+            notification = { action: "comment", title: task.title, actor: actor.name,
+              extra: recent.map((row, index) => index === 0 ? String(row.body).slice(0, 300)
+                : `\n\u21b3 ${String(row.author).slice(0, 50)}: ${String(row.body).slice(0, 300)}`).join("") || comment.slice(0, 300) }; break;
           }
           case "submit":
             if (!manager && task.owner !== actor.name) return fail(403, "not_owned", "المهمة ليست مستلمة باسمك");

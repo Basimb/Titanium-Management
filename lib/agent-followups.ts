@@ -64,10 +64,22 @@ function reminderBuckets(tasks: ManagementTask[], today: string): Array<{ label:
   for (const task of tasks) { const key = bucket(task); const list = groups.get(key) || []; list.push(task); groups.set(key, list); }
   return order.filter(label => groups.has(label)).map(label => ({ label, tasks: groups.get(label)! }));
 }
-function formatAutoReminderLines(tasks: ManagementTask[], today: string): string {
+// Notes under each task, same two-newest rule and same short bound the
+// on-demand listings use (taskNotesBlock in secretary-service.ts) -- kept
+// local rather than imported for the same reason PRIORITY_ICON/STATUS_LABEL
+// are. This reminder is posted to the group as well as privately, which is
+// exactly where Basim asked for the notes to show.
+type ReminderNote = { taskId: string; author: string; body: string; createdAt: number };
+function autoReminderNotes(comments: ReminderNote[], taskId: string): string {
+  const notes = comments.filter(comment => comment.taskId === taskId)
+    .sort((a, b) => b.createdAt - a.createdAt).slice(0, 2);
+  if (!notes.length) return "";
+  return "\n" + notes.map(note => `\u21b3 ${clean(note.author).slice(0, 50)}: ${clean(note.body).slice(0, 70)}`).join("\n");
+}
+function formatAutoReminderLines(tasks: ManagementTask[], comments: ReminderNote[], today: string): string {
   return reminderBuckets(tasks, today).map(({ label, tasks: bucketed }) => `*${label}*\n` + bucketed.map((task, index) => {
     const suffix = task.dueDate ? ` \u2022 ${clean(task.dueDate)}` : "";
-    return `${index + 1}. ${PRIORITY_ICON[task.priority] || "\u26aa"} ${clean(task.title)} \u2014 ${STATUS_LABEL[task.status] || clean(task.status)}${suffix}`;
+    return `${index + 1}. ${PRIORITY_ICON[task.priority] || "\u26aa"} ${clean(task.title)} \u2014 ${STATUS_LABEL[task.status] || clean(task.status)}${suffix}${autoReminderNotes(comments, task.id)}`;
   }).join("\n")).join("\n\n");
 }
 // Same TSKQ/TSK id scheme as taskActionPoll in secretary-service.ts (a tap
@@ -138,7 +150,7 @@ export function planFollowups(db: DatabaseSync, config: FollowupConfig, at: numb
       if (!tasks.length) continue;
       const user = users.find(candidate => candidate.id === userId);
       if (!user) continue;
-      const lines = formatAutoReminderLines(tasks, today);
+      const lines = formatAutoReminderLines(tasks, snapshot.comments as ReminderNote[], today);
       const number = numberOf(userId);
       if (number && !alreadySent(db, kind, userId, null, at - DAY)) {
         const choices = autoReminderPoll(tasks, user.name, at);

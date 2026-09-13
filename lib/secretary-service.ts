@@ -468,16 +468,38 @@ const PRIORITIES: Record<string, { icon: string; label: string; color: string }>
 // perfect fix -- a long title still wraps back to the bare margin).
 export function stableOrdinal(index: number, total = index) { const width = String(total).length; return `\u200F*\u2066${String(index).padStart(width, "0")}\u2069.*`; }
 
-function numberedTaskList(tasks: Task[], now: number) {
+// Basim (2026-09-13): "بدي ينعرض اخر ملاحظتين فقط" -- every WhatsApp rendering of a
+// task used to stop at its own fields, so a task carrying six notes showed
+// none of them in a list and only the single newest one on a named card (see
+// secretaryTaskCard below): the rest existed only on the dashboard, and a
+// list gave no hint a task had any notes at all. state.comments already
+// arrives newest-first (getManagementSnapshot orders by created_at DESC,id
+// DESC) and is already scope-filtered per actor there, so this neither
+// re-queries nor widens what anyone can see.
+const TASK_NOTE_LIMIT = 2;
+function lastTaskNotes(state: Snapshot, taskId: string) {
+  return state.comments.filter(comment => comment.taskId === taskId)
+    .sort((a, b) => b.createdAt - a.createdAt).slice(0, TASK_NOTE_LIMIT);
+}
+// bodyChars is the whole reason this is a parameter: a numbered list packs one
+// line per task into a message capped at 3750 chars (see the summary branch),
+// so its notes stay short enough that adding them can't push tasks out of the
+// list, while a single task's own card can afford real text.
+function taskNotesBlock(state: Snapshot, taskId: string, bodyChars: number) {
+  const notes = lastTaskNotes(state, taskId);
+  if (!notes.length) return "";
+  return "\n" + notes.map(note => `↳ ${clean(note.author, 50)}: ${clean(note.body, bodyChars)}`).join("\n");
+}
+function numberedTaskList(tasks: Task[], state: Snapshot, now: number) {
   return tasks.map((task, index) => {
     const priority = PRIORITIES[task.priority];
     const overdue = task.status !== "completed" && task.dueDate && task.dueDate < new Date(now + 3 * 3600_000).toISOString().slice(0, 10);
     const suffix = overdue ? ` • 🔴 متأخرة` : task.dueDate ? ` • الموعد: ${clean(task.dueDate, 10)}` : "";
-    return `${stableOrdinal(index + 1, tasks.length)} ${priority?.icon || "⚪"} ${clean(task.title, 90).replace(/\*/g, "")} — ${LABELS[task.status] || clean(task.status)} • ${clean(task.owner || task.suggestedOwner || "غير معيّن", 50)}${suffix}`;
+    return `${stableOrdinal(index + 1, tasks.length)} ${priority?.icon || "⚪"} ${clean(task.title, 90).replace(/\*/g, "")} — ${LABELS[task.status] || clean(task.status)} • ${clean(task.owner || task.suggestedOwner || "غير معيّن", 50)}${suffix}${taskNotesBlock(state, task.id, 70)}`;
   }).join("\n");
 }
 export function secretaryTaskCard(task: Task, state: Snapshot, now: number, detailed = false) {
-  const latest = state.comments.filter(c => c.taskId === task.id).sort((a, b) => b.createdAt - a.createdAt)[0];
+  const notes = taskNotesBlock(state, task.id, 300);
   const priority = PRIORITIES[task.priority];
   const overdue = task.status !== "completed" && task.dueDate && task.dueDate < new Date(now + 3 * 3600_000).toISOString().slice(0, 10);
   // Basim: "شو المطلوب أولوية قصوى؟ شيل المطلوب من القصة" -- this line used to
@@ -486,7 +508,7 @@ export function secretaryTaskCard(task: Task, state: Snapshot, now: number, deta
   // (or printed a meaningless "لا توجد تفاصيل إضافية" filler) and read as
   // noise. He only wants the task itself, its status/who/when, and the last
   // update -- never a "required" line, whether or not details is set.
-  return `${priority?.icon || "⚪"} ${clean(task.title, 150)}\n${LABELS[task.status] || clean(task.status)}${overdue ? " • متأخرة عن الموعد" : ""}\nالأولوية: ${priority?.label || "غير محددة"}\nالمسؤول: ${clean(task.owner || task.suggestedOwner || "لم يُعيّن")} ${task.dueDate ? `• الموعد: ${clean(task.dueDate, 10)}` : ""}${detailed ? `\n${latest ? `آخر تحديث (${clean(latest.author, 50)}): ${clean(latest.body, 500)}` : "لا يوجد تحديث مسجّل بعد."}` : ""}`;
+  return `${priority?.icon || "⚪"} ${clean(task.title, 150)}\n${LABELS[task.status] || clean(task.status)}${overdue ? " • متأخرة عن الموعد" : ""}\nالأولوية: ${priority?.label || "غير محددة"}\nالمسؤول: ${clean(task.owner || task.suggestedOwner || "لم يُعيّن")} ${task.dueDate ? `• الموعد: ${clean(task.dueDate, 10)}` : ""}${notes || (detailed ? "\nلا يوجد تحديث مسجّل بعد." : "")}`;
 }
 // Basim: "لما أسأله مين أكثر موظف عنده مهام، يحلل ويعطيني إنه أيمن عنده 17
 // مهمة" -- ranks every active employee (never Basim himself) by their open,
@@ -607,7 +629,7 @@ function readReply(plan: SecretaryIntent, actor: ChatUser, state: Snapshot, now:
   const ordered = orderedTasks(state, now).filter(t => (!reportOwner || (t.owner || t.suggestedOwner) === reportOwner.name) && (!reportStatus || t.status === reportStatus)
     && (!summaryOwnerOnly || (t.owner || t.suggestedOwner) === actor.name));
   if (plan.kind === "summary") {
-    const list = numberedTaskList(ordered, now);
+    const list = numberedTaskList(ordered, state, now);
     const reply = `${header.trimEnd()}${list ? `\n${list}` : "\nما في مهام متاحة إلك حاليًا."}\n\nتم عرض جميع المهام (${ordered.length}).\nاختار رقم المهمة كما هو مكتوب، مثل: «رقم 12».`;
     return { result: { status: "summary", reply: reply.slice(0, 3750) }, scope: ordered.map(t => "t:" + t.id) };
   }
@@ -615,7 +637,7 @@ function readReply(plan: SecretaryIntent, actor: ChatUser, state: Snapshot, now:
   outer: for (const task of ordered) {
     const priority = PRIORITIES[task.priority];
     const days = task.status !== "completed" && task.dueDate && task.dueDate < today ? Math.floor((Date.parse(today) - Date.parse(task.dueDate)) / 86400000) : 0;
-    const item = `\n\n${priority?.icon || "⚪"} ${clean(task.title, 150).replace(/\*/g, "")}\n${LABELS[task.status] || clean(task.status)} • ${clean(task.owner || task.suggestedOwner || "غير معيّن", 50)}${days ? ` • 🔴 متأخرة ${days} يوم` : task.dueDate ? ` • الموعد: ${clean(task.dueDate, 10)}` : ""}`;
+    const item = `\n\n${priority?.icon || "⚪"} ${clean(task.title, 150).replace(/\*/g, "")}\n${LABELS[task.status] || clean(task.status)} • ${clean(task.owner || task.suggestedOwner || "غير معيّن", 50)}${days ? ` • 🔴 متأخرة ${days} يوم` : task.dueDate ? ` • الموعد: ${clean(task.dueDate, 10)}` : ""}${taskNotesBlock(state, task.id, 70)}`;
     if (header.length + body.length + item.length > 3500) break outer;
     body += item; shown++;
   }
@@ -2180,11 +2202,11 @@ function reminderBuckets(tasks: Task[], today: string): Array<{ label: string; t
   for (const task of tasks) { const key = bucket(task); const list = groups.get(key) || []; list.push(task); groups.set(key, list); }
   return order.filter(label => groups.has(label)).map(label => ({ label, tasks: groups.get(label)! }));
 }
-function formatOwnerTaskLines(tasks: Task[], today: string): string {
+function formatOwnerTaskLines(tasks: Task[], state: Snapshot, today: string): string {
   return reminderBuckets(tasks, today).map(({ label, tasks: bucketed }) => `*${label}*\n` + bucketed.map((task, index) => {
     const priority = PRIORITIES[task.priority];
     const suffix = task.dueDate ? ` • ${clean(task.dueDate, 10)}` : "";
-    return `${index + 1}. ${priority?.icon || "⚪"} ${clean(task.title, 120)} — ${LABELS[task.status] || clean(task.status)}${suffix}`;
+    return `${index + 1}. ${priority?.icon || "⚪"} ${clean(task.title, 120)} — ${LABELS[task.status] || clean(task.status)}${suffix}${taskNotesBlock(state, task.id, 70)}`;
   }).join("\n")).join("\n\n");
 }
 function sendTeamTaskReminders(db: DatabaseSync, state: Snapshot, now: number): { recipients: number } {
@@ -2194,7 +2216,7 @@ function sendTeamTaskReminders(db: DatabaseSync, state: Snapshot, now: number): 
   for (const [userId, tasks] of groups) {
     if (!tasks.length) continue;
     const user = state.users.find(u => u.id === userId)!;
-    const lines = formatOwnerTaskLines(tasks, today);
+    const lines = formatOwnerTaskLines(tasks, state, today);
     // A poll (see taskActionPoll) only ever fits one task per WhatsApp
     // message -- attach it when this reminder names exactly one.
     const choices = tasks.length === 1 ? taskActionPoll(tasks[0], user.name, now) : undefined;
