@@ -43,10 +43,14 @@ function tap(questionId, optionId) { return { choice: { questionId, optionId } }
 
 test('the numbered legend menu lists all five commands with their number and color', async t => {
   const f = fixture(t, { withTasks: false }); // exactly one task -- no candidate ambiguity to resolve
-  f.db.exec(`INSERT INTO tasks (id,title,details,priority,status,owner,suggested_owner,started_at,created_at,updated_at) VALUES('${PROGRESS}','لوحة','تفاصيل','red','progress','خالد','خالد',1,1,1)`);
-  // A plain "comment" action is the simplest reliable trigger for
-  // notifyTaskLegend (see notifyTaskLegend's own call sites).
-  await handleSecretaryEvent(f.db, f.event({ text: 'ملاحظة: بدأت الشغل' }), f.config, { infer: async () => ({ ...emptySecretaryIntent('command'), action: 'comment', taskId: PROGRESS, fields: { ...emptySecretaryIntent('command').fields, body: 'بدأت الشغل' } }), now: () => f.now });
+  f.db.exec(`INSERT INTO tasks (id,title,details,priority,status,owner,suggested_owner,started_at,created_at,updated_at) VALUES('${PROGRESS}','لوحة','تفاصيل','red','open',NULL,'خالد',NULL,1,1)`);
+  // "claim" is the one action that still triggers notifyTaskLegend (see its
+  // own call sites/comment: claim is a START, so the legend's next-step
+  // commands are actually useful -- finish/comment are the employee already
+  // being DONE with something, so they no longer trigger it, per Basim
+  // 2026-09-12). Used here purely as a reliable trigger to check the
+  // legend's own rendering, unrelated to what's being tested in this file.
+  await handleSecretaryEvent(f.db, f.event({ text: 'استلمت المهمة' }), f.config, { infer: async () => ({ ...emptySecretaryIntent('command'), action: 'claim', taskId: PROGRESS, fields: emptySecretaryIntent('command').fields }), now: () => f.now });
   const legend = outbox(f.db).find(r => r.toUser === 'member' && /أوامر المهام السريعة/.test(r.text));
   assert.ok(legend, 'the employee must get the redesigned numbered legend');
   assert.match(legend.text, /1️⃣.*اضافة مهمة/);

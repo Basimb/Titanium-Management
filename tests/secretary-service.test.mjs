@@ -240,24 +240,36 @@ test('member completion waits for actor-bound confirmation; then only approval',
  const confirmed=await f.run(undefined,{text:`موافق ${token}`});assert.equal(confirmed.status,'applied');assert.equal(f.db.prepare("SELECT status FROM tasks WHERE id='t'").get().status,'approval');assert.equal(f.db.prepare("SELECT completed_at FROM tasks WHERE id='t'").get().completed_at,null);
  const audit=JSON.parse(f.db.prepare("SELECT details FROM audit_logs WHERE action='submit'").get().details);assert.equal(audit.auditContext.confirmedBy,'member');assert.equal(audit.auditContext.originalText,'خلصت اللوحة بالكامل');
 });
-test('an employee finishing/claiming/commenting on a task gets the standalone command legend; an admin doing the same never does',async t=>{
+// Basim (2026-09-12), after Khalid asked "ليش بعد ما أضفت الملاحظة عاد
+// وارسلي؟" (why did it send me this again after I added the note?): "مالها
+// داعي تروح بعد ما يكون انهى قصصه" -- the legend used to follow EVERY
+// employee action here (claim/cancel_claim/comment/submit alike), which is
+// what this test used to lock in. Now it follows only claim (a START, where
+// the next-step commands are actually useful); finishing (submit) and
+// commenting are things the employee just finished doing, so repeating the
+// whole menu back at them right after is exactly what he asked to stop. See
+// the still-passing "a member claiming their own open task ... gets the
+// command legend" test above for the claim side of this.
+test('an employee finishing or commenting on a task does NOT get the standalone command legend repeated back; an admin never does either',async t=>{
  const f=fixture(t);
  await f.run(command('submit'),{text:'خلصت اللوحة بالكامل'});
  const token=pending(f.db).token;
  await f.run(undefined,{text:`موافق ${token}`});
- const legend=outbox(f.db).filter(r=>r.toUser==='member'&&/أوامر المهام السريعة/.test(r.text));
- assert.equal(legend.length,1,'the employee gets exactly one legend message after finishing their task');
- assert.match(legend[0].text,/تحويل المهمة/);assert.match(legend[0].text,/انهاء المهمة/);assert.match(legend[0].text,/اضافة ملاحظة/);assert.match(legend[0].text,/اضافة مهمة/);
- // Basim now gets every task update privately too (see dispatchManagementNotice)
- // -- confirm that landed for the employee's own submit above, then confirm
- // it never doubles as the employee-facing legend, and never fires for
- // Basim's own actions (no self-notice).
+ assert.equal(outbox(f.db).filter(r=>r.toUser==='member'&&/أوامر المهام السريعة/.test(r.text)).length,0,'finishing a task is the employee being done with it -- no legend repeated back');
+ // Basim still gets every task update privately (see dispatchManagementNotice)
+ // -- confirm that landed for the employee's own submit above, and never
+ // fires for Basim's own actions (no self-notice).
  assert.ok(outbox(f.db).some(r=>r.toUser==='basem'&&/📤/.test(r.text)&&/لوحة/.test(r.text)),'Basim gets a private notice of the employee finishing their task');
  assert.equal(outbox(f.db).filter(r=>r.toUser==='basem'&&/أوامر المهام السريعة/.test(r.text)).length,0,'Basim never gets the employee-facing legend');
  const admin={senderNumber:'12025550103'};
  const before=outbox(f.db).filter(r=>r.toUser==='basem').length;
  await f.run(command('comment',{body:'تحديث بسيط'}),{...admin,text:'علّق: تحديث بسيط'});
  assert.equal(outbox(f.db).filter(r=>r.toUser==='basem').length,before,'no self-notice for his own comment');
+});
+test('an employee commenting on a task (not just finishing it) also does not get the legend repeated back',async t=>{
+ const f=fixture(t);
+ await f.run(command('comment',{body:'حكيت مع المحامي'}),{text:'علّق: حكيت مع المحامي'});
+ assert.equal(outbox(f.db).filter(r=>r.toUser==='member'&&/أوامر المهام السريعة/.test(r.text)).length,0,'adding a note is the employee being done with that -- no legend repeated back');
 });
 test('cancellation and expired confirmation never mutate',async t=>{
  const f=fixture(t);await f.run(command('submit'),{text:'خلصت اللوحة'});assert.equal((await f.run(undefined,{text:'إلغاء'})).status,'cancelled');assert.equal(pending(f.db),undefined);

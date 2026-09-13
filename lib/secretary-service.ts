@@ -2228,7 +2228,16 @@ function perform(db: DatabaseSync, event: Event, actor: ChatUser, state: Snapsho
     // Basim himself) just did directly through chat -- claim/cancel_claim/
     // comment/submit are the only actions a non-admin ever reaches perform()
     // with (see the plan.kind==="command" gate above).
-    notifyTaskLegend(db, actor.id, now);
+    // Basim (2026-09-12), after Khalid asked "ليش بعد ما أضفت الملاحظة عاد
+    // وارسلي؟" (why did it send me this again after I added the note?):
+    // "مالها داعي تروح بعد ما يكون انهى قصصه" -- once someone has already
+    // finished the thing they came to do (logged a note, submitted the task
+    // for approval, backed out of a claim), resending the whole command menu
+    // right after just repeats itself back at them. claim is the one
+    // exception: it's a START, not a finish -- the person is about to work
+    // the task and the legend's next-step commands (FINISH/NOTE/TRANSFER)
+    // are exactly what they're about to need.
+    if (command.action === "claim") notifyTaskLegend(db, actor.id, now);
     // File blobs from confirmed deletions remain recoverable on disk; DB links are removed atomically.
     return save(db, event, actor, { status: "applied", reply: `✅ ${result.message}`, ...(taskId ? { taskId } : {}) }, scope, now);
   } catch (error) {
