@@ -719,7 +719,19 @@ function parseApprovalPollChoice(event: Event): { approvalId: string; decision: 
   const choice = event.choice;
   if (!choice || !choice.questionId.startsWith("APR")) return null;
   const approvalId = choice.questionId.slice(3);
-  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(approvalId)) return null;
+  // Was a strict UUID-only regex, matching how randomUUID() ids look today --
+  // but every id here is the ENTIRE remainder of a dedicated questionId
+  // string (never split against a trailing suffix within that same string),
+  // so nothing downstream actually depends on the UUID shape: it's just a
+  // safe-identifier bound before the id reaches a parameterized DB lookup.
+  // Basim's real task ids include short legacy ones from before this system
+  // switched to randomUUID() (e.g. "dl-3", "cl-2", carried over from the old
+  // per-project numbering -- see scripts/migrate-drop-projects.sql) -- those
+  // never matched this regex, so a real, correctly-decrypted tap on one of
+  // their polls silently fell through to the model instead of resolving
+  // deterministically. See parseTaskActionPollChoice/parseUnownedTaskPollChoice/
+  // parseTaskCloseDecisionPollChoice below for the same fix, same reason.
+  if (!/^[a-zA-Z0-9_-]{1,200}$/.test(approvalId)) return null;
   if (choice.optionId === `APR${approvalId}Y`) return { approvalId, decision: "approved" };
   if (choice.optionId === `APR${approvalId}N`) return { approvalId, decision: "rejected" };
   return null;
@@ -749,7 +761,11 @@ function parseTaskCloseDecisionPollChoice(event: Event): { taskId: string; decis
   const choice = event.choice;
   if (!choice || !choice.questionId.startsWith("TCLQ")) return null;
   const taskId = choice.questionId.slice(4);
-  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(taskId)) return null;
+  // See parseApprovalPollChoice's comment above -- same fix, same reason:
+  // real task ids are not all UUIDs (legacy short ids like "dl-3" survive
+  // from before the switch to randomUUID()), and the id is always the whole
+  // remainder of questionId, so a generic safe-identifier bound is enough.
+  if (!/^[a-zA-Z0-9_-]{1,200}$/.test(taskId)) return null;
   const prefix = `TCL${taskId}`;
   if (choice.optionId === `${prefix}Y`) return { taskId, decision: "approved" };
   if (choice.optionId === `${prefix}N`) return { taskId, decision: "rejected" };
@@ -784,7 +800,19 @@ function parseTaskActionPollChoice(event: Event): { taskId: string; action: "cla
   const choice = event.choice;
   if (!choice || !choice.questionId.startsWith("TSKQ")) return null;
   const taskId = choice.questionId.slice(4);
-  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(taskId)) return null;
+  // See parseApprovalPollChoice's comment above -- same fix, same reason:
+  // real task ids are not all UUIDs (legacy short ids like "dl-3" survive
+  // from before the switch to randomUUID()), and the id is always the whole
+  // remainder of questionId, so a generic safe-identifier bound is enough.
+  // This is the CLAIM/FINISH poll -- the exact one Khalid tapped tonight
+  // (2026-09-12) with no visible effect: his task's id was one of these
+  // legacy short ones, this regex silently rejected it, and the tap fell
+  // through to the model, which read the tap's label text ("👋 استلمت
+  // المهمة") as a request for ownership instead of a plain claim and got
+  // rejected with "already_assigned" -- a real vote that looked accepted in
+  // WhatsApp (green check, vote count) but changed nothing on the task,
+  // same failure shape as the unowned-task poll bug below.
+  if (!/^[a-zA-Z0-9_-]{1,200}$/.test(taskId)) return null;
   const prefix = `TSK${taskId}`;
   if (!choice.optionId.startsWith(prefix)) return null;
   const ACTIONS: Record<string, "claim" | "submit" | "note" | "transfer" | "extend" | "edit"> = { CLAIM: "claim", FINISH: "submit", NOTE: "note", TRANSFER: "transfer", EXTEND: "extend", EDIT: "edit" };
@@ -802,7 +830,16 @@ function parseUnownedTaskPollChoice(event: Event): { taskId: string; target: str
   const choice = event.choice;
   if (!choice || !choice.questionId.startsWith("UNOWNQ")) return null;
   const taskId = choice.questionId.slice(6);
-  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(taskId)) return null;
+  // See parseApprovalPollChoice's comment above -- same fix, same reason:
+  // real task ids are not all UUIDs (legacy short ids like "dl-3"/"cl-2"
+  // survive from before the switch to randomUUID()), and the id is always
+  // the whole remainder of questionId, so a generic safe-identifier bound is
+  // enough. This is the poll behind the "مزاولات جميع الصيادلة" /
+  // "الاسم التجاري والسجل التجاري للمركز" incidents (2026-09-12): both tasks
+  // had legacy short ids, this regex silently rejected them, and the tap
+  // fell through to the model instead of resolving deterministically -- a
+  // real vote that looked accepted in WhatsApp but never touched the task.
+  if (!/^[a-zA-Z0-9_-]{1,200}$/.test(taskId)) return null;
   const prefix = `UNOWN${taskId}_`;
   if (!choice.optionId.startsWith(prefix)) return null;
   const target = choice.optionId.slice(prefix.length);

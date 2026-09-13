@@ -5,11 +5,23 @@
 // for the pattern this reuses). taskActionPoll/parseTaskActionPollChoice/
 // resolveTaskActionTextChoice in lib/secretary-service.ts implement it.
 //
-// Real task ids are randomUUID() (see lib/management-actions.ts), and
-// parseTaskActionPollChoice validates the shape of the id it pulls off a
-// tapped option -- same defense-in-depth parseApprovalPollChoice already
-// applies to approval ids -- so this fixture uses UUID-shaped ids too rather
-// than the short 't'/'t2' placeholders other secretary-service fixtures use.
+// Real task ids are usually randomUUID() (see lib/management-actions.ts), and
+// parseTaskActionPollChoice bounds the shape of the id it pulls off a tapped
+// option -- same defense-in-depth parseApprovalPollChoice already applies to
+// approval ids -- so this fixture mostly uses UUID-shaped ids too rather than
+// the short 't'/'t2' placeholders other secretary-service fixtures use.
+//
+// NOT every real task id is a UUID, though: legacy tasks created before this
+// system switched to randomUUID() kept their original short ids (e.g.
+// "dl-3", "cl-2" -- see scripts/migrate-drop-projects.sql, which flattened
+// the old per-project numbering into today's standalone tasks without ever
+// reissuing ids). This file's id bound used to be UUID-only and silently
+// rejected those -- a real, correctly-decrypted CLAIM tap on a legacy task
+// fell through to the model instead of resolving directly, which read the
+// tap's label text as a request for ownership and refused it with
+// "already_assigned" (Basim hit this for real on 2026-09-12: Khalid's tap on
+// "استلمت المهمة" showed a green check in WhatsApp but never claimed the
+// task). See the short-id CLAIM test below for the fix.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
@@ -73,6 +85,22 @@ test('tapping CLAIM resolves the claim directly, never asking the model, and bro
   const rows = outbox(f.db);
   assert.ok(rows.some(r => r.toUser === 'group' && /👋/.test(r.text)), 'a claim tap must broadcast to the group exactly like a typed claim');
   assert.ok(rows.some(r => r.toUser === 'member' && /أوامر المهام السريعة/.test(r.text)), 'the tapping employee still gets the command legend');
+});
+// Regression for 2026-09-12: a legacy short id (never a UUID) must resolve a
+// CLAIM tap exactly like a randomUUID() one does -- see this file's header
+// comment for the incident.
+test('tapping CLAIM on a task with a legacy (non-UUID) id still resolves directly, never asking the model', async t => {
+  const f = fixture(t);
+  const LEGACY = 'dl-3';
+  f.db.prepare(`INSERT INTO tasks
+    (id,title,details,priority,status,owner,suggested_owner,started_at,due_date,completed_at,rejection_reason,created_at,updated_at,archived_at,archived_by)
+    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+    LEGACY, 'مزاولات جميع الصيادلة', '', 'yellow', 'open', null, 'خالد', null, null, null, null, 1, 1, null, null);
+  const tapped = await f.run(undefined, tap(`TSKQ${LEGACY}`, `TSK${LEGACY}CLAIM`),
+    async () => { throw Error('a CLAIM tap must resolve directly, never ask the model, regardless of id shape'); });
+  assert.equal(tapped.status, 'applied');
+  const task = f.db.prepare('SELECT status,owner FROM tasks WHERE id=?').get(LEGACY);
+  assert.equal(task.status, 'progress'); assert.equal(task.owner, 'خالد');
 });
 // Basim's explicit rule: nobody closes a task without a note. FINISH itself
 // stays a tap (his original "بدهم بس يختاروا، ما بدي حد يكتب" design), so this
