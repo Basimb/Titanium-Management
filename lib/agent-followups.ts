@@ -14,6 +14,17 @@ import type { SecretaryChoices } from "./secretary-choices.ts";
 
 export type FollowupConfig = { enabled: boolean; contacts: Array<{ userId: string; number: string }>; groupId?: string | null; workStartHour?: number; workEndHour?: number; timezoneOffsetMinutes?: number; publicUrl?: string };
 type Planned = { id: string; kind: "overdue_task" | "silent_task" | "stale_approval" | "daily_digest" | "auto_reminder_morning" | "auto_reminder_evening" | "unclaimed_task" | "stale_unclaimed" | "unowned_task"; targetUser: string; entityId: string | null; to: string; text: string; choices?: SecretaryChoices };
+// Basim (2026-09-15): every reminder poll used to die an hour after it was
+// built, while WhatsApp keeps the bubble tappable forever -- so a tap that
+// arrived even slightly late was rejected in total silence
+// (poll_not_found_or_consumed, 61 of them in one day on the live bridge) and
+// looked to the reader like the bot had simply stopped working. These polls
+// carry the task id inside their own option ids, so a late tap still resolves
+// to exactly the right task with nothing looked up against live state -- there
+// was never a reason for the short window. 24h is the ceiling the bridge
+// itself enforces (MAX_POLL_LIFETIME_MS in services/whatsapp-bridge/src/polls.mjs),
+// and the same one taskCloseDecisionPoll already uses.
+const REMINDER_POLL_LIFETIME_MS = 24 * 60 * 60_000;
 const DAY = 24 * 60 * 60_000, SILENT_AFTER = 3 * DAY, STALE_APPROVAL_AFTER = 2 * DAY, STALE_UNCLAIMED_AFTER = DAY, HOUR = 60 * 60_000;
 const newMessageId = () => "3EB0" + randomBytes(18).toString("hex").toUpperCase();
 const clean = (value: string) => value.replace(/[\x00-\x1f\u202a-\u202e\u2066-\u2069]/g, " ").slice(0, 200);
@@ -98,7 +109,7 @@ function autoReminderPoll(tasks: ManagementTask[], actorName: string, now: numbe
   if (task.status === "progress" && task.owner === actorName) options.push({ id: `${base}FINISH`, label: "\u2705 \u062e\u0644\u0635\u062a \u0627\u0644\u0645\u0647\u0645\u0629" }, { id: `${base}NOTE`, label: "\ud83d\udcdd \u0623\u0636\u064a\u0641 \u0645\u0644\u0627\u062d\u0638\u0629" });
   if (task.status === "open" || task.status === "progress") options.push({ id: `${base}TRANSFER`, label: "\ud83d\udd04 \u062d\u0648\u0651\u0644\u0647\u0627 \u0644\u062d\u062f\u0627 \u063a\u064a\u0631\u064a" }, { id: `${base}EDIT`, label: "\ud83d\udd27 \u063a\u064a\u0651\u0631 \u0627\u0644\u0623\u0648\u0644\u0648\u064a\u0629" });
   if (task.status === "progress" && task.owner === actorName) options.push({ id: `${base}EXTEND`, label: "\ud83d\udd50 \u0628\u062f\u064a \u062a\u0645\u062f\u064a\u062f" });
-  return options.length >= 2 ? { id: `TSKQ${task.id}`, title: "\u0634\u0648 \u0628\u062f\u0643 \u062a\u0639\u0645\u0644 \u0628\u0647\u0627\u0644\u0645\u0647\u0645\u0629\u061f", expiresAt: now + 60 * 60_000, options } : undefined;
+  return options.length >= 2 ? { id: `TSKQ${task.id}`, title: "\u0634\u0648 \u0628\u062f\u0643 \u062a\u0639\u0645\u0644 \u0628\u0647\u0627\u0644\u0645\u0647\u0645\u0629\u061f", expiresAt: now + REMINDER_POLL_LIFETIME_MS, options } : undefined;
 }
 
 // Basim (2026-09-12): "قلتلك تيجي تصويت مش هيك نصوص" -- an unowned task (no
@@ -114,7 +125,39 @@ function unownedTaskPoll(taskId: string, users: Array<{ id: string; name: string
   const employees = users.filter(user => user.active !== 0 && user.id !== ownerId).slice(0, 11);
   const options = [...employees.map(user => ({ id: `UNOWN${taskId}_${user.id}`, label: user.name })),
     { id: `UNOWN${taskId}_SELF`, label: "🙋 تولاها بنفسك" }];
-  return { id: `UNOWNQ${taskId}`, title: "حددلها موظف مسؤول:", expiresAt: now + 60 * 60_000, options };
+  return { id: `UNOWNQ${taskId}`, title: "حددلها موظف مسؤول:", expiresAt: now + REMINDER_POLL_LIFETIME_MS, options };
+}
+// Basim (2026-09-15): the hourly unclaimed nudge and the overdue/silent nudge
+// were both written one-message-per-TASK, each carrying its own poll. Someone
+// with five open tasks therefore got five near-identical messages and five
+// live polls dumped into their chat in the same minute -- 16 polls went out
+// across the team at 09:00 on 2026-09-15 alone ("تصويتات مشطبوكه ببعض").
+// One message per PERSON instead, listing their tasks numbered, with ONE poll
+// whose options ARE the tasks: the tap picks which task, and the reply to that
+// tap carries that task's ordinary action poll (see parseTaskPickerChoice in
+// secretary-service.ts). The question id is a constant, so a resend supersedes
+// the previous picker bubble server-side and a person never holds two live
+// pickers at once. Option ids carry the task id outright, so a tap resolves
+// deterministically with nothing looked up against a model -- same convention
+// as autoReminderPoll/unownedTaskPoll above.
+const TASK_PICKER_LIMIT = 10;
+function taskPickerPoll(tasks: ManagementTask[], now: number): SecretaryChoices | undefined {
+  if (tasks.length < 2) return undefined;
+  // Labels are what a WhatsApp vote is matched against (the bridge hashes the
+  // label, see acceptVote), so two tasks sharing a title would make the tap
+  // ambiguous and be rejected -- the leading number keeps every label unique
+  // and matches the numbering in the message text above the poll.
+  const options = tasks.slice(0, TASK_PICKER_LIMIT)
+    .map((task, index) => ({ id: `TPK${task.id}`, label: `${index + 1}. ${clean(task.title).slice(0, 86)}` }));
+  return { id: "TPKQ", title: "أي مهمة بدك تشتغل عليها؟", expiresAt: now + REMINDER_POLL_LIFETIME_MS, options };
+}
+// The numbered list that sits above taskPickerPoll -- same numbering, so "3"
+// in the text and the third poll option are the same task.
+function pickerLines(tasks: ManagementTask[], comments: ReminderNote[]): string {
+  return tasks.slice(0, TASK_PICKER_LIMIT).map((task, index) => {
+    const due = task.dueDate ? ` \u2022 ${clean(task.dueDate)}` : "";
+    return `${index + 1}. ${PRIORITY_ICON[task.priority] || "\u26aa"} ${clean(task.title)}${due}${autoReminderNotes(comments, task.id)}`;
+  }).join("\n");
 }
 function ownerActor(db: DatabaseSync): ManagementActor | null {
   const row = db.prepare("SELECT id,name,role,active,department FROM users WHERE id='basem' AND role='admin' AND active=1").get() as ManagementActor | undefined;
@@ -182,46 +225,59 @@ export function planFollowups(db: DatabaseSync, config: FollowupConfig, at: numb
   // newly created open tasks alike, since this scans the live snapshot fresh
   // every time rather than tracking task age.
   const ownerNumber = numberOf(owner.id);
+  // Collected per PERSON first, then sent as one message + one picker poll --
+  // see taskPickerPoll above for why this stopped being one message per task.
+  // The dedup key moved with it: (kind, user, null) once an hour, instead of
+  // (kind, user, taskId), so a person is nudged about their whole unclaimed
+  // pile at most once an hour no matter how often this planner runs.
+  const unclaimed = new Map<string, { number: string; name: string; tasks: ManagementTask[] }>();
   for (const task of snapshot.tasks) {
     if (task.archivedAt || task.status !== "open" || task.owner) continue;
     const responsible = task.suggestedOwner;
     if (responsible) {
       const userId = userIdByName.get(responsible); const number = userId ? numberOf(userId) : null;
       if (!userId || !number) continue;
-      if (alreadySent(db, "unclaimed_task", userId, task.id, at - HOUR)) continue;
+      if (alreadySent(db, "unclaimed_task", userId, null, at - HOUR)) continue;
       if (db.prepare("SELECT id FROM approvals WHERE status='pending' AND entity_id=?").get(task.id)) continue;
-      const choices = autoReminderPoll([task], responsible, at);
-      // This nudge repeats hourly (Basim's own request) and each resend
-      // supersedes the previous WhatsApp poll bubble server-side -- but the
-      // WhatsApp app itself never marks an old poll bubble as expired, so
-      // several look-alike, still-tappable bubbles for the same task pile up
-      // in the chat and only the newest is actually live. Tapping an older one
-      // is silently dropped (see services/whatsapp-bridge/src/polls.mjs
-      // acceptVote's superseded/expired checks) with zero feedback, which is
-      // exactly what looked like "the tap isn't registering" for Khaled. Spell
-      // out which bubble is live rather than silently relying on the reader to
-      // guess.
-      const staleNote = choices ? "\n⚠️ إذا في استطلاع تصويت أقدم من هذه الرسالة لنفس المهمة، هو منتهي الصلاحية — رد من استطلاع هذه الرسالة تحديدًا." : "";
-      plans.push({ id: randomBytes(8).toString("hex"), kind: "unclaimed_task", targetUser: userId, entityId: task.id, to: `${number}@s.whatsapp.net`,
-        text: `⏳ يا ${clean(responsible)}، مهمة «${clean(task.title)}» لسا بانتظار ردك.${autoReminderNotes(snapshot.comments as ReminderNote[], task.id)}${staleNote}\n\n${TASK_COMMANDS_LEGEND}`, ...(choices ? { choices } : {}) });
+      const entry = unclaimed.get(userId) ?? { number, name: responsible, tasks: [] };
+      entry.tasks.push(task); unclaimed.set(userId, entry);
     } else if (ownerNumber) {
       if (alreadySent(db, "unowned_task", owner.id, task.id, at - HOUR)) continue;
       // Same resend/supersession hazard as unclaimed_task just above (see its
       // own comment): this nudge repeats hourly while the task stays unowned,
       // and each resend supersedes the previous WhatsApp poll bubble server-side
       // even though WhatsApp itself never marks the old bubble as expired.
-      // Basim hit this for real (2026-09-12): he tapped an older "حددلها موظف
-      // مسؤول" bubble and it silently registered his WhatsApp vote client-side
+      // Basim hit this for real (2026-09-12): he tapped an older "\u062d\u062f\u062f\u0644\u0647\u0627 \u0645\u0648\u0638\u0641
+      // \u0645\u0633\u0624\u0648\u0644" bubble and it silently registered his WhatsApp vote client-side
       // while the server rejected it as stale, with no explanation. Spell out
       // which bubble is live, exactly like unclaimed_task already does.
-      const staleNote = "\n⚠️ إذا في استطلاع تصويت أقدم من هذه الرسالة لنفس المهمة، هو منتهي الصلاحية — رد من استطلاع هذه الرسالة تحديدًا.";
+      // Kept one-per-task on purpose: each option in unownedTaskPoll is a
+      // different EMPLOYEE, so several tasks cannot share one poll the way
+      // taskPickerPoll's task options can.
+      const staleNote = "\n\u26a0\ufe0f \u0625\u0630\u0627 \u0641\u064a \u0627\u0633\u062a\u0637\u0644\u0627\u0639 \u062a\u0635\u0648\u064a\u062a \u0623\u0642\u062f\u0645 \u0645\u0646 \u0647\u0630\u0647 \u0627\u0644\u0631\u0633\u0627\u0644\u0629 \u0644\u0646\u0641\u0633 \u0627\u0644\u0645\u0647\u0645\u0629\u060c \u0647\u0648 \u0645\u0646\u062a\u0647\u064a \u0627\u0644\u0635\u0644\u0627\u062d\u064a\u0629 \u2014 \u0631\u062f \u0645\u0646 \u0627\u0633\u062a\u0637\u0644\u0627\u0639 \u0647\u0630\u0647 \u0627\u0644\u0631\u0633\u0627\u0644\u0629 \u062a\u062d\u062f\u064a\u062f\u064b\u0627.";
       plans.push({ id: randomBytes(8).toString("hex"), kind: "unowned_task", targetUser: owner.id, entityId: task.id, to: `${ownerNumber}@s.whatsapp.net`,
-        text: `⚠️ يا باسم، مهمة «${clean(task.title)}» ما إلها موظف مسؤول.${autoReminderNotes(snapshot.comments as ReminderNote[], task.id)}${staleNote}`, choices: unownedTaskPoll(task.id, users, owner.id, at) });
+        text: `\u26a0\ufe0f \u064a\u0627 \u0628\u0627\u0633\u0645\u060c \u0645\u0647\u0645\u0629 \u00ab${clean(task.title)}\u00bb \u0645\u0627 \u0625\u0644\u0647\u0627 \u0645\u0648\u0638\u0641 \u0645\u0633\u0624\u0648\u0644.${autoReminderNotes(snapshot.comments as ReminderNote[], task.id)}${staleNote}`, choices: unownedTaskPoll(task.id, users, owner.id, at) });
     }
+  }
+  for (const [userId, entry] of unclaimed) {
+    const many = entry.tasks.length > 1;
+    const choices = many ? taskPickerPoll(entry.tasks, at) : autoReminderPoll(entry.tasks, entry.name, at);
+    const body = many
+      ? `\u23f3 \u064a\u0627 ${clean(entry.name)}\u060c \u0639\u0646\u062f\u0643 ${entry.tasks.length} \u0645\u0647\u0627\u0645 \u0644\u0633\u0627 \u0628\u0627\u0646\u062a\u0638\u0627\u0631 \u0631\u062f\u0643:\n\n${pickerLines(entry.tasks, snapshot.comments as ReminderNote[])}\n\n\u0627\u0636\u063a\u0637 \u0639\u0644\u0649 \u0627\u0644\u0645\u0647\u0645\u0629 \u0645\u0646 \u0627\u0644\u062a\u0635\u0648\u064a\u062a \u062a\u062d\u062a \u0648\u0628\u064a\u062c\u064a\u0643 \u062e\u064a\u0627\u0631\u0627\u062a\u0647\u0627.`
+      : `\u23f3 \u064a\u0627 ${clean(entry.name)}\u060c \u0645\u0647\u0645\u0629 \u00ab${clean(entry.tasks[0].title)}\u00bb \u0644\u0633\u0627 \u0628\u0627\u0646\u062a\u0638\u0627\u0631 \u0631\u062f\u0643.${autoReminderNotes(snapshot.comments as ReminderNote[], entry.tasks[0].id)}`;
+    plans.push({ id: randomBytes(8).toString("hex"), kind: "unclaimed_task", targetUser: userId, entityId: null, to: `${entry.number}@s.whatsapp.net`,
+      text: `${body}\n\n${TASK_COMMANDS_LEGEND}`, ...(choices ? { choices } : {}) });
   }
 
   if (hour < (config.workStartHour ?? 9) || hour >= (config.workEndHour ?? 18)) return plans;
   const overdueTasks: ManagementTask[] = [];
+  // Same per-person collapse the unclaimed nudge above got, and for the same
+  // reason: this used to push one message + one poll per task, so a person
+  // with several late tasks got a stack of near-identical bubbles. The
+  // "one nudge per person per day, never overdue stacked on top of silent"
+  // rule that was already intended here is now enforced by the dedup key
+  // itself -- (kind, user, null) rather than (kind, user, taskId).
+  const nudges = new Map<string, { number: string; name: string; overdue: ManagementTask[]; silent: ManagementTask[] }>();
   for (const task of snapshot.tasks) {
     if (task.archivedAt || ["completed", "approval"].includes(task.status) || !task.owner) continue;
     const userId = userIdByName.get(task.owner); const number = userId ? numberOf(userId) : null;
@@ -230,18 +286,35 @@ export function planFollowups(db: DatabaseSync, config: FollowupConfig, at: numb
     const expectedPassed = !!task.expectedAt && task.expectedAt < today;
     const silent = task.status === "progress" && (task.lastUpdateAt ?? task.startedAt ?? task.createdAt) < at - SILENT_AFTER;
     if (overdue) overdueTasks.push(task);
-    // One nudge per task per day, whatever its kind: never stack overdue + silent on the same person.
-    const nudgedToday = alreadySent(db, "overdue_task", userId, task.id, at - DAY) || alreadySent(db, "silent_task", userId, task.id, at - DAY);
-    if (nudgedToday) continue;
-    if (overdue || expectedPassed) {
-      const choices = autoReminderPoll([task], task.owner, at);
-      plans.push({ id: randomBytes(8).toString("hex"), kind: "overdue_task", targetUser: userId, entityId: task.id, to: `${number}@s.whatsapp.net`,
-        text: `⏰ يا ${clean(task.owner)}، مهمة «${clean(task.title)}» كان موعدها ${task.dueDate ?? task.expectedAt} ولم تُغلق بعد.${autoReminderNotes(snapshot.comments as ReminderNote[], task.id)}\nوين وصلت؟ إذا بدك تمديد اضغط «تمديد التاريخ» واختار المدة.`, ...(choices ? { choices } : {}) });
-    } else if (silent && !alreadySent(db, "silent_task", userId, task.id, at - 2 * DAY)) {
-      const choices = autoReminderPoll([task], task.owner, at);
-      plans.push({ id: randomBytes(8).toString("hex"), kind: "silent_task", targetUser: userId, entityId: task.id, to: `${number}@s.whatsapp.net`,
-        text: `👋 يا ${clean(task.owner)}، ما وصلني تحديث على «${clean(task.title)}» من 3 أيام.${autoReminderNotes(snapshot.comments as ReminderNote[], task.id)}\nوين وصلت؟ أو سجّل صوت وأنا أحدّثها.`, ...(choices ? { choices } : {}) });
+    // One nudge per person per day, whatever its kind: never stack overdue + silent on the same person.
+    if (alreadySent(db, "overdue_task", userId, null, at - DAY) || alreadySent(db, "silent_task", userId, null, at - DAY)) continue;
+    const entry = nudges.get(userId) ?? { number, name: task.owner, overdue: [], silent: [] };
+    if (overdue || expectedPassed) entry.overdue.push(task);
+    else if (silent) entry.silent.push(task);
+    else continue;
+    nudges.set(userId, entry);
+  }
+  for (const [userId, entry] of nudges) {
+    const tasks = [...entry.overdue, ...entry.silent];
+    if (!tasks.length) continue;
+    const kind = entry.overdue.length ? "overdue_task" as const : "silent_task" as const;
+    const choices = tasks.length > 1 ? taskPickerPoll(tasks, at) : autoReminderPoll(tasks, entry.name, at);
+    const comments = snapshot.comments as ReminderNote[];
+    let text: string;
+    if (tasks.length === 1) {
+      const task = tasks[0];
+      text = kind === "overdue_task"
+        ? `\u23f0 \u064a\u0627 ${clean(entry.name)}\u060c \u0645\u0647\u0645\u0629 \u00ab${clean(task.title)}\u00bb \u0643\u0627\u0646 \u0645\u0648\u0639\u062f\u0647\u0627 ${task.dueDate ?? task.expectedAt} \u0648\u0644\u0645 \u062a\u064f\u063a\u0644\u0642 \u0628\u0639\u062f.${autoReminderNotes(comments, task.id)}\n\u0648\u064a\u0646 \u0648\u0635\u0644\u062a\u061f \u0625\u0630\u0627 \u0628\u062f\u0643 \u062a\u0645\u062f\u064a\u062f \u0627\u0636\u063a\u0637 \u00ab\u062a\u0645\u062f\u064a\u062f \u0627\u0644\u062a\u0627\u0631\u064a\u062e\u00bb \u0648\u0627\u062e\u062a\u0627\u0631 \u0627\u0644\u0645\u062f\u0629.`
+        : `\ud83d\udc4b \u064a\u0627 ${clean(entry.name)}\u060c \u0645\u0627 \u0648\u0635\u0644\u0646\u064a \u062a\u062d\u062f\u064a\u062b \u0639\u0644\u0649 \u00ab${clean(task.title)}\u00bb \u0645\u0646 3 \u0623\u064a\u0627\u0645.${autoReminderNotes(comments, task.id)}\n\u0648\u064a\u0646 \u0648\u0635\u0644\u062a\u061f \u0623\u0648 \u0633\u062c\u0651\u0644 \u0635\u0648\u062a \u0648\u0623\u0646\u0627 \u0623\u062d\u062f\u0651\u062b\u0647\u0627.`;
+    } else {
+      const sections = [
+        entry.overdue.length ? `*\ud83d\udd34 \u0645\u062a\u0623\u062e\u0631\u0629*\n${pickerLines(entry.overdue, comments)}` : "",
+        entry.silent.length ? `*\ud83d\udd4a \u0628\u062f\u0648\u0646 \u062a\u062d\u062f\u064a\u062b*\n${pickerLines(entry.silent, comments)}` : "",
+      ].filter(Boolean).join("\n\n");
+      text = `\u23f0 \u064a\u0627 ${clean(entry.name)}\u060c ${tasks.length} \u0645\u0647\u0627\u0645 \u0645\u062d\u062a\u0627\u062c\u0629 \u062a\u062d\u062f\u064a\u062b \u0645\u0646\u0643:\n\n${sections}\n\n\u0627\u0636\u063a\u0637 \u0639\u0644\u0649 \u0627\u0644\u0645\u0647\u0645\u0629 \u0645\u0646 \u0627\u0644\u062a\u0635\u0648\u064a\u062a \u062a\u062d\u062a \u0648\u0628\u064a\u062c\u064a\u0643 \u062e\u064a\u0627\u0631\u0627\u062a\u0647\u0627.`;
     }
+    plans.push({ id: randomBytes(8).toString("hex"), kind, targetUser: userId, entityId: null, to: `${entry.number}@s.whatsapp.net`,
+      text, ...(choices ? { choices } : {}) });
   }
   if (ownerNumber && !alreadySent(db, "stale_approval", owner.id, null, at - DAY)) {
     const stale = staleApprovals(db, at, STALE_APPROVAL_AFTER);

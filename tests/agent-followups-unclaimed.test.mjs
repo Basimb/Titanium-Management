@@ -41,7 +41,9 @@ test('an open task suggested to an employee nags that employee hourly, including
   const { db, config } = fixture(t);
   db.exec(`INSERT INTO tasks VALUES('t1','مهمة خالد','','yellow','open',NULL,'خالد',NULL,NULL,NULL,NULL,1,1,NULL,NULL)`);
   const plans = planFollowups(db, config, NIGHT);
-  const mine = plans.filter(p => p.kind === 'unclaimed_task' && p.targetUser === 'member' && p.entityId === 't1');
+  // One nudge per PERSON now (entityId null), not one per task -- see
+  // taskPickerPoll in agent-followups.ts for why the fan-out was collapsed.
+  const mine = plans.filter(p => p.kind === 'unclaimed_task' && p.targetUser === 'member' && p.entityId === null);
   assert.equal(mine.length, 1);
   assert.match(mine[0].text, /خالد/); assert.match(mine[0].text, /مهمة خالد/);
 });
@@ -50,18 +52,18 @@ test('the hourly nag never re-fires for the same task inside the same hour windo
   const { db, config } = fixture(t);
   db.exec(`INSERT INTO tasks VALUES('t1','مهمة خالد','','yellow','open',NULL,'خالد',NULL,NULL,NULL,NULL,1,1,NULL,NULL)`);
   migrateManagementActions(db); // creates agent_followups before this test inserts into it directly
-  db.prepare("INSERT INTO agent_followups (id,kind,target_user,entity_id,sent_at,response) VALUES ('x','unclaimed_task','member','t1',?,'sent')").run(NIGHT - 10 * 60_000);
+  db.prepare("INSERT INTO agent_followups (id,kind,target_user,entity_id,sent_at,response) VALUES ('x','unclaimed_task','member',NULL,?,'sent')").run(NIGHT - 10 * 60_000);
   const plans = planFollowups(db, config, NIGHT);
-  assert.equal(plans.filter(p => p.kind === 'unclaimed_task' && p.entityId === 't1').length, 0, 'sent 10 minutes ago -- too soon to repeat');
+  assert.equal(plans.filter(p => p.kind === 'unclaimed_task' && p.targetUser === 'member').length, 0, 'sent 10 minutes ago -- too soon to repeat');
 });
 
 test('the hourly nag fires again once an hour has actually passed', t => {
   const { db, config } = fixture(t);
   db.exec(`INSERT INTO tasks VALUES('t1','مهمة خالد','','yellow','open',NULL,'خالد',NULL,NULL,NULL,NULL,1,1,NULL,NULL)`);
   migrateManagementActions(db);
-  db.prepare("INSERT INTO agent_followups (id,kind,target_user,entity_id,sent_at,response) VALUES ('x','unclaimed_task','member','t1',?,'sent')").run(NIGHT - 61 * 60_000);
+  db.prepare("INSERT INTO agent_followups (id,kind,target_user,entity_id,sent_at,response) VALUES ('x','unclaimed_task','member',NULL,?,'sent')").run(NIGHT - 61 * 60_000);
   const plans = planFollowups(db, config, NIGHT);
-  assert.equal(plans.filter(p => p.kind === 'unclaimed_task' && p.entityId === 't1').length, 1);
+  assert.equal(plans.filter(p => p.kind === 'unclaimed_task' && p.targetUser === 'member').length, 1);
 });
 
 test('an open task with no suggested owner at all escalates to Basim hourly, including outside work hours', t => {
@@ -71,7 +73,7 @@ test('an open task with no suggested owner at all escalates to Basim hourly, inc
   const toBasim = plans.filter(p => p.kind === 'unowned_task' && p.targetUser === 'basem' && p.entityId === 't2');
   assert.equal(toBasim.length, 1);
   assert.match(toBasim[0].text, /باسم/); assert.match(toBasim[0].text, /مهمة بلا موظف/);
-  assert.equal(plans.filter(p => p.kind === 'unclaimed_task' && p.entityId === 't2').length, 0, 'no suggested owner -- never the employee-facing nag');
+  assert.equal(plans.filter(p => p.kind === 'unclaimed_task').length, 0, 'no suggested owner -- never the employee-facing nag');
 });
 
 // 2026-09-12, Basim: "وهاي التنبهات قلتلك تيجي تصويت مش هيك نصوص" -- this
@@ -98,7 +100,7 @@ test('the unclaimed-task nudge to the suggested owner carries the five-command l
   const { db, config } = fixture(t);
   db.exec(`INSERT INTO tasks VALUES('t1','مهمة خالد','','yellow','open',NULL,'خالد',NULL,NULL,NULL,NULL,1,1,NULL,NULL)`);
   const plans = planFollowups(db, config, NIGHT);
-  const mine = plans.find(p => p.kind === 'unclaimed_task' && p.targetUser === 'member' && p.entityId === 't1');
+  const mine = plans.find(p => p.kind === 'unclaimed_task' && p.targetUser === 'member');
   assert.match(mine.text, /🧭 أوامر المهام السريعة/);
   assert.match(mine.text, /5️⃣ 🔴 انهاء المهمة/);
 });

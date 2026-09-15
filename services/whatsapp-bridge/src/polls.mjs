@@ -149,6 +149,22 @@ export function createPollChoices({ store, config, proto, generateWAMessageConte
     }
   }
 
+  // Courtesy notice for a tap this bridge cannot honour -- see its call site
+  // in acceptVote below. Returns nothing and throws nothing: a notice must
+  // never change whether a vote was accepted.
+  async function notifyStale(key, row, { identity, authorize, onStale }) {
+    if (typeof onStale !== 'function') return;
+    try {
+      const sender = await resolvePhone(key.remoteJid, key.remoteJidAlt, identity);
+      if (!sender || sender === config.botNumber || !config.allowedNumbers.has(sender)) return;
+      // A known row must belong to the person tapping; an unknown one (the
+      // superseded case, where the row is already gone) can only be answered
+      // on the strength of the allowlist and authorize() below.
+      if (row && row.sender !== sender) return;
+      if (!await authorize(sender)) return;
+      await onStale({ chatJid: key.remoteJid, sender });
+    } catch { /* never let a courtesy notice break vote handling */ }
+  }
   // log(reason) mirrors sendQuestion's own diagnostics hook (default no-op):
   // every rejection here used to return bare `false` with nothing recorded
   // anywhere about *why*, which made a real tap that WhatsApp delivered but
@@ -157,7 +173,7 @@ export function createPollChoices({ store, config, proto, generateWAMessageConte
   // zero trace of the tap anywhere. reason is always one of the fixed
   // category strings below, never a raw transport exception, phone number,
   // message text/label or other secret -- same rule sendQuestion's log already follows.
-  async function acceptVote(message, event, { identity, activatedAt, authorize, log = () => {} }) {
+  async function acceptVote(message, event, { identity, activatedAt, authorize, log = () => {}, onStale = null }) {
     cleanup();
     const key = message?.key, content = pollContent(message), update = content?.pollUpdateMessage;
     if (event?.type !== 'notify' || event.requestId != null || !key || key.fromMe !== false || !update
@@ -167,7 +183,21 @@ export function createPollChoices({ store, config, proto, generateWAMessageConte
     const creation = update.pollCreationMessageKey;
     if (!creation || creation.fromMe !== true || !identifier(creation.id) || !privateJid(creation.remoteJid)) { log('creation_key_invalid'); return false; }
     const row = db.prepare('SELECT * FROM choice_polls WHERE id=?').get(creation.id);
-    if (!row || !['sent', 'uncertain'].includes(row.state) || row.consumed_message_id || !row.message_proto || row.expires_at <= now()) { log('poll_not_found_or_consumed'); return false; }
+    if (!row || !['sent', 'uncertain'].includes(row.state) || row.consumed_message_id || !row.message_proto || row.expires_at <= now()) {
+      log('poll_not_found_or_consumed');
+      // Basim (2026-09-15): this branch fired 61 times in a single day on the
+      // live bridge and did nothing at all -- WhatsApp keeps every poll bubble
+      // tappable forever, so a tap on one this bridge no longer holds live
+      // (expired, already used, or superseded by a resend) was swallowed with
+      // zero feedback. From the chat it looked exactly like the bot had
+      // stopped working, so people kept tapping and kept getting new reminder
+      // polls on top. Tell them instead. Deliberately AFTER re-resolving and
+      // re-authorizing the sender against the same allowlist a real vote must
+      // pass, so an unknown or spoofed envelope still gets nothing back, and
+      // the notice itself carries no task, label or other content.
+      await notifyStale(key, row, { identity, authorize, onStale });
+      return false;
+    }
     const sentAt = Number(message.messageTimestamp) * 1000, votedAt = Number(update.senderTimestampMs);
     // Timestamp is supplementary: it is not authenticated by poll GCM. Server question
     // expiry/current version plus the persisted one-use poll are the authority.

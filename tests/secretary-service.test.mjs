@@ -786,7 +786,7 @@ test('a proactive task-close approval notification carries a tappable poll, and 
  const approvalId=f.db.prepare("SELECT id FROM approvals WHERE type='task_close' AND status='pending'").get().id;
  assert.equal(choices.id,`APR${approvalId}`);
  assert.deepEqual(choices.options.map(o=>o.id),[`APR${approvalId}Y`,`APR${approvalId}N`]);
- assert.equal(choices.expiresAt-f.now,60*60_000,'a WhatsApp poll cannot outlive a 1-hour expiry');
+ assert.equal(choices.expiresAt-f.now,24*60*60_000,'24h is the ceiling the bridge enforces (MAX_POLL_LIFETIME_MS); a shorter one silently drops late taps');
  const admin={senderNumber:'12025550103'};
  const tapped=await f.run(undefined,{...admin,choice:{questionId:choices.id,optionId:`APR${approvalId}Y`}},
    async()=>{throw Error('a poll tap must resolve the approval directly, never ask the model');});

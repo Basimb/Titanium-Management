@@ -90,6 +90,7 @@ export function createBridgeRuntime({ config, store, auth, makeWASocket, jidNorm
   }
 
   const voiceReplyAt = new Map();
+  const stalePollReplyAt = new Map();
   // Private-chat only, authorized senders only, one notice per minute per sender.
   // Tells the person the voice note was not processed instead of silently dropping it.
   async function voiceRejectionReply(message, event, identity) {
@@ -108,6 +109,23 @@ export function createBridgeRuntime({ config, store, auth, makeWASocket, jidNorm
         : 'ما قدرت أسمع الرسالة الصوتية. جرّب تسجّلها مرة ثانية أو اكتبها لي.';
       await socket.sendMessage(remote, { text, linkPreview: null });
     } catch { /* never let a courtesy reply break intake */ }
+  }
+
+  // A tap on a poll bubble this bridge no longer holds live (expired, already
+  // used, or superseded by a resend) used to be dropped in complete silence --
+  // see the poll_not_found_or_consumed branch in polls.mjs acceptVote for what
+  // that actually looked like in the field. Same shape as voiceRejectionReply
+  // above: one short courtesy line, rate-limited per number, and never allowed
+  // to throw into vote handling. The text names no task and echoes nothing
+  // from the poll.
+  async function stalePollReply(remote, number) {
+    try {
+      if (typeof remote !== 'string' || !remote || remote.endsWith('@g.us') || !ready || stopped) return;
+      const last = stalePollReplyAt.get(number) || 0;
+      if (now() - last < 10 * 60_000) return;
+      stalePollReplyAt.set(number, now());
+      await socket.sendMessage(remote, { text: '\u231b \u0647\u0627\u0644\u062a\u0635\u0648\u064a\u062a \u0645\u0627 \u0639\u0627\u062f \u0641\u0639\u0651\u0627\u0644 \u2014 \u064a\u0627 \u0625\u0646\u0647 \u0627\u0646\u062a\u0647\u062a \u0635\u0644\u0627\u062d\u064a\u062a\u0647 \u064a\u0627 \u0625\u0646\u0647 \u0625\u062c\u0627 \u0628\u062f\u0644\u0647 \u062a\u0635\u0648\u064a\u062a \u0623\u062d\u062f\u062b.\n\u0627\u0636\u063a\u0637 \u0639\u0644\u0649 \u0622\u062e\u0631 \u0631\u0633\u0627\u0644\u0629 \u0648\u0635\u0644\u062a\u0643\u060c \u0623\u0648 \u0627\u0643\u062a\u0628 \u00ab\u0634\u0648 \u0645\u0647\u0627\u0645\u064a\u00bb \u0648\u0628\u0631\u062c\u0651\u0639\u0644\u0643 \u0627\u0644\u062e\u064a\u0627\u0631\u0627\u062a \u0645\u0646 \u062c\u062f\u064a\u062f.', linkPreview: null });
+    } catch { /* never let a courtesy reply break vote handling */ }
   }
 
   function stop(code) {
@@ -205,7 +223,8 @@ export function createBridgeRuntime({ config, store, auth, makeWASocket, jidNorm
             await polls.acceptVote(message, event, { identity, activatedAt,
               authorize: async sender => ready && !stopped && current === socket && config.tasksEnabled !== false
                 && await isActiveNumber(sender) && ready && !stopped && current === socket,
-              log: reason => output.info(`Titanium choices (vote): rejected, reason=${reason}.`) });
+              log: reason => output.info(`Titanium choices (vote): rejected, reason=${reason}.`),
+              onStale: ({ chatJid, sender }) => stalePollReply(chatJid, sender) });
             continue;
           }
           let incoming = await selectIncoming(message, event, config, identity, now(), activatedAt);

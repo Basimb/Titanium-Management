@@ -35,7 +35,12 @@ const APPROVAL_CHOICE_HINT = "\n\n🟢 اعتماد: اكتب «اعتمد»\n�
 // instructions in the same message keep working after that, or if the poll
 // is missed/dismissed.
 function approvalDecisionPoll(approval: Approval, at: number): SecretaryChoices {
-  return { id: `APR${approval.id}`, title: "قرارك على الطلب؟", expiresAt: at + 60 * 60_000,
+// Basim (2026-09-15): one hour, while WhatsApp keeps the bubble tappable
+// forever, meant a late tap was rejected in total silence. Every option id
+// here already carries the exact task/approval, so a late tap still resolves
+// correctly -- 24h is the ceiling the bridge enforces (MAX_POLL_LIFETIME_MS).
+  const POLL_LIFETIME_MS = 24 * 60 * 60_000;
+  return { id: `APR${approval.id}`, title: "قرارك على الطلب؟", expiresAt: at + POLL_LIFETIME_MS,
     options: [{ id: `APR${approval.id}Y`, label: "🟢 اعتماد" }, { id: `APR${approval.id}N`, label: "🔴 رفض" }] };
 }
 

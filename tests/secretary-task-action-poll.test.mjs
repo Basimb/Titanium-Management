@@ -61,7 +61,7 @@ test('an unclaimed task suggested to an employee offers a CLAIM/TRANSFER poll, n
   assert.ok(r.choices, 'an unclaimed suggested task must offer a poll');
   assert.equal(r.choices.id, `TSKQ${OPEN}`);
   assert.deepEqual(r.choices.options.map(o => o.id), [`TSK${OPEN}CLAIM`, `TSK${OPEN}TRANSFER`, `TSK${OPEN}EDIT`]);
-  assert.equal(r.choices.expiresAt - f.now, 60 * 60_000, 'a WhatsApp poll cannot outlive a 1-hour expiry');
+  assert.equal(r.choices.expiresAt - f.now, 24 * 60 * 60_000, '24h is the ceiling the bridge enforces (MAX_POLL_LIFETIME_MS); a shorter one silently drops late taps');
 });
 test('a task already in progress offers the full FINISH/NOTE/TRANSFER/EDIT/EXTEND poll', async t => {
   const f = fixture(t);
@@ -264,7 +264,7 @@ test('the standalone command legend carries a tappable poll of its own five numb
   const choices = JSON.parse(legend.choicesJson);
   assert.equal(choices.id, 'LGDQ');
   assert.deepEqual(choices.options.map(o => o.id), ['LGDADD', 'LGDNOTE', 'LGDTRANSFER', 'LGDEXTEND', 'LGDFINISH']);
-  assert.equal(choices.expiresAt - f.now, 60 * 60_000, 'a WhatsApp poll cannot outlive a 1-hour expiry');
+  assert.equal(choices.expiresAt - f.now, 24 * 60 * 60_000, '24h is the ceiling the bridge enforces (MAX_POLL_LIFETIME_MS); a shorter one silently drops late taps');
 });
 // Basim hit this for real: he tapped the legend's generic "انهاء المهمة" on
 // a message about a brand-new, still-unclaimed task, and the model quietly

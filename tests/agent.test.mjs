@@ -108,15 +108,15 @@ test("member cannot edit priority directly; priority_change request goes to owne
 // option ids embed the approval id -- see approvalDecisionPoll -- so a tap
 // resolves deterministically, and WhatsApp itself refuses a poll that
 // outlives an hour, so expiresAt must never exceed that.
-test("every proactive approval request attaches a tappable poll keyed to its own approval id, capped at a 1-hour expiry", t => {
+test("every proactive approval request attaches a tappable poll keyed to its own approval id, capped at the bridge's 24-hour ceiling", t => {
   const db = fixture(t);
   const extension = requestDeadlineExtension(db, khaled, { taskId: "t1", newDueDate: "2026-09-07", reason: "تأخر المحامي" }, { now: T0 });
   assert.equal(extension.choices.id, `APR${extension.approval.id}`);
   assert.deepEqual(extension.choices.options.map(option => option.id), [`APR${extension.approval.id}Y`, `APR${extension.approval.id}N`]);
-  assert.equal(extension.choices.expiresAt, T0 + 60 * 60_000);
+  assert.equal(extension.choices.expiresAt, T0 + 24 * 60 * 60_000);
   const ownership = requestTaskOwnership(db, khaled, { taskId: "t2" }, { now: T0 + 1 });
   assert.equal(ownership.choices.id, `APR${ownership.approval.id}`);
-  assert.equal(ownership.choices.expiresAt, T0 + 1 + 60 * 60_000);
+  assert.equal(ownership.choices.expiresAt, T0 + 1 + 24 * 60 * 60_000);
   const close = requestTaskClose(db, khaled, { taskId: "t1", result: "خلص" }, { now: T0 + 2 });
   assert.equal(close.choices.id, `APR${close.approval.id}`);
   assert.notEqual(close.choices.id, ownership.choices.id, "each approval gets its own poll id, never a shared one");
@@ -572,7 +572,7 @@ test("unclaimed task: hourly nudge to its suggested owner during work hours, sto
   assert.equal(planFollowups(db, config, Date.UTC(2026, 8, 10, 20, 0)).filter(plan => plan.kind === "unclaimed_task").length, 1, "unclaimed_task now nags around the clock, including outside working hours");
 
   // Once delivered, no duplicate within the same hour -- but it fires again an hour later if still unclaimed.
-  db.prepare("INSERT INTO agent_followups (id,kind,target_user,entity_id,sent_at,response) VALUES ('nudge1','unclaimed_task','shadi','t6',?,'sent')").run(at);
+  db.prepare("INSERT INTO agent_followups (id,kind,target_user,entity_id,sent_at,response) VALUES ('nudge1','unclaimed_task','shadi',NULL,?,'sent')").run(at);
   assert.equal(planFollowups(db, config, at + 30 * 60_000).filter(plan => plan.kind === "unclaimed_task").length, 0, "no duplicate within the same hour");
   assert.equal(planFollowups(db, config, at + 60 * 60_000 + 1000).filter(plan => plan.kind === "unclaimed_task").length, 1, "fires again once the hour has passed");
 

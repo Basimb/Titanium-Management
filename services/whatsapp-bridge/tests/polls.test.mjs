@@ -425,3 +425,63 @@ test('ambiguous poll transport failure keeps the successful text, does not repea
   assert.equal(h.runtime.status().ready, true);
   assert.doesNotMatch(h.output.join('\n'), /SYNTHETIC_PRIVATE_RELAY_ERROR/);
 });
+
+// Basim (2026-09-15): the live bridge logged 61 `poll_not_found_or_consumed`
+// rejections in a single day and sent nothing back for any of them. WhatsApp
+// keeps every poll bubble tappable forever, so a tap on one this bridge no
+// longer holds live just vanished -- which from the chat is indistinguishable
+// from the bot being broken, so people kept tapping and kept accumulating
+// newer reminder polls on top ("تصويتات مشطبوكه ببعض"). The tap is still
+// rejected; what changed is that the person is now told why.
+test('a tap on a poll this bridge no longer holds live tells the tapper, once, and still rejects the vote', async t => {
+  const f = fixture(t);
+  await f.send();
+  const message = f.vote();
+  f.tick(400_000); // past the poll's own 300s validity
+  const stale = [];
+  assert.equal(await f.accept(message, { type: 'notify' }, { onStale: entry => { stale.push(entry); } }), false,
+    'the notice never turns a dead poll into an accepted vote');
+  assert.deepEqual(stale, [{ chatJid: `${MEMBER}@s.whatsapp.net`, sender: MEMBER }]);
+});
+
+test('an already-consumed poll notifies too -- the same bubble tapped twice is the commonest case', async t => {
+  const f = fixture(t);
+  await f.send();
+  const first = f.vote();
+  assert.equal(await f.accept(first), true);
+  const stale = [];
+  const again = { ...first, key: { ...first.key, id: 'VOTE_TEST_2' } };
+  assert.equal(await f.accept(again, { type: 'notify' }, { onStale: entry => { stale.push(entry); } }), false);
+  assert.equal(stale.length, 1);
+});
+
+test('a tap from a number outside the allowlist is never answered', async t => {
+  const f = fixture(t);
+  await f.send();
+  const message = f.vote();
+  f.tick(400_000);
+  f.setActive(false); // authorize() now refuses this sender
+  const stale = [];
+  assert.equal(await f.accept(message, { type: 'notify' }, { onStale: entry => { stale.push(entry); } }), false);
+  assert.deepEqual(stale, [], 'a courtesy notice must never reach an unauthorized tapper');
+});
+
+test('a malformed envelope is rejected without any notice at all', async t => {
+  const f = fixture(t);
+  await f.send();
+  const message = f.vote();
+  const stale = [];
+  // fromMe:true is not a vote this bridge ever accepts -- it never reaches the
+  // stale branch, so nothing is sent back to a spoofable envelope either.
+  const spoofed = { ...message, key: { ...message.key, fromMe: true } };
+  assert.equal(await f.accept(spoofed, { type: 'notify' }, { onStale: entry => { stale.push(entry); } }), false);
+  assert.deepEqual(stale, []);
+});
+
+test('a failing notice callback never changes the outcome of vote handling', async t => {
+  const f = fixture(t);
+  await f.send();
+  const message = f.vote();
+  f.tick(400_000);
+  assert.equal(await f.accept(message, { type: 'notify' }, { onStale: () => { throw new Error('boom'); } }), false);
+});

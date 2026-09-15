@@ -61,7 +61,11 @@ const TASK_COMMANDS_LEGEND = "🧭 أوامر المهام السريعة — ا
 // taskActionPoll (bound to one task's id in its option ids), this poll is
 // identical everywhere it's attached, so it needs no task/actor context.
 function taskCommandsLegendPoll(now: number): SecretaryChoices {
-  return { id: "LGDQ", title: "🧭 أو اضغط أي أمر مباشرة:", expiresAt: now + 60 * 60_000, options: [
+// Basim (2026-09-15): one hour, while WhatsApp keeps the bubble tappable
+// forever, meant a late tap was rejected in total silence. Every option id
+// here already carries the exact task/approval, so a late tap still resolves
+// correctly -- 24h is the ceiling the bridge enforces (MAX_POLL_LIFETIME_MS).
+  return { id: "LGDQ", title: "🧭 أو اضغط أي أمر مباشرة:", expiresAt: now + TASK_CLOSE_POLL_LIFETIME_MS, options: [
     { id: "LGDADD", label: "1️⃣ 🟢 اضافة مهمة" }, { id: "LGDNOTE", label: "2️⃣ 🔵 اضافة ملاحظة" },
     { id: "LGDTRANSFER", label: "3️⃣ 🟣 تحويل المهمة" }, { id: "LGDEXTEND", label: "4️⃣ 🟠 تمديد التاريخ" },
     { id: "LGDFINISH", label: "5️⃣ 🔴 انهاء المهمة" }] };
@@ -908,6 +912,22 @@ function parseTaskActionPollChoice(event: Event): { taskId: string; action: "cla
 // parseTaskCloseDecisionPollChoice above -- a tap resolves deterministically
 // with nothing to look up against a model and no live state that could have
 // gone stale.
+// A reminder's task-picker poll (taskPickerPoll in agent-followups.ts): one
+// poll standing in for what used to be one whole message + one poll PER TASK.
+// The question id is a constant on purpose -- a resend supersedes the previous
+// picker bubble, so nobody ever holds two live pickers -- so the task id rides
+// in the OPTION id instead, which keeps a tap just as deterministic as
+// parseApprovalPollChoice/parseTaskActionPollChoice: nothing is looked up
+// against a model and no live state can have gone stale.
+function parseTaskPickerChoice(event: Event): { taskId: string } | null {
+  const choice = event.choice;
+  if (!choice || choice.questionId !== "TPKQ" || !choice.optionId.startsWith("TPK")) return null;
+  const taskId = choice.optionId.slice(3);
+  // See parseApprovalPollChoice's comment above -- same fix, same reason:
+  // legacy task ids ("dl-3") are not UUIDs and a stricter pattern here
+  // silently dropped real taps on them.
+  return /^[a-zA-Z0-9_-]{1,200}$/.test(taskId) ? { taskId } : null;
+}
 function parseUnownedTaskPollChoice(event: Event): { taskId: string; target: string } | null {
   const choice = event.choice;
   if (!choice || !choice.questionId.startsWith("UNOWNQ")) return null;
@@ -968,7 +988,7 @@ function taskActionPoll(task: { id: string; title: string; status: string; owner
   if (task.status === "progress" && task.owner === actorName) options.push({ id: `${base}FINISH`, label: "✅ خلصت المهمة" }, { id: `${base}NOTE`, label: "📝 أضيف ملاحظة" });
   if (task.status === "open" || task.status === "progress") options.push({ id: `${base}TRANSFER`, label: "🔄 حوّلها لحدا غيري" }, { id: `${base}EDIT`, label: "🔧 غيّر الأولوية" });
   if (task.status === "progress" && task.owner === actorName) options.push({ id: `${base}EXTEND`, label: "🕐 بدي تمديد" });
-  return options.length >= 2 ? { id: `TSKQ${task.id}`, title: "شو بدك تعمل بهالمهمة؟", expiresAt: now + 60 * 60_000, options } : undefined;
+  return options.length >= 2 ? { id: `TSKQ${task.id}`, title: "شو بدك تعمل بهالمهمة؟", expiresAt: now + TASK_CLOSE_POLL_LIFETIME_MS, options } : undefined;
 }
 // Same poll, built from a fresh DB row rather than a pre-action snapshot --
 // dispatchManagementNotice's private notice fires right after a
@@ -1302,6 +1322,28 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
   // extended here to "submit" too. Open to any active actor in their own
   // private chat, not just Basim: these are two everyday actions any
   // employee already has today, just reachable with a tap instead of typing.
+  // A tapped task in a reminder's picker poll (see parseTaskPickerChoice
+  // above): it names WHICH task, nothing more, so the answer is that task's
+  // ordinary card plus its own action poll -- exactly what the person used to
+  // receive as one of several stacked messages. Open to any active employee in
+  // their own private chat, same as the task-action poll below, and the reply's
+  // poll is a TSKQ one, which is the single kind lookup() already lets a
+  // non-admin replay.
+  const taskPickerChoice = parseTaskPickerChoice(event);
+  if (taskPickerChoice && actor.active === 1 && event.groupId === null && !event.replyToMessageId) {
+    return transaction(db, () => {
+      const fresh = actorFor(db, event, config);
+      if (!config.enabled || !fresh || JSON.stringify(fresh) !== JSON.stringify(actor)) return { status: "denied", reply: "" };
+      const duplicate = lookup(db, event, fresh, stateFor(db, fresh)); if (duplicate) return duplicate;
+      const state = stateFor(db, fresh);
+      const task = state.tasks.find(t => t.id === taskPickerChoice.taskId);
+      if (!task) return save(db, event, fresh, { status: "clarify", reply: "\u0647\u0627\u064a \u0627\u0644\u0645\u0647\u0645\u0629 \u0645\u0627 \u0639\u0627\u062f\u062a \u0645\u062a\u0627\u062d\u0629." }, [], now);
+      const choices = taskActionPoll(task, fresh.name, now);
+      return save(db, event, fresh, { status: "summary",
+        reply: `${secretaryTaskCard(task, state, now, true)}\n\n\u0634\u0648 \u0628\u062f\u0643 \u062a\u0639\u0645\u0644 \u0641\u064a\u0647\u0627\u061f`, taskId: task.id,
+        ...(choices ? { choices } : {}) }, ["t:" + task.id], now);
+    });
+  }
   const taskActionPollChoice = parseTaskActionPollChoice(event);
   if (taskActionPollChoice && (taskActionPollChoice.action === "claim" || taskActionPollChoice.action === "submit")
       && actor.active === 1 && event.groupId === null && !event.replyToMessageId) {
