@@ -7,7 +7,7 @@ import { directTaskCreationIntent, emptySecretaryIntent, validateSecretaryIntent
 import { priorityTaskQuery, type PriorityTaskQuery } from "./secretary-priority-query.ts";
 import { AGENT_KINDS } from "./secretary-intent.ts";
 import { applyDecision, createTasks, handleAgentIntent, type AgentResult, type TaskDraftTask } from "./secretary-agent.ts";
-import { listApprovals, requestTaskCreate } from "./approvals.ts";
+import { listApprovals, requestDeadlineExtension, requestTaskCreate } from "./approvals.ts";
 import { activeRules } from "./rules.ts";
 import { searchKnowledge, formatKnowledgeHits } from "./knowledge.ts";
 import { migrateSecretaryMemory, rememberSecretaryMistake, recallSecretaryMemory, personalMemoryCommand, updatePersonalMemory, personalMemory } from "./secretary-memory.ts";
@@ -112,6 +112,34 @@ const LEGEND_MANY_TASK = "عندك أكثر من مهمة تنطبق، أي وح
 // choice among the SAME eligible tasks, holding the rest of that command
 // (a note's text, a transfer's target owner, ...) in secretary_task_choice
 // until the tap says which task it was about all along.
+// Basim (2026-09-15): "بس يطلب تمديد اعطيه خيارات يوم - يومين - 5 ايام فقط ...
+// مشان نتجاوز مشكله الذكاء" -- the duration used to be a free-text answer
+// ("اكتب عدد الأيام أو التاريخ الجديد") handed to the model, which is exactly
+// where a vague reply ("بعد العيد", "اسبوع تقريبا") became a guessed date. Three
+// fixed durations instead, counted from TODAY (his explicit rule) and
+// computed in code, never by the model. Same one-tap-resolves-it shape as
+// parseTaskActionPollChoice/parseApprovalPollChoice: the task id is the whole
+// remainder of the questionId, so a tap needs nothing looked up against a
+// model and no live state that could have gone stale.
+const EXTENSION_DAY_OPTIONS = [1, 2, 5] as const;
+const EXTENSION_DAY_LABELS: Record<number, string> = { 1: "🟢 يوم واحد", 2: "🟡 يومين", 5: "🟠 ٥ أيام" };
+function extensionDurationPoll(taskId: string, now: number): SecretaryChoices {
+  // Same 24h ceiling taskCloseDecisionPoll uses and the whatsapp-bridge caps
+  // every poll at -- an employee asking for more time rarely taps back within
+  // the 10-minute CONFIRM_MS window the old text question was bounded by.
+  return { id: `EXTQ${taskId}`, title: "لأي مدة بدك تمدد الموعد؟", expiresAt: now + TASK_CLOSE_POLL_LIFETIME_MS,
+    options: EXTENSION_DAY_OPTIONS.map(days => ({ id: `EXT${taskId}D${days}`, label: EXTENSION_DAY_LABELS[days] })) };
+}
+function parseExtensionDurationChoice(event: Event): { taskId: string; days: number } | null {
+  const choice = event.choice;
+  if (!choice || !choice.questionId.startsWith("EXTQ")) return null;
+  const taskId = choice.questionId.slice(4);
+  if (!/^[a-zA-Z0-9_-]{1,200}$/.test(taskId)) return null;
+  const prefix = `EXT${taskId}D`;
+  if (!choice.optionId.startsWith(prefix)) return null;
+  const days = Number(choice.optionId.slice(prefix.length));
+  return (EXTENSION_DAY_OPTIONS as readonly number[]).includes(days) ? { taskId, days } : null;
+}
 function taskChoicePoll(token: string, candidates: Task[], now: number): SecretaryChoices {
   return { id: `TDQ${token}`, title: LEGEND_MANY_TASK, expiresAt: now + CONFIRM_MS,
     options: candidates.map((task, index) => ({ id: `TDQ${token}_${index}`, label: clean(task.title, 90) })) };
@@ -267,7 +295,14 @@ function resolveTaskCommandsLegendChoice(db: DatabaseSync, event: Event, config:
   const actor = digitActor ?? actorFor(db, event, config);
   if (!actor) return { ...event, choice: undefined };
   const candidates = legendCandidates(stateFor(db, actor), actor.name, choice.optionId);
-  if (candidates.length === 1) return { ...event, text: legendRewriteText(choice.optionId, candidates[0].title), choice: undefined };
+  // LGDEXTEND is the one option whose remaining question ("how long?") is now
+  // answered by a fixed-duration poll rather than by the model (Basim,
+  // 2026-09-15). Rewriting a single candidate to text here would hand that
+  // question straight back to the model -- the exact guessing this replaced --
+  // so leave the choice set and let the dedicated branch below offer the
+  // durations. Basim's own extension keeps the old free-text rewrite: he sets
+  // dates directly and raises no approval.
+  if (candidates.length === 1 && choice.optionId !== "LGDEXTEND") return { ...event, text: legendRewriteText(choice.optionId, candidates[0].title), choice: undefined };
   // 0 or 2+ candidates: leave `choice` set (including for LGDEXTEND now --
   // see LEGEND_NO_TASK's own comment) so the dedicated branch in
   // handleSecretaryEvent asks by name/poll instead of ever letting the model
@@ -1279,6 +1314,63 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
       }
     });
   }
+  // A tapped extension duration resolves the whole request deterministically:
+  // the date is computed here from TODAY (Basim: "من نفس اليوم"), the model is
+  // never consulted, and the request goes straight to Basim as a normal
+  // deadline_extension approval -- which already carries its own approve/
+  // reject poll and already publishes the decision to the group on approval
+  // (see decideApproval's deadline_extension case in lib/approvals.ts).
+  const extensionDurationChoice = parseExtensionDurationChoice(event);
+  if (extensionDurationChoice && actor.active === 1 && event.groupId === null && !event.replyToMessageId) {
+    return transaction(db, () => {
+      const fresh = actorFor(db, event, config);
+      if (!config.enabled || !fresh || JSON.stringify(fresh) !== JSON.stringify(actor)) return { status: "denied", reply: "" };
+      const duplicate = lookup(db, event, fresh, stateFor(db, fresh)); if (duplicate) return duplicate;
+      const state = stateFor(db, fresh);
+      const task = state.tasks.find(t => t.id === extensionDurationChoice.taskId);
+      if (!task) return save(db, event, fresh, { status: "clarify", reply: "هاي المهمة ما عادت متاحة." }, [], now);
+      // The duration question is answered now, so the bare-digit suppression
+      // marker the asking branch wrote has done its job (a tap is not a digit,
+      // but a marker left behind would swallow this person's NEXT plain reply).
+      db.prepare("DELETE FROM secretary_note_followup WHERE conversation_key=? AND action='extension'").run(conversation(event, fresh));
+      const label = EXTENSION_DAY_LABELS[extensionDurationChoice.days] || `${extensionDurationChoice.days} أيام`;
+      const newDueDate = new Date(now + 3 * 3600_000 + extensionDurationChoice.days * 86400_000).toISOString().slice(0, 10);
+      // Counting from today is the rule, so a task already due FURTHER out
+      // than the chosen duration would move its deadline backwards --
+      // requestDeadlineExtension refuses that outright (its not_extension
+      // guard). Say so in plain words instead of surfacing a raw validation
+      // error for a tap the person had no other way to get right.
+      if (task.dueDate && newDueDate <= task.dueDate) return save(db, event, fresh, { status: "clarify",
+        reply: `موعد «${clean(task.title, 150)}» الحالي ${clean(task.dueDate, 10)}، وهو أبعد من ${newDueDate}. اختار مدة أطول.`, taskId: task.id, choices: extensionDurationPoll(task.id, now) }, ["t:" + task.id], now);
+      try {
+        // Basim (2026-09-15): "حط التصويت الي كمان ... والموافقه كمان" -- he
+        // wants the same three taps for his own extensions. There is no
+        // approval to raise for him (he IS the approver), so his tap becomes
+        // the ordinary pending-confirmation every sensitive action of his
+        // already goes through -- and save() arms that with the CFM tap-poll
+        // on its own, so he confirms with a tap instead of typing a token.
+        if (fresh.id === "basem") {
+          const token = "T" + randomBytes(3).toString("hex").toUpperCase();
+          db.prepare("INSERT INTO secretary_pending VALUES(?,?,?,?,?,?,?)")
+            .run(conversation(event, fresh), token, JSON.stringify({ action: "edit_task", taskId: task.id, dueDate: newDueDate }), fingerprint(state), event.text, event.messageId, now + CONFIRM_MS);
+          log(db, fresh, event, "secretary_proposal", { summary: "عرض تمديد موعد ينتظر التأكيد", proposedCommand: { action: "edit_task", taskId: task.id, dueDate: newDueDate }, confirmationRequired: true }, now);
+          return save(db, event, fresh, { status: "confirmation",
+            reply: `تمديد «${clean(task.title, 150)}» ${label} إلى ${newDueDate}.`, taskId: task.id }, ["t:" + task.id], now);
+        }
+        // A tap carries no reason -- same "لم يُذكر سبب" default the typed
+        // extension path in lib/secretary-agent.ts already uses.
+        const request = requestDeadlineExtension(db, fresh, { taskId: task.id, newDueDate, reason: "لم يُذكر سبب" }, { now });
+        enqueueAgentMessage(db, { toUser: "basem", text: request.ownerMessage, choices: request.choices }, now);
+        log(db, fresh, event, "secretary_extension_request", { summary: "طلب تمديد بضغطة مدة جاهزة", taskId: task.id, approvalId: request.approval.id, days: extensionDurationChoice.days }, now);
+        return save(db, event, fresh, { status: "applied",
+          reply: `📨 رفعت طلبك لباسم: تمديد «${clean(task.title, 150)}» ${label} إلى ${newDueDate}.
+بخبرك أول ما يقرر.`, taskId: task.id }, ["t:" + task.id], now);
+      } catch (error) {
+        if (!(error instanceof ManagementActionError)) throw error;
+        return save(db, event, fresh, { status: "clarify", reply: error.message }, [], now);
+      }
+    });
+  }
   // The ambiguous/no-match half of the legend's FINISH/TRANSFER/NOTE taps AND
   // of a typed bare command that resolves to the exact same set (see
   // legendTypedPhraseOption/resolveTaskCommandsLegendChoice above) -- a
@@ -1299,6 +1391,15 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
       const duplicate = lookup(db, event, fresh, stateFor(db, fresh)); if (duplicate) return duplicate;
       const candidates = legendCandidates(stateFor(db, fresh), fresh.name, legendChoice.optionId);
       if (candidates.length === 0) return save(db, event, fresh, { status: "clarify", reply: LEGEND_NO_TASK[legendChoice.optionId] }, [], now);
+      // One eligible task and an extension: nothing left to disambiguate, so
+      // skip the task picker entirely and ask the only open question -- for
+      // how long -- as the three fixed durations.
+      if (legendChoice.optionId === "LGDEXTEND" && candidates.length === 1) {
+        const only = candidates[0];
+        db.prepare("INSERT INTO secretary_note_followup VALUES(?,?,?,?,?) ON CONFLICT(conversation_key) DO UPDATE SET action=excluded.action,task_id=excluded.task_id,expires_at=excluded.expires_at,source_message_id=excluded.source_message_id")
+          .run(key, "extension", only.id, now + CONFIRM_MS, event.messageId);
+        return save(db, event, fresh, { status: "clarify", reply: `تمام، لأي مدة بدك تمدد موعد «${clean(only.title, 150)}»؟`, taskId: only.id, choices: extensionDurationPoll(only.id, now) }, ["t:" + only.id], now);
+      }
       const kind = legendChoice.optionId === "LGDFINISH" ? "close_request" : legendChoice.optionId === "LGDTRANSFER" ? "task_transfer_request" : legendChoice.optionId === "LGDEXTEND" ? "extension_pick" : "comment";
       const token = randomBytes(3).toString("hex").toUpperCase();
       // Same upsert as the close_request/task_transfer_request/comment
@@ -1377,7 +1478,7 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
           // never by this table's own generic comment/transfer consumption.
           db.prepare("INSERT INTO secretary_note_followup VALUES(?,?,?,?,?) ON CONFLICT(conversation_key) DO UPDATE SET action=excluded.action,task_id=excluded.task_id,expires_at=excluded.expires_at,source_message_id=excluded.source_message_id")
             .run(key, "extension", task.id, now + CONFIRM_MS, event.messageId);
-          return save(db, event, fresh, { status: "clarify", reply: `تمام، لأي مدة أو تاريخ بدك تمدد موعد «${clean(task.title, 150)}»؟ اكتب عدد الأيام (مثل 3) أو التاريخ الجديد.`, taskId: task.id }, ["t:" + task.id], now);
+          return save(db, event, fresh, { status: "clarify", reply: `تمام، لأي مدة بدك تمدد موعد «${clean(task.title, 150)}»؟`, taskId: task.id, choices: extensionDurationPoll(task.id, now) }, ["t:" + task.id], now);
         }
         if (row.kind === "comment" || row.kind === "submit") {
           // The fuzzy bare-phrase fallback (legendFuzzyPhraseOption below)
@@ -2012,7 +2113,7 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
           const title = clean(candidates[0].title, 150);
           const reply = fuzzyOptionId === "LGDNOTE" ? `تقصد مهمة «${title}»؟ اكتب نص الملاحظة.`
             : fuzzyOptionId === "LGDFINISH" ? `تقصد مهمة «${title}»؟ شو نتيجتها بالضبط؟`
-            : fuzzyOptionId === "LGDEXTEND" ? `تقصد مهمة «${title}»؟ لأي مدة أو تاريخ بدك تمدد موعدها؟`
+            : fuzzyOptionId === "LGDEXTEND" ? `تقصد مهمة «${title}»؟ لأي مدة بدك تمدد موعدها؟`
             : `تقصد مهمة «${title}»؟ اذكر اسم الزميل المقصود، أو قل «مش مسؤوليتي» بدون تحديد حدا.`;
           // Same LGDEXTEND digit-shortcut marker as the tapped-poll branch
           // above (see resolveTaskCommandsLegendChoice's comment) -- this
@@ -2022,7 +2123,10 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
             db.prepare("INSERT INTO secretary_note_followup VALUES(?,?,?,?,?) ON CONFLICT(conversation_key) DO UPDATE SET action=excluded.action,task_id=excluded.task_id,expires_at=excluded.expires_at,source_message_id=excluded.source_message_id")
               .run(key, "extension", candidates[0].id, now + CONFIRM_MS, event.messageId);
           }
-          return save(db, event, freshActor, { status: "clarify", reply, taskId: candidates[0].id }, ["t:" + candidates[0].id], now);
+          // Same three fixed durations the tapped-poll path above offers, for
+          // the same reason -- this branch asks the identical question.
+          const extensionChoices = fuzzyOptionId === "LGDEXTEND" ? extensionDurationPoll(candidates[0].id, now) : undefined;
+          return save(db, event, freshActor, { status: "clarify", reply, taskId: candidates[0].id, ...(extensionChoices ? { choices: extensionChoices } : {}) }, ["t:" + candidates[0].id], now);
         }
         const token = randomBytes(3).toString("hex").toUpperCase();
         // Basim (2026-09-12): LGDEXTEND used to fall through to the final

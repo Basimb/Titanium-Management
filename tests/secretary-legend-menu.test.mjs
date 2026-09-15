@@ -62,12 +62,20 @@ test('the numbered legend menu lists all five commands with their number and col
   assert.deepEqual(choices.options.map(o => o.id), ['LGDADD', 'LGDNOTE', 'LGDTRANSFER', 'LGDEXTEND', 'LGDFINISH']);
 });
 
-test('tapping LGDEXTEND with exactly one eligible task rewrites deterministically to that task\'s own extend sentence', async t => {
+// Basim (2026-09-15): "بس يطلب تمديد اعطيه خيارات يوم - يومين - 5 ايام فقط
+// ... مشان نتجاوز مشكله الذكاء" -- this used to rewrite a single eligible
+// task into "بدي أمدد موعد مهمة «لوحة»" and hand the remaining question (how
+// long?) to the model, which is the guessing he asked to remove. The task is
+// still resolved deterministically; the duration is now a fixed-option poll
+// instead of a sentence for the model to interpret. See
+// tests/secretary-extension-poll.test.mjs for the rest of that flow.
+test('tapping LGDEXTEND with exactly one eligible task asks the duration as fixed options, never via the model', async t => {
   const f = fixture(t, { withTasks: false });
   f.db.exec(`INSERT INTO tasks (id,title,details,priority,status,owner,suggested_owner,started_at,created_at,updated_at) VALUES('${PROGRESS}','لوحة','تفاصيل','red','progress','خالد','خالد',1,1,1)`);
-  let seen;
-  await f.run(undefined, async input => { seen = input.text; return emptySecretaryIntent('clarify', 'شو الموعد الجديد؟'); }, tap('LGDQ', 'LGDEXTEND'));
-  assert.equal(seen, 'بدي أمدد موعد مهمة «لوحة»');
+  const r = await f.run(undefined, async () => { throw Error('the duration must never reach the model'); }, tap('LGDQ', 'LGDEXTEND'));
+  assert.equal(r.status, 'clarify');
+  assert.match(r.reply, /لأي مدة بدك تمدد موعد «لوحة»/);
+  assert.deepEqual(r.choices.options.map(o => o.label), ['🟢 يوم واحد', '🟡 يومين', '🟠 ٥ أيام']);
 });
 
 // Basim (2026-09-12): "لما تظهر زي هاي الحالة ما يستخدم ارقام المهام...
@@ -126,9 +134,12 @@ test('tapping LGDEXTEND with zero eligible tasks resolves deterministically to t
 test('typing the bare phrase "تمديد الموعد" resolves exactly like tapping LGDEXTEND', async t => {
   const f = fixture(t, { withTasks: false });
   f.db.exec(`INSERT INTO tasks (id,title,details,priority,status,owner,suggested_owner,started_at,created_at,updated_at) VALUES('${PROGRESS}','لوحة','تفاصيل','red','progress','خالد','خالد',1,1,1)`);
-  let seen;
-  await f.run('تمديد الموعد', async input => { seen = input.text; return emptySecretaryIntent('clarify', 'شو الموعد الجديد؟'); });
-  assert.equal(seen, 'بدي أمدد موعد مهمة «لوحة»');
+  // Same convergence this file has always asserted -- a typed phrase and a tap
+  // land on the identical resolution -- just onto the duration poll now.
+  const r = await f.run('تمديد الموعد', async () => { throw Error('the duration must never reach the model'); });
+  assert.equal(r.status, 'clarify');
+  assert.match(r.reply, /لأي مدة بدك تمدد موعد «لوحة»/);
+  assert.deepEqual(r.choices.options.map(o => o.label), ['🟢 يوم واحد', '🟡 يومين', '🟠 ٥ أيام']);
 });
 
 test('a bare digit "1".."5" resolves to the matching quick command when the employee has no tasks at all to pick from', async t => {
