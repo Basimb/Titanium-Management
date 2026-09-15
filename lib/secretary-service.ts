@@ -1139,7 +1139,7 @@ function nudgeOwner(db: DatabaseSync, event: Event, actor: ChatUser, state: Snap
   const targetId = state.users.find(u => u.name === responsible)?.id;
   if (!targetId) return save(db, event, actor, { status: "clarify", reply: "ما قدرت ألاقي حساب هذا الموظف لأرسله تذكيرًا." }, ["t:" + task.id], now);
   const choices = freshTaskActionPoll(db, taskId, responsible, now);
-  enqueueAgentMessage(db, { toUser: targetId, text: `⏳ يا ${clean(responsible)}، مهمة «${clean(task.title)}» لسا بانتظار ردك.`, ...(choices ? { choices } : {}) }, now);
+  enqueueAgentMessage(db, { toUser: targetId, text: `⏳ يا ${clean(responsible)}، مهمة «${clean(task.title)}» لسا بانتظار ردك.${taskNotesBlock(state, task.id, 70)}`, ...(choices ? { choices } : {}) }, now);
   notifyTaskLegend(db, targetId, now + 1, !choices);
   log(db, actor, event, "secretary_nudge", { summary: "أعاد إرسال تذكير المهمة لصاحبها الحالي", taskId: task.id, targetUserId: targetId }, now);
   return save(db, event, actor, { status: "applied", reply: `✅ بعتّ لـ${clean(responsible)} تذكيرًا بمهمة «${clean(task.title)}».`, taskId: task.id }, ["t:" + task.id], now);

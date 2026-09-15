@@ -203,7 +203,7 @@ export function planFollowups(db: DatabaseSync, config: FollowupConfig, at: numb
       // guess.
       const staleNote = choices ? "\n⚠️ إذا في استطلاع تصويت أقدم من هذه الرسالة لنفس المهمة، هو منتهي الصلاحية — رد من استطلاع هذه الرسالة تحديدًا." : "";
       plans.push({ id: randomBytes(8).toString("hex"), kind: "unclaimed_task", targetUser: userId, entityId: task.id, to: `${number}@s.whatsapp.net`,
-        text: `⏳ يا ${clean(responsible)}، مهمة «${clean(task.title)}» لسا بانتظار ردك.${staleNote}\n\n${TASK_COMMANDS_LEGEND}`, ...(choices ? { choices } : {}) });
+        text: `⏳ يا ${clean(responsible)}، مهمة «${clean(task.title)}» لسا بانتظار ردك.${autoReminderNotes(snapshot.comments as ReminderNote[], task.id)}${staleNote}\n\n${TASK_COMMANDS_LEGEND}`, ...(choices ? { choices } : {}) });
     } else if (ownerNumber) {
       if (alreadySent(db, "unowned_task", owner.id, task.id, at - HOUR)) continue;
       // Same resend/supersession hazard as unclaimed_task just above (see its
@@ -216,7 +216,7 @@ export function planFollowups(db: DatabaseSync, config: FollowupConfig, at: numb
       // which bubble is live, exactly like unclaimed_task already does.
       const staleNote = "\n⚠️ إذا في استطلاع تصويت أقدم من هذه الرسالة لنفس المهمة، هو منتهي الصلاحية — رد من استطلاع هذه الرسالة تحديدًا.";
       plans.push({ id: randomBytes(8).toString("hex"), kind: "unowned_task", targetUser: owner.id, entityId: task.id, to: `${ownerNumber}@s.whatsapp.net`,
-        text: `⚠️ يا باسم، مهمة «${clean(task.title)}» ما إلها موظف مسؤول.${staleNote}`, choices: unownedTaskPoll(task.id, users, owner.id, at) });
+        text: `⚠️ يا باسم، مهمة «${clean(task.title)}» ما إلها موظف مسؤول.${autoReminderNotes(snapshot.comments as ReminderNote[], task.id)}${staleNote}`, choices: unownedTaskPoll(task.id, users, owner.id, at) });
     }
   }
 
@@ -236,11 +236,11 @@ export function planFollowups(db: DatabaseSync, config: FollowupConfig, at: numb
     if (overdue || expectedPassed) {
       const choices = autoReminderPoll([task], task.owner, at);
       plans.push({ id: randomBytes(8).toString("hex"), kind: "overdue_task", targetUser: userId, entityId: task.id, to: `${number}@s.whatsapp.net`,
-        text: `⏰ يا ${clean(task.owner)}، مهمة «${clean(task.title)}» كان موعدها ${task.dueDate ?? task.expectedAt} ولم تُغلق بعد.\nوين وصلت؟ إذا بدك تمديد قلّي الموعد الجديد والسبب وأرفعه لباسم.`, ...(choices ? { choices } : {}) });
+        text: `⏰ يا ${clean(task.owner)}، مهمة «${clean(task.title)}» كان موعدها ${task.dueDate ?? task.expectedAt} ولم تُغلق بعد.${autoReminderNotes(snapshot.comments as ReminderNote[], task.id)}\nوين وصلت؟ إذا بدك تمديد اضغط «تمديد التاريخ» واختار المدة.`, ...(choices ? { choices } : {}) });
     } else if (silent && !alreadySent(db, "silent_task", userId, task.id, at - 2 * DAY)) {
       const choices = autoReminderPoll([task], task.owner, at);
       plans.push({ id: randomBytes(8).toString("hex"), kind: "silent_task", targetUser: userId, entityId: task.id, to: `${number}@s.whatsapp.net`,
-        text: `👋 يا ${clean(task.owner)}، ما وصلني تحديث على «${clean(task.title)}» من 3 أيام. وين وصلت؟ أو سجّل صوت وأنا أحدّثها.`, ...(choices ? { choices } : {}) });
+        text: `👋 يا ${clean(task.owner)}، ما وصلني تحديث على «${clean(task.title)}» من 3 أيام.${autoReminderNotes(snapshot.comments as ReminderNote[], task.id)}\nوين وصلت؟ أو سجّل صوت وأنا أحدّثها.`, ...(choices ? { choices } : {}) });
     }
   }
   if (ownerNumber && !alreadySent(db, "stale_approval", owner.id, null, at - DAY)) {
@@ -261,13 +261,13 @@ export function planFollowups(db: DatabaseSync, config: FollowupConfig, at: numb
     const staleUnclaimed = snapshot.tasks.filter(task => !task.archivedAt && task.status === "open" && !task.owner && task.suggestedOwner
       && (task.updatedAt ?? 0) < at - STALE_UNCLAIMED_AFTER);
     if (staleUnclaimed.length) {
-      const lines = staleUnclaimed.map(task => `• ${clean(task.title)} — المقترحة لـ: ${clean(task.suggestedOwner!)}`);
+      const lines = staleUnclaimed.map(task => `• ${clean(task.title)} — المقترحة لـ: ${clean(task.suggestedOwner!)}${autoReminderNotes(snapshot.comments as ReminderNote[], task.id)}`);
       plans.push({ id: randomBytes(8).toString("hex"), kind: "stale_unclaimed", targetUser: owner.id, entityId: null, to: `${ownerNumber}@s.whatsapp.net`,
         text: `يا باسم، هذه المهام لسا ما استلمها حدا من أكثر من يوم:\n${lines.join("\n")}` });
     }
   }
   if (config.groupId && overdueTasks.length && !alreadySent(db, "daily_digest", "group", null, at - DAY) && groupBudgetRemaining(db, at) > 0 && GROUP_EVENT_ALLOWLIST.has("delay")) {
-    const lines = overdueTasks.slice(0, 12).map(task => `• ${clean(task.title)} — ${task.owner} — ${task.dueDate}`);
+    const lines = overdueTasks.slice(0, 12).map(task => `• ${clean(task.title)} — ${task.owner} — ${task.dueDate}${autoReminderNotes(snapshot.comments as ReminderNote[], task.id)}`);
     plans.push({ id: randomBytes(8).toString("hex"), kind: "daily_digest", targetUser: "group", entityId: null, to: config.groupId, text: `📋 المهام المتأخرة اليوم (${overdueTasks.length}):\n${lines.join("\n")}${overdueTasks.length > 12 ? "\n…" : ""}` });
   }
   return plans;
