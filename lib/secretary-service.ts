@@ -70,10 +70,35 @@ function taskCommandsLegendPoll(now: number): SecretaryChoices {
 // using the exact same eligibility taskActionPoll already applies for a
 // task-bound tap -- this poll just isn't bound to one task, so this counts
 // candidates itself instead of trusting a task id encoded in the option.
-function legendCandidates(state: Snapshot, actorName: string, optionId: string): Task[] {
+// Basim (2026-09-15): "اظهر اول 10 بس انا مش معلق عليها بنفس اليوم مثلا".
+// This filter was written for an employee -- "a task is mine and I'm working
+// on it" -- and applied to Basim unchanged, so the two commands he can run on
+// ANY task (a note, an extension) offered him only his own: with nothing
+// claimed in his own name the bot told him "ما عندك مهمة قيد التنفيذ" while the
+// team's tasks sat there, all of them his to comment on. He now sees every
+// in-progress task instead, newest-pressure first (orderedTasks puts overdue
+// then pending-approval at the top), capped at ten because a WhatsApp poll
+// cannot show more -- naming a task outright still reaches the rest.
+// The same-day exclusion is his: a task he already commented on today is one
+// he has had his say on, so it drops out and leaves room for one he hasn't.
+// It applies to notes only -- an extension is about a deadline, not about
+// whether he has spoken on the task today.
+// FINISH/TRANSFER deliberately keep the employee rule even for him: closing
+// or handing off someone else's task is not what those taps are for.
+const ADMIN_LEGEND_LIMIT = 10;
+function legendCandidates(state: Snapshot, actor: { id: string; name: string }, optionId: string, now: number): Task[] {
+  if (actor.id === "basem" && (optionId === "LGDNOTE" || optionId === "LGDEXTEND")) {
+    const today = new Date(now + 3 * 3600_000).toISOString().slice(0, 10);
+    const startOfToday = Date.parse(`${today}T00:00:00Z`) - 3 * 3600_000;
+    return orderedTasks(state, now)
+      .filter(task => task.status === "progress"
+        && (optionId !== "LGDNOTE" || !state.comments.some(comment => comment.taskId === task.id
+          && comment.author === actor.name && comment.createdAt >= startOfToday)))
+      .slice(0, ADMIN_LEGEND_LIMIT);
+  }
   return state.tasks.filter(task => !task.archivedAt && (optionId === "LGDTRANSFER"
-    ? (task.status === "open" || task.status === "progress") && (task.owner || task.suggestedOwner) === actorName
-    : task.status === "progress" && task.owner === actorName));
+    ? (task.status === "open" || task.status === "progress") && (task.owner || task.suggestedOwner) === actor.name
+    : task.status === "progress" && task.owner === actor.name));
 }
 const LEGEND_NO_TASK: Record<string, string> = {
   LGDFINISH: "ما عندك مهمة قيد التنفيذ حاليًا لإنهائها.",
@@ -294,7 +319,7 @@ function resolveTaskCommandsLegendChoice(db: DatabaseSync, event: Event, config:
   if (!["LGDFINISH", "LGDTRANSFER", "LGDNOTE", "LGDEXTEND"].includes(choice.optionId)) return event;
   const actor = digitActor ?? actorFor(db, event, config);
   if (!actor) return { ...event, choice: undefined };
-  const candidates = legendCandidates(stateFor(db, actor), actor.name, choice.optionId);
+  const candidates = legendCandidates(stateFor(db, actor), actor, choice.optionId, now);
   // LGDEXTEND is the one option whose remaining question ("how long?") is now
   // answered by a fixed-duration poll rather than by the model (Basim,
   // 2026-09-15). Rewriting a single candidate to text here would hand that
@@ -1389,7 +1414,7 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
       const fresh = actorFor(db, event, config);
       if (!config.enabled || !fresh || JSON.stringify(fresh) !== JSON.stringify(actor)) return { status: "denied", reply: "" };
       const duplicate = lookup(db, event, fresh, stateFor(db, fresh)); if (duplicate) return duplicate;
-      const candidates = legendCandidates(stateFor(db, fresh), fresh.name, legendChoice.optionId);
+      const candidates = legendCandidates(stateFor(db, fresh), fresh, legendChoice.optionId, now);
       if (candidates.length === 0) return save(db, event, fresh, { status: "clarify", reply: LEGEND_NO_TASK[legendChoice.optionId] }, [], now);
       // One eligible task and an extension: nothing left to disambiguate, so
       // skip the task picker entirely and ask the only open question -- for
@@ -2014,7 +2039,7 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
     // (see close_request's own "owner" branch below), never on the team's
     // tasks in general, which is what makes this safe to leave unguarded.
     if ((plan.kind === "close_request" || plan.kind === "task_transfer_request") && plan.taskId) {
-      const candidates = legendCandidates(state, freshActor.name, plan.kind === "close_request" ? "LGDFINISH" : "LGDTRANSFER");
+      const candidates = legendCandidates(state, freshActor, plan.kind === "close_request" ? "LGDFINISH" : "LGDTRANSFER", now);
       if (candidates.length === 1) plan = { ...plan, taskId: candidates[0].id };
       else if (candidates.length > 1) {
         const token = randomBytes(3).toString("hex").toUpperCase();
@@ -2064,7 +2089,7 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
       // task never has any of THEIR OWN candidates here), only speak up when
       // there is truly nothing to fall back on.
       if (command.action === "comment" || command.action === "submit") {
-        const candidates = legendCandidates(state, freshActor.name, command.action === "comment" ? "LGDNOTE" : "LGDFINISH");
+        const candidates = legendCandidates(state, freshActor, command.action === "comment" ? "LGDNOTE" : "LGDFINISH", now);
         if (candidates.length === 1) command.taskId = candidates[0].id;
         else if (candidates.length > 1) {
           const token = randomBytes(3).toString("hex").toUpperCase();
@@ -2107,7 +2132,7 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
     if (plan.kind === "clarify" && !review && event.groupId === null && !event.replyToMessageId && event.inputKind !== "voice") {
       const fuzzyOptionId = legendFuzzyPhraseOption(event.text);
       if (fuzzyOptionId) {
-        const candidates = legendCandidates(state, freshActor.name, fuzzyOptionId);
+        const candidates = legendCandidates(state, freshActor, fuzzyOptionId, now);
         if (candidates.length === 0) return save(db, event, freshActor, { status: "clarify", reply: LEGEND_NO_TASK[fuzzyOptionId] }, [], now);
         if (candidates.length === 1) {
           const title = clean(candidates[0].title, 150);
