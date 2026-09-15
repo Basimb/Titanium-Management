@@ -483,7 +483,11 @@ function lookup(db: DatabaseSync, event: Event, actor: ChatUser, state: Snapshot
   // active employee can legitimately be replaying in their own private chat
   // -- every other kind (CFM confirmations, APR approval decisions, the
   // approval-decision listing poll) stays Basim-only, exactly as before.
-  const taskPoll = typeof result.choices?.id === "string" && result.choices.id.startsWith("TSKQ");
+  // EXTQ joins TSKQ here (2026-09-15): the three fixed extension durations are
+  // now offered on an employee's own "\ud83d\udd50 \u0628\u062f\u064a \u062a\u0645\u062f\u064a\u062f" tap, not just on Basim's,
+  // so replaying that reply must not be denied for the employee who asked.
+  const taskPoll = typeof result.choices?.id === "string"
+    && (result.choices.id.startsWith("TSKQ") || result.choices.id.startsWith("EXTQ"));
   if (result.choices && (taskPoll ? (actor.active !== 1 || event.groupId !== null) : (actor.id !== "basem" || actor.role !== "admin" || actor.active !== 1 || event.groupId !== null))) return { status: "denied", reply: "" };
   if (result.status === "confirmation" || (result.status === "clarify" && isConfirmationAttempt(event.text))) {
     const lastInstruction = String(result.reply).lastIndexOf("«موافق");
@@ -958,7 +962,15 @@ function parseUnownedTaskPollChoice(event: Event): { taskId: string; target: str
 // exactly as it would for someone who typed the same sentence themselves.
 function resolveTaskActionTextChoice(db: DatabaseSync, event: Event): Event {
   const parsed = parseTaskActionPollChoice(event);
-  if (!parsed || parsed.action === "claim" || parsed.action === "submit") return event;
+  // Basim (2026-09-15): "مش على اساس عملت فلتر يوم ويومين و5 ايام؟" -- he tapped
+  // "🕐 بدي تمديد" on a task-action poll and never saw the three durations. They
+  // existed, but only on the LEGEND path (LGDEXTEND / a typed "تمديد التاريخ");
+  // this rewrite quietly turned the TAP into the sentence "بدي أمدد موعد مهمة
+  // «...»" and handed it to the model, which picked a date on its own (it chose
+  // tomorrow) and went straight to a confirmation -- exactly the guessing the
+  // fixed durations were added to remove. "extend" now keeps its choice and is
+  // answered deterministically further down, like claim/submit already are.
+  if (!parsed || parsed.action === "claim" || parsed.action === "submit" || parsed.action === "extend") return event;
   // Always clear choice here, task found or not: NOTE/TRANSFER/EXTEND are
   // never meant to be resolved deterministically, and the generic live-poll
   // handler further below is scoped to Basim's own task-intake/approval-
@@ -1322,6 +1334,32 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
   // extended here to "submit" too. Open to any active actor in their own
   // private chat, not just Basim: these are two everyday actions any
   // employee already has today, just reachable with a tap instead of typing.
+  // The "\ud83d\udd50 \u0628\u062f\u064a \u062a\u0645\u062f\u064a\u062f" option of a task-action poll (see
+  // resolveTaskActionTextChoice's comment above for what this used to do
+  // instead). The tap already names the task, so the only open question is
+  // how long -- and that question has three fixed answers Basim chose, each
+  // counted from today in code. Same reply the legend path already gives, so
+  // a tap and a typed "\u062a\u0645\u062f\u064a\u062f \u0627\u0644\u062a\u0627\u0631\u064a\u062e" now land in exactly the same place.
+  const extendTapChoice = parseTaskActionPollChoice(event);
+  if (extendTapChoice && extendTapChoice.action === "extend"
+      && actor.active === 1 && event.groupId === null && !event.replyToMessageId) {
+    return transaction(db, () => {
+      const fresh = actorFor(db, event, config);
+      if (!config.enabled || !fresh || JSON.stringify(fresh) !== JSON.stringify(actor)) return { status: "denied", reply: "" };
+      const duplicate = lookup(db, event, fresh, stateFor(db, fresh)); if (duplicate) return duplicate;
+      const state = stateFor(db, fresh);
+      const task = state.tasks.find(t => t.id === extendTapChoice.taskId);
+      if (!task) return save(db, event, fresh, { status: "clarify", reply: "\u0647\u0627\u064a \u0627\u0644\u0645\u0647\u0645\u0629 \u0645\u0627 \u0639\u0627\u062f\u062a \u0645\u062a\u0627\u062d\u0629." }, [], now);
+      // Marker only, exactly as the extension_pick branch writes it: it stops a
+      // bare "\u0663" reply from being hijacked as the legend's own menu shortcut. The
+      // duration itself is answered by tapping the poll below.
+      db.prepare("INSERT INTO secretary_note_followup VALUES(?,?,?,?,?) ON CONFLICT(conversation_key) DO UPDATE SET action=excluded.action,task_id=excluded.task_id,expires_at=excluded.expires_at,source_message_id=excluded.source_message_id")
+        .run(conversation(event, fresh), "extension", task.id, now + CONFIRM_MS, event.messageId);
+      return save(db, event, fresh, { status: "clarify",
+        reply: `\u062a\u0645\u0627\u0645\u060c \u0644\u0623\u064a \u0645\u062f\u0629 \u0628\u062f\u0643 \u062a\u0645\u062f\u062f \u0645\u0648\u0639\u062f \u00ab${clean(task.title, 150)}\u00bb\u061f`, taskId: task.id,
+        choices: extensionDurationPoll(task.id, now) }, ["t:" + task.id], now);
+    });
+  }
   // A tapped task in a reminder's picker poll (see parseTaskPickerChoice
   // above): it names WHICH task, nothing more, so the answer is that task's
   // ordinary card plus its own action poll -- exactly what the person used to

@@ -228,7 +228,7 @@ test('a CLAIM tap for a task removed since the poll was sent is denied cleanly',
     async () => { throw Error('must not ask the model'); });
   assert.equal(tapped.status, 'clarify');
 });
-test('tapping NOTE/TRANSFER/EDIT/EXTEND rewrites the tap into the exact sentence a person naming the task would type, using its live title', async t => {
+test('tapping NOTE/TRANSFER/EDIT rewrites the tap into the exact sentence a person naming the task would type, using its live title', async t => {
   const f = fixture(t);
   f.db.prepare('UPDATE tasks SET title=? WHERE id=?').run('لوحة معدّلة', PROGRESS);
   let seenNote; await f.run(undefined, tap(`TSKQ${PROGRESS}`, `TSK${PROGRESS}NOTE`), async input => { seenNote = input.text; return emptySecretaryIntent('clarify', 'شو الملاحظة؟'); });
@@ -237,8 +237,35 @@ test('tapping NOTE/TRANSFER/EDIT/EXTEND rewrites the tap into the exact sentence
   assert.equal(seenTransfer, 'بدي أحول مهمة «لوحة معدّلة» لحدا غيري');
   let seenEdit; await f.run(undefined, tap(`TSKQ${PROGRESS}`, `TSK${PROGRESS}EDIT`), async input => { seenEdit = input.text; return emptySecretaryIntent('clarify', 'شو الأولوية الجديدة؟'); });
   assert.equal(seenEdit, 'بدي أعدل أولوية مهمة «لوحة معدّلة»');
-  let seenExtend; await f.run(undefined, tap(`TSKQ${PROGRESS}`, `TSK${PROGRESS}EXTEND`), async input => { seenExtend = input.text; return emptySecretaryIntent('clarify', 'لأي تاريخ؟'); });
-  assert.equal(seenExtend, 'بدي أمدد موعد مهمة «لوحة معدّلة»');
+  // EXTEND is deliberately NOT in this list any more -- see the test below.
+});
+
+// Basim (2026-09-15): "مش على اساس عملت فلتر يوم ويومين و5 ايام؟" -- he tapped
+// "🕐 بدي تمديد" and got no durations at all: the tap was rewritten into
+// "بدي أمدد موعد مهمة «...»" and handed to the model, which picked tomorrow's
+// date on its own and jumped straight to a confirmation. The three fixed
+// durations existed, but only on the legend path. A tap must reach the same
+// place a typed "تمديد التاريخ" does.
+test('tapping EXTEND asks for the duration with the three fixed options, never a model-guessed date', async t => {
+  const f = fixture(t);
+  let asked = 0;
+  const r = await f.run(undefined, tap(`TSKQ${PROGRESS}`, `TSK${PROGRESS}EXTEND`), async () => { asked += 1; return emptySecretaryIntent('clarify', 'لأي تاريخ؟'); });
+  assert.equal(asked, 0, 'the model must never see this tap -- guessing the date is the whole bug');
+  assert.equal(r.status, 'clarify');
+  assert.match(r.reply, /لأي مدة/);
+  assert.equal(r.taskId, PROGRESS);
+  assert.equal(r.choices.id, `EXTQ${PROGRESS}`);
+  assert.deepEqual(r.choices.options.map(o => o.id), [`EXT${PROGRESS}D1`, `EXT${PROGRESS}D2`, `EXT${PROGRESS}D5`]);
+  assert.deepEqual(r.choices.options.map(o => o.label), ['🟢 يوم واحد', '🟡 يومين', '🟠 ٥ أيام']);
+});
+
+test('an EXTEND tap on a task that is gone says so instead of asking the model', async t => {
+  const f = fixture(t);
+  f.db.prepare('DELETE FROM tasks WHERE id=?').run(PROGRESS);
+  let asked = 0;
+  const r = await f.run(undefined, tap(`TSKQ${PROGRESS}`, `TSK${PROGRESS}EXTEND`), async () => { asked += 1; return emptySecretaryIntent('chat', 'تمام'); });
+  assert.equal(asked, 0);
+  assert.match(r.reply, /ما عادت متاحة/);
 });
 test('a NOTE/TRANSFER/EXTEND tap for a task removed since the poll was sent falls back to the raw tap text instead of crashing', async t => {
   const f = fixture(t);
