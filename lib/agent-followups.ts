@@ -7,7 +7,7 @@
  */
 import { randomBytes } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
-import { formatPendingList, staleApprovals, markNudged } from "./approvals.ts";
+import { formatPendingList, pendingApprovalsPoll, staleApprovals, markNudged } from "./approvals.ts";
 import { getManagementSnapshot, migrateManagementActions, type ManagementActor, type ManagementTask } from "./management-actions.ts";
 import { GROUP_EVENT_ALLOWLIST, groupBudgetRemaining } from "./team-chat-policy.ts";
 import type { SecretaryChoices } from "./secretary-choices.ts";
@@ -318,7 +318,10 @@ export function planFollowups(db: DatabaseSync, config: FollowupConfig, at: numb
   }
   if (ownerNumber && !alreadySent(db, "stale_approval", owner.id, null, at - DAY)) {
     const stale = staleApprovals(db, at, STALE_APPROVAL_AFTER);
-    if (stale.length) plans.push({ id: randomBytes(8).toString("hex"), kind: "stale_approval", targetUser: owner.id, entityId: null, to: `${ownerNumber}@s.whatsapp.net`, text: `يا باسم، هذه الطلبات معلّقة من أكثر من يومين:\n${formatPendingList(stale)}` });
+    // The text still spells the decision out in words (formatPendingList's
+    // "اكتب «اعتمد 1»"), because the poll can be missed, dismissed or expire --
+    // but the poll is what this message is meant to be answered with now.
+    if (stale.length) plans.push({ id: randomBytes(8).toString("hex"), kind: "stale_approval", targetUser: owner.id, entityId: null, to: `${ownerNumber}@s.whatsapp.net`, text: `يا باسم، هذه الطلبات معلّقة من أكثر من يومين:\n${formatPendingList(stale)}`, ...(pendingApprovalsPoll(stale, at) ? { choices: pendingApprovalsPoll(stale, at)! } : {}) });
   }
   // Basim's follow-up: the hourly unclaimed_task nudge above only reaches the
   // EMPLOYEE it's suggested to -- he gets no heads-up at all that a task is

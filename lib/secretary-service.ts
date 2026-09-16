@@ -1,13 +1,13 @@
 import { createHash, randomBytes } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
-import { executeManagementAction, getManagementSnapshot, migrateManagementActions, ManagementActionError, ACTION_KEYS, type ManagementCommand, type ManagementResult } from "./management-actions.ts";
+import { executeManagementAction, getManagementSnapshot, migrateManagementActions, ManagementActionError, ACTION_KEYS, type ManagementActor, type ManagementCommand, type ManagementResult } from "./management-actions.ts";
 import { resolveChatUser, normalizeContactNumber, type ChatUser } from "./team-chat-policy.ts";
 import type { TeamChatConfig, TeamChatEnvelope } from "./team-chat-gateway.ts";
 import { directTaskCreationIntent, emptySecretaryIntent, validateSecretaryIntent, type SecretaryIntent, type SecretaryModelInput } from "./secretary-intent.ts";
 import { priorityTaskQuery, type PriorityTaskQuery } from "./secretary-priority-query.ts";
 import { AGENT_KINDS } from "./secretary-intent.ts";
 import { applyDecision, createTasks, handleAgentIntent, type AgentResult, type TaskDraftTask } from "./secretary-agent.ts";
-import { listApprovals, requestDeadlineExtension, requestTaskCreate } from "./approvals.ts";
+import { approvalDecisionPollFor, formatApprovalChoice, listApprovals, requestDeadlineExtension, requestTaskCreate } from "./approvals.ts";
 import { activeRules } from "./rules.ts";
 import { searchKnowledge, formatKnowledgeHits } from "./knowledge.ts";
 import { migrateSecretaryMemory, rememberSecretaryMistake, recallSecretaryMemory, personalMemoryCommand, updatePersonalMemory, personalMemory } from "./secretary-memory.ts";
@@ -932,6 +932,17 @@ function parseTaskPickerChoice(event: Event): { taskId: string } | null {
   // silently dropped real taps on them.
   return /^[a-zA-Z0-9_-]{1,200}$/.test(taskId) ? { taskId } : null;
 }
+// The pending-approvals picker (pendingApprovalsPoll in approvals.ts), the
+// approval-side twin of parseTaskPickerChoice above: the daily "these have
+// been waiting two days" nudge used to be answered only by TYPING "اعتمد 1".
+// The question id is a constant so a resend supersedes the previous picker;
+// the approval id rides in the option id, so a tap resolves in code.
+function parseApprovalPickerChoice(event: Event): { approvalId: string } | null {
+  const choice = event.choice;
+  if (!choice || choice.questionId !== "APKQ" || !choice.optionId.startsWith("APK")) return null;
+  const approvalId = choice.optionId.slice(3);
+  return /^[a-zA-Z0-9_-]{1,200}$/.test(approvalId) ? { approvalId } : null;
+}
 function parseUnownedTaskPollChoice(event: Event): { taskId: string; target: string } | null {
   const choice = event.choice;
   if (!choice || !choice.questionId.startsWith("UNOWNQ")) return null;
@@ -1358,6 +1369,25 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
       return save(db, event, fresh, { status: "clarify",
         reply: `\u062a\u0645\u0627\u0645\u060c \u0644\u0623\u064a \u0645\u062f\u0629 \u0628\u062f\u0643 \u062a\u0645\u062f\u062f \u0645\u0648\u0639\u062f \u00ab${clean(task.title, 150)}\u00bb\u061f`, taskId: task.id,
         choices: extensionDurationPoll(task.id, now) }, ["t:" + task.id], now);
+    });
+  }
+  // A tapped request in the pending-approvals picker (see
+  // parseApprovalPickerChoice above): it names WHICH request, so the answer is
+  // that request restated with its own \ud83d\udfe2/\ud83d\udd34 decision poll -- the same poll the
+  // request's original notification carried. Basim-only, like every other
+  // approval path here.
+  const approvalPickerChoice = parseApprovalPickerChoice(event);
+  if (approvalPickerChoice && actor.id === "basem" && actor.role === "admin"
+      && event.groupId === null && !event.replyToMessageId) {
+    return transaction(db, () => {
+      const fresh = actorFor(db, event, config);
+      if (!config.enabled || !fresh || JSON.stringify(fresh) !== JSON.stringify(actor)) return { status: "denied", reply: "" };
+      const duplicate = lookup(db, event, fresh, stateFor(db, fresh)); if (duplicate) return duplicate;
+      const approval = listApprovals(db, fresh as unknown as ManagementActor, { status: "pending" })
+        .find(candidate => candidate.id === approvalPickerChoice.approvalId);
+      if (!approval) return save(db, event, fresh, { status: "clarify", reply: "\u0647\u0627\u064a \u0627\u0644\u0637\u0644\u0628 \u0645\u0627 \u0639\u0627\u062f \u0645\u0639\u0644\u0651\u0642 \u2014 \u064a\u0645\u0643\u0646 \u0627\u0646\u0642\u0631\u0631 \u0623\u0648 \u0627\u0646\u062a\u0647\u062a \u0635\u0644\u0627\u062d\u064a\u062a\u0647." }, [], now);
+      return save(db, event, fresh, { status: "summary", reply: formatApprovalChoice(approval, 0),
+        choices: approvalDecisionPollFor(approval, now) }, [], now);
     });
   }
   // A tapped task in a reminder's picker poll (see parseTaskPickerChoice

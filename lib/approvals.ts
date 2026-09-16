@@ -44,6 +44,32 @@ function approvalDecisionPoll(approval: Approval, at: number): SecretaryChoices 
     options: [{ id: `APR${approval.id}Y`, label: "🟢 اعتماد" }, { id: `APR${approval.id}N`, label: "🔴 رفض" }] };
 }
 
+// Basim (2026-09-16): the once-a-day "these have been waiting two days"
+// nudge was the last message in the system still asking him to TYPE
+// ("اكتب «اعتمد 1»") while everything else had become a tap -- he read his own
+// reminder and asked what it even was. One request gets its own 🟢/🔴 poll
+// straight away; several get this picker first, exactly like the reminder
+// task picker (taskPickerPoll in agent-followups.ts): the tap says WHICH
+// request, and the reply to it carries that request's own decision poll.
+// The option id carries the approval id outright, so a tap resolves in code
+// -- see parseApprovalPickerChoice in secretary-service.ts.
+const APPROVAL_PICKER_LIMIT = 10;
+export function pendingApprovalsPoll(approvals: Approval[], at: number): SecretaryChoices | undefined {
+  if (!approvals.length) return undefined;
+  if (approvals.length === 1) return approvalDecisionPoll(approvals[0], at);
+  // Same 24h ceiling every other poll here uses, and the same numbering the
+  // text above the poll carries -- a label must be unique for a vote to match
+  // (the bridge hashes it), and two requests can share a summary.
+  return { id: "APKQ", title: "أي طلب بدك تقرر فيه؟", expiresAt: at + 24 * 60 * 60_000,
+    options: approvals.slice(0, APPROVAL_PICKER_LIMIT).map((approval, index) => ({
+      id: `APK${approval.id}`, label: `${index + 1}. ${approval.summary.replace(/[\r\n\t]/g, " ").slice(0, 86)}` })) };
+}
+// Exported so the picker's tap handler can rebuild the very same decision
+// poll the request's own notification carried (see parseApprovalPickerChoice
+// in secretary-service.ts) rather than duplicating its id scheme there.
+export function approvalDecisionPollFor(approval: Approval, at: number): SecretaryChoices {
+  return approvalDecisionPoll(approval, at);
+}
 function hydrate(row: Record<string, unknown>): Approval {
   let payload: Record<string, unknown> = {};
   try { const parsed = JSON.parse(String(row.payload)); if (parsed && typeof parsed === "object") payload = parsed; } catch { /* keep empty */ }
