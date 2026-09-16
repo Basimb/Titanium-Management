@@ -258,3 +258,36 @@ test("routing left unset keeps the original targets", async t => {
   await jobs.deliverNext(async message => { sent.push(message.to); });
   assert.deepEqual(sent.sort(), ["123@g.us", "966500000000@s.whatsapp.net"].sort());
 });
+
+// Basim (2026-09-16): "هذه المبيعات مش يومي ياخي". The daily window used to be
+// a rolling 24h ending when the report was sent, labelled with yesterday's
+// date -- right only at the midnight slot, and quietly wrong at any other
+// hour, which is exactly what he wants (a morning send). It is the previous
+// COMPLETE local day now, whatever hour the report goes out at.
+test("the daily window is yesterday's full local day, even when sent mid-morning", async t => {
+  const db = fixture(t);
+  const seen = [];
+  const jobs = createOdooReportJobs({
+    db,
+    // 09:00 Amman on 2026-09-17 (UTC+3) -- nowhere near the midnight slot.
+    now: () => Date.UTC(2026, 8, 17, 6, 0, 0),
+    config: {
+      enabled: true, odoo, groupId: "123@g.us", dailyHour: 9,
+      routing: { odoo_daily: { group: true, owner: false } },
+      fetcher: async (url, options) => {
+        const body = JSON.parse(options.body);
+        if (body.params.service === "common") return { json: async () => ({ result: 1 }), ok: true };
+        const domain = body.params.args[5][0];
+        if (Array.isArray(domain)) seen.push(domain.filter(c => c[0] === "date_order").map(c => c[1] + " " + c[2]));
+        return { ok: true, json: async () => ({ result: [{ location_id: [1, "NAOOR/Stock"], amount_total: 100, __count: 2 }] }) };
+      },
+    },
+  });
+  let text = "";
+  await jobs.deliverNext(async message => { text = message.text; });
+  // Amman midnight on the 16th is 21:00 UTC on the 15th -- Odoo stores
+  // date_order in UTC, so the window is expressed there, not in local time.
+  assert.deepEqual(seen[0], [">= 2026-09-15T21:00:00.000Z", "< 2026-09-16T21:00:00.000Z"],
+    "midnight-to-midnight Amman on the 16th, not 09:00-to-09:00");
+  assert.match(text, /2026-09-16/, "and labelled with the day it actually covers");
+});

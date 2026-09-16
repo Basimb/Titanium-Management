@@ -76,6 +76,17 @@ function localParts(at: number, offsetMinutes: number) {
   const shifted = new Date(at + offsetMinutes * 60_000);
   return { hour: shifted.getUTCHours(), day: shifted.getUTCDay() };
 }
+// Basim (2026-09-16), seeing the daily figures: "هذه المبيعات مش يومي ياخي".
+// The daily report used to read a ROLLING 24 hours ending at the moment it
+// was sent, while labelling itself with yesterday's date. At the default
+// midnight slot those coincide, so it was right by accident; at any other
+// hour it silently moved the evening's sales into the next day's report --
+// and he wants to receive this in the morning, not at midnight. The window
+// is now the previous COMPLETE local day, whatever hour the report goes out.
+function startOfLocalDay(at: number, offsetMinutes: number): number {
+  const shifted = new Date(at + offsetMinutes * 60_000);
+  return Date.UTC(shifted.getUTCFullYear(), shifted.getUTCMonth(), shifted.getUTCDate()) - offsetMinutes * 60_000;
+}
 function startOfLocalMonth(at: number, offsetMinutes: number): number {
   const shifted = new Date(at + offsetMinutes * 60_000);
   return Date.UTC(shifted.getUTCFullYear(), shifted.getUTCMonth(), 1) - offsetMinutes * 60_000;
@@ -149,10 +160,11 @@ async function buildReportText(config: OdooReportConfig, kind: Kind, at: number)
   const threshold = config.lowStockThreshold ?? 10;
   if (kind === "odoo_daily") {
     const offset = config.timezoneOffsetMinutes ?? 180;
-    const since = new Date(at - DAY).toISOString();
-    const until = new Date(at).toISOString();
+    const dayStart = startOfLocalDay(at, offset) - DAY;
+    const since = new Date(dayStart).toISOString();
+    const until = new Date(dayStart + DAY).toISOString();
     const byLocation = await session.salesByLocation(since, until);
-    return dailyText(byLocation, localDateLabel(at - DAY, offset), config.currencyLabel, config.branchNames);
+    return dailyText(byLocation, localDateLabel(dayStart, offset), config.currencyLabel, config.branchNames);
   }
   if (kind === "odoo_purchases_weekly") {
     const offset = config.timezoneOffsetMinutes ?? 180;
