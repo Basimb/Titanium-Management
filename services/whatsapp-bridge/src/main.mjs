@@ -8,6 +8,17 @@ import { openControl } from './control.mjs';
 import { createVoiceTranscriber } from './voice.mjs';
 import { readOutboxConfig } from './launch-private.mjs';
 
+// off | group | owner | both -> the routing lib/odoo-reports.ts expects.
+// Anything else (including unset) returns an empty object, which leaves that
+// report on its built-in default rather than silently disabling it.
+function reportRouting(value) {
+  const key = String(value || '').trim().toLowerCase();
+  if (key === 'off') return { enabled: false };
+  if (key === 'group') return { enabled: true, group: true, owner: false };
+  if (key === 'owner') return { enabled: true, group: false, owner: true };
+  if (key === 'both') return { enabled: true, group: true, owner: true };
+  return {};
+}
 async function main() {
   if (process.env.TEAM_CHAT_BRIDGE_ENABLED !== '1') {
     console.info('Titanium bridge is disabled; no WhatsApp connection was started.');
@@ -65,6 +76,14 @@ async function main() {
         weeklyDay: process.env.ODOO_REPORT_WEEKLY_DAY ? Number(process.env.ODOO_REPORT_WEEKLY_DAY) : undefined,
         weeklyHour: process.env.ODOO_REPORT_WEEKLY_HOUR ? Number(process.env.ODOO_REPORT_WEEKLY_HOUR) : undefined,
         purchasesWeeklyHour: process.env.ODOO_REPORT_PURCHASES_WEEKLY_HOUR ? Number(process.env.ODOO_REPORT_PURCHASES_WEEKLY_HOUR) : undefined,
+        // Per-report routing, one env var each: off | group | owner | both.
+        // Unset keeps the built-in default for that report (see DEFAULT_ROUTING
+        // in lib/odoo-reports.ts), so switching one off is a config change.
+        routing: {
+          odoo_daily: reportRouting(process.env.ODOO_REPORT_DAILY),
+          odoo_weekly: reportRouting(process.env.ODOO_REPORT_WEEKLY),
+          odoo_purchases_weekly: reportRouting(process.env.ODOO_REPORT_PURCHASES),
+        },
       }) });
     }
   }

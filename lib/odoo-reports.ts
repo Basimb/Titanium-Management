@@ -44,10 +44,24 @@ export type OdooReportConfig = {
   // owner DM (he asked only for the group).
   purchasesWeeklyHour?: number; // local hour the weekly purchases report goes out; default 19
   timezoneOffsetMinutes?: number; // default 180 (Amman/Riyadh, UTC+3)
+  // Basim (2026-09-17): "مبيعات يومي بالفرع كل يوم ١٢ منتصف الليل الجروب بس
+  // والغي الثاني لغاية ما اقولك" -- who each report goes to, and whether it
+  // goes out at all, is his call and changes; it used to be hard-coded here
+  // (daily and weekly to group AND him, purchases to group only). Left unset,
+  // every kind keeps exactly that old behaviour, so turning one off is a
+  // config change and never a code change.
+  routing?: Partial<Record<Kind, Partial<ReportRouting>>>;
   fetcher?: typeof fetch; // injected in tests; defaults to the global fetch
 };
 
 type Kind = "odoo_daily" | "odoo_weekly" | "odoo_purchases_weekly";
+export type ReportRouting = { enabled: boolean; group: boolean; owner: boolean };
+const DEFAULT_ROUTING: Record<Kind, ReportRouting> = {
+  odoo_daily: { enabled: true, group: true, owner: true },
+  odoo_weekly: { enabled: true, group: true, owner: true },
+  // He only ever asked for the purchases report in the group, never privately.
+  odoo_purchases_weekly: { enabled: true, group: true, owner: false },
+};
 type Planned = { id: string; kind: Kind; targetUser: string; to: string; text: string };
 
 const DAY = 24 * 60 * 60_000;
@@ -158,18 +172,24 @@ async function planOdooReports(db: DatabaseSync, config: OdooReportConfig, at: n
   if (!config.enabled) return [];
   const offset = config.timezoneOffsetMinutes ?? 180;
   const { hour, day } = localParts(at, offset);
+  const routingFor = (candidate: Kind): ReportRouting => ({ ...DEFAULT_ROUTING[candidate], ...(config.routing?.[candidate] ?? {}) });
   let kind: Kind | null = null;
   if (day === (config.weeklyDay ?? 6) && hour === (config.purchasesWeeklyHour ?? 19)) kind = "odoo_purchases_weekly";
   else if (day === (config.weeklyDay ?? 6) && hour === (config.weeklyHour ?? 20)) kind = "odoo_weekly";
   else if (hour === (config.dailyHour ?? 0)) kind = "odoo_daily";
   if (!kind) return [];
+  const routing = routingFor(kind);
+  // A switched-off report costs nothing: no targets, and -- just as important
+  // -- buildReportText below is never reached, so a disabled report never
+  // touches the pharmacy's system at all.
+  if (!routing.enabled) return [];
   // Slightly under a day/week so a delayed retry within the same slot is not
   // mistaken for a fresh window, but the real next firing is never blocked.
   const dedupWindow = (kind === "odoo_daily" ? DAY : 7 * DAY) - 5 * 60_000;
   const targets: Array<{ targetUser: string; to: string }> = [];
-  if (config.groupId) targets.push({ targetUser: "group", to: config.groupId });
-  // Basim only asked for the purchases report to go to the group, not to him privately.
-  if (config.ownerNumber && kind !== "odoo_purchases_weekly") targets.push({ targetUser: "owner", to: `${config.ownerNumber}@s.whatsapp.net` });
+  if (routing.group && config.groupId) targets.push({ targetUser: "group", to: config.groupId });
+  if (routing.owner && config.ownerNumber) targets.push({ targetUser: "owner", to: `${config.ownerNumber}@s.whatsapp.net` });
+  if (!targets.length) return [];
   const pending = targets.filter(target => !alreadySent(db, kind as Kind, target.targetUser, at - dedupWindow));
   if (!pending.length) return [];
   let text: string;

@@ -214,3 +214,47 @@ test("a month with no purchases or returns still nets to zero instead of a blank
   assert.match(text, /↩️ مرتجعات للموردين: 0\.00 من 0 إشعار/);
   assert.match(text, /💰 \*الصافي\*: 0\.00/);
 });
+
+// Basim (2026-09-17): "مبيعات يومي بالفرع كل يوم ١٢ منتصف الليل الجروب بس
+// والغي الثاني لغاية ما اقولك" -- which reports run, and who each one reaches,
+// had been hard-coded. It is config now; unset keeps the old behaviour exactly.
+test("routing sends the daily report to the group only when he asks for group only", async t => {
+  const db = fixture(t);
+  const sent = [];
+  const jobs = createOdooReportJobs({ db, now: () => DAILY_AT, config: {
+    enabled: true, odoo, ownerNumber: "966500000000", groupId: "123@g.us",
+    timezoneOffsetMinutes: 0,
+    fetcher: odooFetcher({ byLocation: [{ location: "NAOOR/Stock", orderCount: 3, totalAmount: 100 }] }),
+    routing: { odoo_daily: { group: true, owner: false } },
+  } });
+  await jobs.deliverNext(async message => { sent.push(message.to); });
+  await jobs.deliverNext(async message => { sent.push(message.to); });
+  assert.deepEqual(sent, ["123@g.us"], "the group, and never his own chat");
+});
+
+test("a report switched off produces nothing and never calls the pharmacy system", async t => {
+  const db = fixture(t);
+  let calls = 0;
+  const jobs = createOdooReportJobs({ db, now: () => DAILY_AT, config: {
+    enabled: true, odoo, ownerNumber: "966500000000", groupId: "123@g.us",
+    timezoneOffsetMinutes: 0,
+    fetcher: async (...args) => { calls += 1; return odooFetcher({})(...args); },
+    routing: { odoo_daily: { enabled: false } },
+  } });
+  const result = await jobs.deliverNext(async () => { throw new Error("must not send"); });
+  assert.equal(result.status, "idle");
+  assert.equal(calls, 0, "a disabled report must not even authenticate against Odoo");
+});
+
+test("routing left unset keeps the original targets", async t => {
+  const db = fixture(t);
+  const sent = [];
+  const jobs = createOdooReportJobs({ db, now: () => DAILY_AT, config: {
+    enabled: true, odoo, ownerNumber: "966500000000", groupId: "123@g.us",
+    timezoneOffsetMinutes: 0,
+    fetcher: odooFetcher({ byLocation: [{ location: "NAOOR/Stock", orderCount: 3, totalAmount: 100 }] }),
+  } });
+  await jobs.deliverNext(async message => { sent.push(message.to); });
+  await jobs.deliverNext(async message => { sent.push(message.to); });
+  assert.deepEqual(sent.sort(), ["123@g.us", "966500000000@s.whatsapp.net"].sort());
+});
