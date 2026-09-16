@@ -228,16 +228,67 @@ test('a CLAIM tap for a task removed since the poll was sent is denied cleanly',
     async () => { throw Error('must not ask the model'); });
   assert.equal(tapped.status, 'clarify');
 });
-test('tapping NOTE/TRANSFER/EDIT rewrites the tap into the exact sentence a person naming the task would type, using its live title', async t => {
+// Basim (2026-09-16), after tapping "📝 أضيف ملاحظة" on ONE task and being
+// asked "عندك أكثر من مهمة تنطبق، أي وحدة بالضبط؟": the tap used to be
+// rewritten into a sentence for the model, and the model's comment path
+// distrusts its own taskId guess whenever several tasks qualify -- correctly,
+// for free text, but a tap is not a guess. These three now resolve in code
+// against the task the tap already named.
+test('tapping NOTE asks for the note text on THAT task, never which task', async t => {
   const f = fixture(t);
-  f.db.prepare('UPDATE tasks SET title=? WHERE id=?').run('لوحة معدّلة', PROGRESS);
-  let seenNote; await f.run(undefined, tap(`TSKQ${PROGRESS}`, `TSK${PROGRESS}NOTE`), async input => { seenNote = input.text; return emptySecretaryIntent('clarify', 'شو الملاحظة؟'); });
-  assert.equal(seenNote, 'بدي أضيف ملاحظة على مهمة «لوحة معدّلة»');
-  let seenTransfer; await f.run(undefined, tap(`TSKQ${PROGRESS}`, `TSK${PROGRESS}TRANSFER`), async input => { seenTransfer = input.text; return emptySecretaryIntent('clarify', 'لمين؟'); });
-  assert.equal(seenTransfer, 'بدي أحول مهمة «لوحة معدّلة» لحدا غيري');
-  let seenEdit; await f.run(undefined, tap(`TSKQ${PROGRESS}`, `TSK${PROGRESS}EDIT`), async input => { seenEdit = input.text; return emptySecretaryIntent('clarify', 'شو الأولوية الجديدة؟'); });
-  assert.equal(seenEdit, 'بدي أعدل أولوية مهمة «لوحة معدّلة»');
-  // EXTEND is deliberately NOT in this list any more -- see the test below.
+  let asked = 0;
+  const r = await f.run(undefined, tap(`TSKQ${PROGRESS}`, `TSK${PROGRESS}NOTE`), async () => { asked += 1; return emptySecretaryIntent('clarify', 'أي مهمة؟'); });
+  assert.equal(asked, 0, 'the model must never see a tap that already names its task');
+  assert.equal(r.taskId, PROGRESS);
+  assert.match(r.reply, /اكتب نص الملاحظة/);
+  assert.doesNotMatch(r.reply, /أي وحدة بالضبط/);
+  // The very next plain message is the note itself -- no re-asking.
+  const followed = await f.run(undefined, { text: 'اتصلت فيهم وما ردوا' }, async () => { asked += 1; return emptySecretaryIntent('chat', 'تمام'); });
+  assert.equal(asked, 0);
+  assert.equal(f.db.prepare('SELECT body FROM comments WHERE task_id=?').get(PROGRESS).body, 'اتصلت فيهم وما ردوا');
+  assert.equal(followed.status, 'applied');
+});
+
+test('tapping TRANSFER asks for the reason on THAT task', async t => {
+  const f = fixture(t);
+  let asked = 0;
+  const r = await f.run(undefined, tap(`TSKQ${PROGRESS}`, `TSK${PROGRESS}TRANSFER`), async () => { asked += 1; return emptySecretaryIntent('clarify', 'لمين؟'); });
+  assert.equal(asked, 0);
+  assert.equal(r.taskId, PROGRESS);
+  assert.match(r.reply, /شو سبب تحويل/);
+});
+
+test('tapping EDIT offers the three priorities, never asks the model to guess one', async t => {
+  const f = fixture(t);
+  let asked = 0;
+  const r = await f.run(undefined, tap(`TSKQ${PROGRESS}`, `TSK${PROGRESS}EDIT`), async () => { asked += 1; return emptySecretaryIntent('clarify', 'شو الأولوية؟'); });
+  assert.equal(asked, 0);
+  assert.equal(r.taskId, PROGRESS);
+  assert.equal(r.choices.id, `PRQ${PROGRESS}`);
+  assert.deepEqual(r.choices.options.map(o => o.id), [`PR${PROGRESS}_red`, `PR${PROGRESS}_yellow`, `PR${PROGRESS}_green`]);
+  assert.deepEqual(r.choices.options.map(o => o.label), ['🔴 قصوى', '🟡 متوسطة', '🟢 عادية']);
+});
+
+test('tapping a priority files it against that exact task, with no model turn', async t => {
+  const f = fixture(t);
+  let asked = 0;
+  await f.run(undefined, tap(`TSKQ${PROGRESS}`, `TSK${PROGRESS}EDIT`), async () => { asked += 1; return emptySecretaryIntent('chat', ''); });
+  const r = await f.run(undefined, tap(`PRQ${PROGRESS}`, `PR${PROGRESS}_green`), async () => { asked += 1; return emptySecretaryIntent('chat', ''); });
+  assert.equal(asked, 0);
+  // خالد is an employee, so his own priority change goes to Basim as a request.
+  assert.equal(r.status, 'applied');
+  assert.match(r.reply, /رفعت طلب تعديل الأولوية/);
+  assert.equal(f.db.prepare("SELECT count(*) AS n FROM approvals WHERE type='priority_change' AND entity_id=?").get(PROGRESS).n, 1);
+});
+
+test('a priority tap for a task removed since the poll was sent says so', async t => {
+  const f = fixture(t);
+  f.db.prepare('DELETE FROM comments WHERE task_id=?').run(PROGRESS);
+  f.db.prepare('DELETE FROM tasks WHERE id=?').run(PROGRESS);
+  let asked = 0;
+  const r = await f.run(undefined, tap(`PRQ${PROGRESS}`, `PR${PROGRESS}_red`), async () => { asked += 1; return emptySecretaryIntent('chat', ''); });
+  assert.equal(asked, 0);
+  assert.match(r.reply, /ما عادت متاحة/);
 });
 
 // Basim (2026-09-15): "مش على اساس عملت فلتر يوم ويومين و5 ايام؟" -- he tapped
@@ -267,14 +318,13 @@ test('an EXTEND tap on a task that is gone says so instead of asking the model',
   assert.equal(asked, 0);
   assert.match(r.reply, /ما عادت متاحة/);
 });
-test('a NOTE/TRANSFER/EXTEND tap for a task removed since the poll was sent falls back to the raw tap text instead of crashing', async t => {
+test('a NOTE tap for a task removed since the poll was sent says so instead of crashing', async t => {
   const f = fixture(t);
   f.db.prepare('DELETE FROM tasks WHERE id=?').run(PROGRESS);
-  // The bridge always seeds a poll-tap event's text with the tapped option's
-  // own label (see polls.mjs) before any rewrite -- with the task gone,
-  // resolveTaskActionTextChoice has nothing to rewrite it into and leaves it.
-  let seen; await f.run(undefined, { text: '📝 أضيف ملاحظة', ...tap(`TSKQ${PROGRESS}`, `TSK${PROGRESS}NOTE`) }, async input => { seen = input; return emptySecretaryIntent('chat', 'تمام'); });
-  assert.equal(seen.text, '📝 أضيف ملاحظة', 'the poll option label, since there is no live task left to rewrite around');
+  let asked = 0;
+  const r = await f.run(undefined, { text: '📝 أضيف ملاحظة', ...tap(`TSKQ${PROGRESS}`, `TSK${PROGRESS}NOTE`) }, async () => { asked += 1; return emptySecretaryIntent('chat', 'تمام'); });
+  assert.equal(asked, 0);
+  assert.match(r.reply, /ما عادت متاحة/);
 });
 // Basim: "بدي هذه تتحول تصويت للكل وفي كل مكان" -- the standalone command
 // legend (see notifyTaskLegend/TASK_COMMANDS_LEGEND/taskCommandsLegendPoll in

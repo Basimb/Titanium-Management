@@ -51,7 +51,7 @@ const SENSITIVE = new Set(["edit_task", "cancel_claim", "submit", "approve", "re
 const TASK_COMMANDS_LEGEND = "🧭 أوامر المهام السريعة — ارسل الرقم مباشرة:\n\n1️⃣ 🟢 اضافة مهمة\n2️⃣ 🔵 اضافة ملاحظة\n3️⃣ 🟣 تحويل المهمة\n4️⃣ 🟠 تمديد التاريخ\n5️⃣ 🔴 انهاء المهمة";
 // Basim: "بدي هذه تتحول تصويت للكل وفي كل مكان" -- the legend above is plain
 // text everywhere it's sent, so attach a poll alongside it (same trick as
-// resolveTaskActionTextChoice's NOTE/TRANSFER/EDIT/EXTEND below) whose four
+// the NOTE/TRANSFER/EDIT/EXTEND task-action taps below) whose four
 // options are just the exact bare command phrases the legend already tells
 // people to type. A tap is rewritten to that literal text, once, at the very
 // top of the pipeline (resolveTaskCommandsLegendChoice), then falls through
@@ -158,6 +158,33 @@ function extensionDurationPoll(taskId: string, now: number): SecretaryChoices {
   // the 10-minute CONFIRM_MS window the old text question was bounded by.
   return { id: `EXTQ${taskId}`, title: "لأي مدة بدك تمدد الموعد؟", expiresAt: now + TASK_CLOSE_POLL_LIFETIME_MS,
     options: EXTENSION_DAY_OPTIONS.map(days => ({ id: `EXT${taskId}D${days}`, label: EXTENSION_DAY_LABELS[days] })) };
+}
+// Basim (2026-09-16): the SAME defect the extension durations had, on the
+// other two options of a task-action poll. He tapped "\ud83d\udcdd \u0623\u0636\u064a\u0641 \u0645\u0644\u0627\u062d\u0638\u0629" on one
+// specific task and the bot answered "\u0639\u0646\u062f\u0643 \u0623\u0643\u062b\u0631 \u0645\u0646 \u0645\u0647\u0645\u0629 \u062a\u0646\u0637\u0628\u0642\u060c \u0623\u064a \u0648\u062d\u062f\u0629
+// \u0628\u0627\u0644\u0636\u0628\u0637\u061f" with a list -- because the tap was being turned
+// tap back into a SENTENCE for the model, and the model's comment path
+// deliberately distrusts its own taskId guess once the actor has several
+// eligible tasks (rightly: a guess from free text is a guess). But a tap is
+// not a guess. The task id was in the option id the whole time. So note,
+// transfer and priority now resolve here, like claim/submit/extend already do.
+const PRIORITY_POLL_VALUES = ["red", "yellow", "green"] as const;
+const PRIORITY_POLL_LABELS: Record<string, string> = { red: "\ud83d\udd34 \u0642\u0635\u0648\u0649", yellow: "\ud83d\udfe1 \u0645\u062a\u0648\u0633\u0637\u0629", green: "\ud83d\udfe2 \u0639\u0627\u062f\u064a\u0629" };
+function taskPriorityPoll(taskId: string, now: number): SecretaryChoices {
+  // Same 24h ceiling extensionDurationPoll uses, and the same reason: a tap
+  // that arrives late still names the exact task and the exact value.
+  return { id: `PRQ${taskId}`, title: "\u0634\u0648 \u0627\u0644\u0623\u0648\u0644\u0648\u064a\u0629 \u0627\u0644\u062c\u062f\u064a\u062f\u0629\u061f", expiresAt: now + TASK_CLOSE_POLL_LIFETIME_MS,
+    options: PRIORITY_POLL_VALUES.map(value => ({ id: `PR${taskId}_${value}`, label: PRIORITY_POLL_LABELS[value] })) };
+}
+function parseTaskPriorityChoice(event: Event): { taskId: string; priority: "red" | "yellow" | "green" } | null {
+  const choice = event.choice;
+  if (!choice || !choice.questionId.startsWith("PRQ")) return null;
+  const taskId = choice.questionId.slice(3);
+  if (!/^[a-zA-Z0-9_-]{1,200}$/.test(taskId)) return null;
+  const prefix = `PR${taskId}_`;
+  if (!choice.optionId.startsWith(prefix)) return null;
+  const value = choice.optionId.slice(prefix.length);
+  return (PRIORITY_POLL_VALUES as readonly string[]).includes(value) ? { taskId, priority: value as "red" | "yellow" | "green" } : null;
 }
 function parseExtensionDurationChoice(event: Event): { taskId: string; days: number } | null {
   const choice = event.choice;
@@ -866,7 +893,7 @@ function parseTaskCloseDecisionPollChoice(event: Event): { taskId: string; decis
 // CLAIM/FINISH), a rejection needs the reason executeManagementAction's own
 // "reject" case requires (management-actions.ts's required(command.reason,...)),
 // which a tap can't carry. Same rewrite-to-text convention as
-// resolveTaskActionTextChoice's NOTE/TRANSFER/EDIT/EXTEND below: the normal
+// the NOTE/TRANSFER/EDIT/EXTEND task-action taps below: the normal
 // model-driven pipeline resolves the task from its current title and, per
 // secretary-intent.ts's existing "no reason yet" clarify, asks Basim for the
 // reason before anything executes.
@@ -885,7 +912,7 @@ function resolveTaskCloseDecisionRejectChoice(db: DatabaseSync, event: Event): E
 // approval decision -- deterministically, no model involved (see the
 // dedicated branch in handleSecretaryEvent). NOTE/TRANSFER/EXTEND need
 // content a tap can't carry (a note's body, a colleague's name, a new date),
-// so those are handled below by resolveTaskActionTextChoice instead.
+// so those are handled below by their own deterministic tap branches instead.
 function parseTaskActionPollChoice(event: Event): { taskId: string; action: "claim" | "submit" | "note" | "transfer" | "extend" | "edit" } | null {
   const choice = event.choice;
   if (!choice || !choice.questionId.startsWith("TSKQ")) return null;
@@ -961,40 +988,6 @@ function parseUnownedTaskPollChoice(event: Event): { taskId: string; target: str
   if (!choice.optionId.startsWith(prefix)) return null;
   const target = choice.optionId.slice(prefix.length);
   return target ? { taskId, target } : null;
-}
-// Inverse of taskActionPoll's NOTE/TRANSFER/EXTEND options. Unlike CLAIM/
-// FINISH, these three cannot resolve on the tap alone -- rewrite the tap,
-// once, at the very top (same spot resolveConfirmChoice already runs),
-// into the exact sentence a person naming the task by its own title would
-// have typed, using the task's CURRENT title (never the one shown when the
-// poll was sent). The existing model-driven flow already resolves
-// plan.taskId from a title mention and already asks for whatever else it
-// still needs (the note's content, the colleague's name, the new date) --
-// exactly as it would for someone who typed the same sentence themselves.
-function resolveTaskActionTextChoice(db: DatabaseSync, event: Event): Event {
-  const parsed = parseTaskActionPollChoice(event);
-  // Basim (2026-09-15): "مش على اساس عملت فلتر يوم ويومين و5 ايام؟" -- he tapped
-  // "🕐 بدي تمديد" on a task-action poll and never saw the three durations. They
-  // existed, but only on the LEGEND path (LGDEXTEND / a typed "تمديد التاريخ");
-  // this rewrite quietly turned the TAP into the sentence "بدي أمدد موعد مهمة
-  // «...»" and handed it to the model, which picked a date on its own (it chose
-  // tomorrow) and went straight to a confirmation -- exactly the guessing the
-  // fixed durations were added to remove. "extend" now keeps its choice and is
-  // answered deterministically further down, like claim/submit already are.
-  if (!parsed || parsed.action === "claim" || parsed.action === "submit" || parsed.action === "extend") return event;
-  // Always clear choice here, task found or not: NOTE/TRANSFER/EXTEND are
-  // never meant to be resolved deterministically, and the generic live-poll
-  // handler further below is scoped to Basim's own task-intake/approval-
-  // decision flows -- leaving choice set would fall into that and get denied
-  // outright instead of degrading to the plain (if generic) tap-label text.
-  const task = db.prepare("SELECT title FROM tasks WHERE id=?").get(parsed.taskId) as { title: string } | undefined;
-  if (!task) return { ...event, choice: undefined };
-  const title = clean(task.title, 150);
-  const text = parsed.action === "note" ? `بدي أضيف ملاحظة على مهمة «${title}»`
-    : parsed.action === "transfer" ? `بدي أحول مهمة «${title}» لحدا غيري`
-    : parsed.action === "edit" ? `بدي أعدل أولوية مهمة «${title}»`
-    : `بدي أمدد موعد مهمة «${title}»`;
-  return { ...event, text, choice: undefined };
 }
 // The one or two actions that actually apply to this task right now, for
 // this specific person -- never fewer than 2 (WhatsApp's own poll minimum);
@@ -1230,7 +1223,6 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
   migrateSecretary(db); const now = (dependencies.now || Date.now)();
   event = resolveConfirmChoice(event);
   event = resolveTaskCommandsLegendChoice(db, event, config, now);
-  event = resolveTaskActionTextChoice(db, event);
   event = resolveTaskCloseDecisionRejectChoice(db, event);
   const actor = actorFor(db, event, config); if (!actor) return { status: "denied", reply: "" };
   // The team group is one-way by default: automated notices only (task
@@ -1345,8 +1337,68 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
   // extended here to "submit" too. Open to any active actor in their own
   // private chat, not just Basim: these are two everyday actions any
   // employee already has today, just reachable with a tap instead of typing.
+  // A tapped "\ud83d\udcdd \u0623\u0636\u064a\u0641 \u0645\u0644\u0627\u062d\u0638\u0629" / "\ud83d\udd04 \u062d\u0648\u0651\u0644\u0647\u0627 \u0644\u062d\u062f\u0627 \u063a\u064a\u0631\u064a" / "\ud83d\udd27 \u063a\u064a\u0651\u0631 \u0627\u0644\u0623\u0648\u0644\u0648\u064a\u0629"
+  // (see PRIORITY_POLL_VALUES' comment above for the bug this replaces). Each
+  // still needs ONE more thing -- the note's text, the transfer's reason, the
+  // new priority -- but never "which task", which the tap already settled.
+  // Note and transfer stash that question the same way the legend's own
+  // which-task poll already does (secretary_note_followup: the very next plain
+  // message IS the answer); priority has three fixed values, so it is a poll.
+  const taskActionAsk = parseTaskActionPollChoice(event);
+  if (taskActionAsk && (taskActionAsk.action === "note" || taskActionAsk.action === "transfer" || taskActionAsk.action === "edit")
+      && actor.active === 1 && event.groupId === null && !event.replyToMessageId) {
+    return transaction(db, () => {
+      const fresh = actorFor(db, event, config);
+      if (!config.enabled || !fresh || JSON.stringify(fresh) !== JSON.stringify(actor)) return { status: "denied", reply: "" };
+      const duplicate = lookup(db, event, fresh, stateFor(db, fresh)); if (duplicate) return duplicate;
+      const state = stateFor(db, fresh);
+      const task = state.tasks.find(t => t.id === taskActionAsk.taskId);
+      if (!task) return save(db, event, fresh, { status: "clarify", reply: "\u0647\u0627\u064a \u0627\u0644\u0645\u0647\u0645\u0629 \u0645\u0627 \u0639\u0627\u062f\u062a \u0645\u062a\u0627\u062d\u0629." }, [], now);
+      if (taskActionAsk.action === "edit") {
+        return save(db, event, fresh, { status: "clarify",
+          reply: `\u0634\u0648 \u0627\u0644\u0623\u0648\u0644\u0648\u064a\u0629 \u0627\u0644\u062c\u062f\u064a\u062f\u0629 \u0644\u0640\u00ab${clean(task.title, 150)}\u00bb\u061f`, taskId: task.id,
+          choices: taskPriorityPoll(task.id, now) }, ["t:" + task.id], now);
+      }
+      const isTransfer = taskActionAsk.action === "transfer";
+      db.prepare("INSERT INTO secretary_note_followup VALUES(?,?,?,?,?) ON CONFLICT(conversation_key) DO UPDATE SET action=excluded.action,task_id=excluded.task_id,expires_at=excluded.expires_at,source_message_id=excluded.source_message_id")
+        .run(key, isTransfer ? "task_transfer_request" : "comment", task.id, now + CONFIRM_MS, event.messageId);
+      return save(db, event, fresh, { status: "clarify", taskId: task.id,
+        reply: isTransfer
+          ? `\u0634\u0648 \u0633\u0628\u0628 \u062a\u062d\u0648\u064a\u0644 \u00ab${clean(task.title, 150)}\u00bb \u0628\u0627\u0644\u0636\u0628\u0637\u061f \u0644\u0627\u0632\u0645 \u0646\u0639\u0631\u0641 \u0627\u0644\u0633\u0628\u0628 \u0642\u0628\u0644 \u0645\u0627 \u0623\u0631\u0641\u0639 \u0627\u0644\u0637\u0644\u0628 \u0644\u0628\u0627\u0633\u0645.`
+          : `\u062a\u0645\u0627\u0645\u060c \u0627\u0643\u062a\u0628 \u0646\u0635 \u0627\u0644\u0645\u0644\u0627\u062d\u0638\u0629 \u0639\u0644\u0649 \u0645\u0647\u0645\u0629 \u00ab${clean(task.title, 150)}\u00bb \u0627\u0644\u0622\u0646.` }, ["t:" + task.id], now);
+    });
+  }
+  // The answer to the priority poll above. Routed through the model's own
+  // priority_change case rather than re-implemented: that case already knows
+  // the admin/employee split (Basim confirms and it applies; an employee's
+  // goes to him as an approval), and the plan it receives here carries a task
+  // id and a value that both came from tapped option ids, never a guess.
+  const taskPriorityChoice = parseTaskPriorityChoice(event);
+  if (taskPriorityChoice && actor.active === 1 && event.groupId === null && !event.replyToMessageId) {
+    return transaction(db, () => {
+      const fresh = actorFor(db, event, config);
+      if (!config.enabled || !fresh || JSON.stringify(fresh) !== JSON.stringify(actor)) return { status: "denied", reply: "" };
+      const duplicate = lookup(db, event, fresh, stateFor(db, fresh)); if (duplicate) return duplicate;
+      const state = stateFor(db, fresh);
+      const task = state.tasks.find(t => t.id === taskPriorityChoice.taskId);
+      if (!task) return save(db, event, fresh, { status: "clarify", reply: "\u0647\u0627\u064a \u0627\u0644\u0645\u0647\u0645\u0629 \u0645\u0627 \u0639\u0627\u062f\u062a \u0645\u062a\u0627\u062d\u0629." }, [], now);
+      const base = emptySecretaryIntent("priority_change");
+      const syntheticPlan: SecretaryIntent = { ...base, taskId: task.id, fields: { ...base.fields, priority: taskPriorityChoice.priority } };
+      try {
+        const result = handleAgentIntent(syntheticPlan, { db, actor: fresh, now, inputKind: event.inputKind, text: event.text, messageId: event.messageId, suppressNotices: false, users: state.users, tasks: state.tasks,
+          conversationKey: key,
+          stash: command => { const stashToken = "T" + randomBytes(3).toString("hex").toUpperCase(); db.prepare("INSERT INTO secretary_pending VALUES(?,?,?,?,?,?,?)").run(key, stashToken, JSON.stringify(command), initialHash, event.text, event.messageId, now + CONFIRM_MS); log(db, fresh, event, "secretary_proposal", { summary: "\u0639\u0631\u0636 \u062a\u063a\u064a\u064a\u0631\u064b\u0627 \u064a\u0646\u062a\u0638\u0631 \u0627\u0644\u062a\u0623\u0643\u064a\u062f", proposedCommand: command, confirmationRequired: true }, now); return stashToken; } });
+        if (!result) return save(db, event, fresh, { status: "clarify", reply: "\u0645\u0627 \u0642\u062f\u0631\u062a \u0623\u0643\u0645\u0644 \u0647\u0630\u0627 \u0627\u0644\u0637\u0644\u0628." }, [], now);
+        deliverAgentSideEffects(db, fresh, result, now);
+        return save(db, event, fresh, { status: result.status, reply: result.reply, ...(result.taskId ? { taskId: result.taskId } : {}), ...(result.choices ? { choices: result.choices } : {}) }, ["t:" + task.id], now);
+      } catch (error) {
+        if (!(error instanceof ManagementActionError)) throw error;
+        return save(db, event, fresh, { status: "clarify", reply: error.message }, [], now);
+      }
+    });
+  }
   // The "\ud83d\udd50 \u0628\u062f\u064a \u062a\u0645\u062f\u064a\u062f" option of a task-action poll (see
-  // resolveTaskActionTextChoice's comment above for what this used to do
+  // PRIORITY_POLL_VALUES' comment above for what this used to do
   // instead). The tap already names the task, so the only open question is
   // how long -- and that question has three fixed answers Basim chose, each
   // counted from today in code. Same reply the legend path already gives, so
