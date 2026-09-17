@@ -92,8 +92,33 @@ const money = (value: number, label?: string) => label ? `${formatAmount(value)}
 
 export type OdooAnswerConfig = { odoo: OdooConfig; currencyLabel?: string; lowStockThreshold?: number; expiryWindowDays?: number; fetcher?: typeof fetch };
 
+// Basim (2026-09-17): "بدي يصير جاوبني بسرعه فائقه". The same question asked
+// twice in a row -- which is what happens when he checks, then shows someone,
+// then checks again -- costs one trip to Odoo instead of two. The window is
+// deliberately short: a minute of staleness is invisible on a running daily
+// total, and anything longer would start answering a question about "الآن"
+// with a number from a noticeably different moment. The key carries the day
+// label, so the answer is never reused across midnight.
+const ANSWER_TTL_MS = 60_000;
+const answerCache = new Map<string, { text: string; at: number }>();
+
+/** Test seam: forget every cached answer, so a test starts from a clean slate. */
+export function forgetOdooAnswers(): void { answerCache.clear(); }
+
 /** Answers one matched question. Throws OdooError if the system is unreachable. */
 export async function answerOdooQuestion(match: OdooQuestionMatch, config: OdooAnswerConfig, at: number): Promise<string> {
+  const key = `${config.odoo.url}|${config.odoo.db}|${match.kind}|${match.branch ?? ""}|${dateLabel(at)}`;
+  const cached = answerCache.get(key);
+  if (cached && at - cached.at >= 0 && at - cached.at < ANSWER_TTL_MS) return cached.text;
+  const text = await freshAnswer(match, config, at);
+  // Bounded: the question set is fixed and small, but a long-running process
+  // should never accumulate keys from days it has already left behind.
+  if (answerCache.size > 64) answerCache.clear();
+  answerCache.set(key, { text, at });
+  return text;
+}
+
+async function freshAnswer(match: OdooQuestionMatch, config: OdooAnswerConfig, at: number): Promise<string> {
   const session = await openOdooSession(config.odoo, config.fetcher);
   const currency = config.currencyLabel;
   if (match.kind === "sales_today" || match.kind === "sales_yesterday" || match.kind === "sales_month") {

@@ -45,6 +45,32 @@ async function authenticate(config: OdooConfig, fetcher: Fetcher): Promise<numbe
   return result;
 }
 
+// Basim (2026-09-17): "بدي يصير جاوبني بسرعه فائقه". Every live question used
+// to spend a full round trip logging in before it could ask anything, and the
+// login is the slowest call Odoo serves -- it is the only one that touches the
+// user table. The uid it returns does not change, so it is worth keeping.
+//
+// Cached per (server, database, user) AND per fetcher: tests pass their own
+// fetcher and must never inherit a uid another test's stub handed out. A
+// rejected uid (password rotated, session invalidated server-side) drops the
+// entry and the caller authenticates again, so a stale uid costs one retry
+// rather than a broken answer.
+const UID_TTL_MS = 30 * 60_000;
+const uidCache = new Map<string, { uid: number; at: number; fetcher: Fetcher }>();
+const uidKey = (config: OdooConfig) => `${config.url}|${config.db}|${config.username}`;
+
+async function cachedUid(config: OdooConfig, fetcher: Fetcher, now: number): Promise<{ uid: number; reused: boolean }> {
+  const key = uidKey(config);
+  const cached = uidCache.get(key);
+  if (cached && cached.fetcher === fetcher && now - cached.at < UID_TTL_MS) return { uid: cached.uid, reused: true };
+  const uid = await authenticate(config, fetcher);
+  uidCache.set(key, { uid, at: now, fetcher });
+  return { uid, reused: false };
+}
+
+/** Test seam: forget every cached login, so a test starts from a clean slate. */
+export function forgetOdooSessions(): void { uidCache.clear(); }
+
 function formatAmount(value: number): string {
   const fixed = (Number.isFinite(value) ? value : 0).toFixed(2);
   const [whole, fraction] = fixed.split(".");
@@ -80,11 +106,23 @@ export type OdooSession = {
 };
 
 /** Authenticates once, then reuses that session for every read below. */
-export async function openOdooSession(config: OdooConfig, fetcher: Fetcher = fetch): Promise<OdooSession> {
+export async function openOdooSession(config: OdooConfig, fetcher: Fetcher = fetch,
+  now: () => number = Date.now): Promise<OdooSession> {
   assertConfig(config);
-  const uid = await authenticate(config, fetcher);
-  const execute = (model: string, method: string, args: unknown[], kwargs: Record<string, unknown> = {}) =>
-    call(config, "object", "execute_kw", [config.db, uid, config.apiKey, model, method, args, kwargs], fetcher);
+  let { uid, reused } = await cachedUid(config, fetcher, now());
+  const execute = async (model: string, method: string, args: unknown[], kwargs: Record<string, unknown> = {}): Promise<unknown> => {
+    try {
+      return await call(config, "object", "execute_kw", [config.db, uid, config.apiKey, model, method, args, kwargs], fetcher);
+    } catch (error) {
+      // Only a uid that was handed to us by an earlier request can be stale, and
+      // only once: after re-authenticating, a second failure is the real error.
+      if (!reused || !(error instanceof OdooError)) throw error;
+      reused = false;
+      uidCache.delete(uidKey(config));
+      ({ uid } = await cachedUid(config, fetcher, now()));
+      return call(config, "object", "execute_kw", [config.db, uid, config.apiKey, model, method, args, kwargs], fetcher);
+    }
+  };
   return {
     async salesSummary(sinceIso, untilIso) {
       const domain = [["date_order", ">=", sinceIso], ["date_order", "<", untilIso], ["state", "in", ["paid", "done", "invoiced"]]];

@@ -5,7 +5,12 @@
 // all. A wrong number would be worse than no answer, because he acts on it.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { matchOdooQuestion, answerOdooQuestion, normalizeArabic } from "../lib/odoo-questions.ts";
+import { matchOdooQuestion, answerOdooQuestion, normalizeArabic, forgetOdooAnswers } from "../lib/odoo-questions.ts";
+import { forgetOdooSessions } from "../lib/odoo-client.ts";
+
+// Answers are cached for a minute and logins for half an hour, both keyed by
+// the fetcher, so one test can never be handed another test's numbers.
+test.beforeEach(() => { forgetOdooAnswers(); forgetOdooSessions(); });
 
 const odoo = { url: "https://pharmacy.example.com", db: "pharmacy", username: "bot@x.com", apiKey: "k" };
 // 2026-09-17 12:00 Amman
@@ -127,4 +132,57 @@ test("low stock lists the items under the threshold", async () => {
   assert.ok(calls[0].domain.some(c => c[0] === "qty_available" && c[2] === 5));
   assert.match(text, /بانادول — 2/);
   assert.match(text, /فيتامين د — 0/);
+});
+
+// Basim (2026-09-17): "بدي يصير جاوبني بسرعه فائقه". Two round trips per
+// question -- log in, then ask -- is most of the wait, and the login half is
+// pure overhead: the uid it returns never changes. These three tests are the
+// reason the answer can come back in one trip, and often in none.
+test("asking the same thing again inside the minute answers without touching the pharmacy system", async () => {
+  const { fetcher, calls } = fetcherFor({ "pos.order": () => [{ location_id: [1, "NAOOR/Stock"], amount_total: 500, __count: 20 }] });
+  const match = matchOdooQuestion("شو مبيعات اليوم؟");
+  const first = await answerOdooQuestion(match, { odoo, fetcher }, AT);
+  assert.equal(calls.length, 1);
+  const again = await answerOdooQuestion(match, { odoo, fetcher }, AT + 30_000);
+  assert.equal(again, first);
+  assert.equal(calls.length, 1, "a repeat inside the window must not ask Odoo again");
+  // Past the window the number is fetched fresh, because he acts on it.
+  await answerOdooQuestion(match, { odoo, fetcher }, AT + 61_000);
+  assert.equal(calls.length, 2);
+});
+
+test("a different question is never answered from another question's cache", async () => {
+  const { fetcher, calls } = fetcherFor({
+    "pos.order": () => [{ location_id: [1, "NAOOR/Stock"], amount_total: 500, __count: 20 }],
+    "account.move": () => [{ amount_residual: 90, __count: 3 }],
+  });
+  await answerOdooQuestion(matchOdooQuestion("شو مبيعات اليوم؟"), { odoo, fetcher }, AT);
+  const bills = await answerOdooQuestion(matchOdooQuestion("كم فاتورة مورد مش مدفوعة"), { odoo, fetcher }, AT);
+  assert.match(bills, /فواتير موردين/);
+  assert.equal(calls.length, 2);
+  // A branch question is its own answer too, never the all-branches one.
+  const branch = await answerOdooQuestion(matchOdooQuestion("مبيعات صافوط اليوم"), { odoo, fetcher }, AT);
+  assert.match(branch, /ما في مبيعات مسجّلة لفرع صافوط/);
+});
+
+test("the login happens once and is reused by later questions, and a rejected login is retried once", async () => {
+  forgetOdooSessions();
+  let logins = 0;
+  let rejectOnce = false;
+  const fetcher = async (url, options) => {
+    const body = JSON.parse(options.body);
+    if (body.params.service === "common") { logins += 1; return { ok: true, json: async () => ({ result: 7 }) }; }
+    if (rejectOnce) { rejectOnce = false; return { ok: true, json: async () => ({ error: { message: "session expired" } }) }; }
+    return { ok: true, json: async () => ({ result: [{ amount_residual: 10, __count: 1 }] }) };
+  };
+  const match = matchOdooQuestion("كم فاتورة مورد مش مدفوعة");
+  await answerOdooQuestion(match, { odoo, fetcher }, AT);
+  assert.equal(logins, 1);
+  await answerOdooQuestion(match, { odoo, fetcher }, AT + 61_000);
+  assert.equal(logins, 1, "the second question must not log in again");
+  // A uid the server no longer accepts costs one extra login, not an error.
+  rejectOnce = true;
+  const reply = await answerOdooQuestion(match, { odoo, fetcher }, AT + 122_000);
+  assert.match(reply, /فواتير موردين/);
+  assert.equal(logins, 2);
 });
