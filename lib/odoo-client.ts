@@ -80,7 +80,15 @@ function formatAmount(value: number): string {
   return `${withSeparators}.${fraction}`;
 }
 
-export type SalesSummary = { orderCount: number; totalAmount: number };
+// A till refund is stored as an order with a negative total in the very same
+// states, so it nets out of totalAmount correctly -- but counting it as an
+// "operation" drags the average basket below the truth. Kept apart, so a
+// report can show both and mean both.
+export type SalesSummary = { orderCount: number; totalAmount: number; refundCount: number; refundAmount: number };
+// Sales that never touch the till: posted customer invoices. Insurance,
+// corporate accounts and the clinics bill this way, and every figure in this
+// file used to miss them entirely.
+export type InvoiceSales = { invoiceCount: number; totalAmount: number };
 export type LowStockItem = { name: string; qty: number };
 export type LocationSales = { location: string; orderCount: number; totalAmount: number };
 // "مشتريات" = posted vendor bills (account.move, move_type=in_invoice); "مرتجعات
@@ -95,7 +103,7 @@ export type PurchaseSummary = { purchaseCount: number; purchaseAmount: number; r
 // described. These read stock.quant instead, filtered to internal locations
 // and a positive quantity, so the number is what is actually on a shelf.
 export type ExpirySummary = { expiredLines: number; expiredQty: number; soonLines: number; soonQty: number; withinDays: number };
-export type PayablesSummary = { billCount: number; billTotal: number };
+export type PayablesSummary = { billCount: number; billTotal: number; creditCount: number; creditTotal: number };
 
 export type OdooSession = {
   // The composed-query escape hatch. It takes only a SafeOdooQuery, which
@@ -104,11 +112,14 @@ export type OdooSession = {
   // methods it forwards are the three the validator admits.
   runQuery(query: SafeOdooQuery): Promise<unknown>;
   salesSummary(sinceIso: string, untilIso: string): Promise<SalesSummary>;
+  invoiceSales(sinceIso: string, untilIso: string): Promise<InvoiceSales>;
   salesByLocation(sinceIso: string, untilIso: string): Promise<LocationSales[]>;
   purchaseSummary(sinceIso: string, untilIso: string): Promise<PurchaseSummary>;
   lowStock(thresholdQty: number, limit?: number): Promise<LowStockItem[]>;
+  // The real number, not the length of a list that was capped for display.
+  lowStockCount(thresholdQty: number): Promise<number>;
   activeProductCount(): Promise<number>;
-  expirySummary(withinDays: number): Promise<ExpirySummary>;
+  expirySummary(withinDays: number, at?: number): Promise<ExpirySummary>;
   openPayables(): Promise<PayablesSummary>;
 };
 
@@ -142,10 +153,29 @@ export async function openOdooSession(config: OdooConfig, fetcher: Fetcher = fet
           ...(query.order ? { order: query.order } : {}) });
     },
     async salesSummary(sinceIso, untilIso) {
-      const domain = [["date_order", ">=", sinceIso], ["date_order", "<", untilIso], ["state", "in", ["paid", "done", "invoiced"]]];
-      const groups = (await execute("pos.order", "read_group", [domain, ["amount_total"], []])) as Array<Record<string, unknown>> | undefined;
+      const window: unknown[] = [["date_order", ">=", sinceIso], ["date_order", "<", untilIso], ["state", "in", ["paid", "done", "invoiced"]]];
+      const read = async (extra: unknown[]) => {
+        const groups = (await execute("pos.order", "read_group", [[...window, ...extra], ["amount_total"], []], { lazy: true })) as Array<Record<string, unknown>> | undefined;
+        const row = Array.isArray(groups) ? groups[0] : undefined;
+        return { count: Number(row?.__count ?? 0), amount: Number(row?.amount_total ?? 0) };
+      };
+      const [sales, refunds] = await Promise.all([read([["amount_total", ">=", 0]]), read([["amount_total", "<", 0]])]);
+      return {
+        orderCount: sales.count, refundCount: refunds.count,
+        // The total is still everything net of refunds -- only the counts split.
+        totalAmount: sales.amount + refunds.amount, refundAmount: Math.abs(refunds.amount),
+      };
+    },
+    async invoiceSales(sinceIso, untilIso) {
+      // invoice_date is a Date field, not a datetime: compare on YYYY-MM-DD,
+      // inclusive at the start and exclusive at the end, to match the till
+      // window this sits beside.
+      const since = sinceIso.slice(0, 10), until = untilIso.slice(0, 10);
+      const domain = [["move_type", "=", "out_invoice"], ["state", "=", "posted"],
+        ["invoice_date", ">=", since], ["invoice_date", "<", until]];
+      const groups = (await execute("account.move", "read_group", [domain, ["amount_total"], []], { lazy: true })) as Array<Record<string, unknown>> | undefined;
       const row = Array.isArray(groups) ? groups[0] : undefined;
-      return { orderCount: Number(row?.__count ?? 0), totalAmount: Number(row?.amount_total ?? 0) };
+      return { invoiceCount: Number(row?.__count ?? 0), totalAmount: Number(row?.amount_total ?? 0) };
     },
     async salesByLocation(sinceIso, untilIso) {
       const domain = [["date_order", ">=", sinceIso], ["date_order", "<", untilIso], ["state", "in", ["paid", "done", "invoiced"]]];
@@ -178,14 +208,19 @@ export async function openOdooSession(config: OdooConfig, fetcher: Fetcher = fet
         { order: "qty_available asc", limit })) as Array<Record<string, unknown>> | undefined;
       return (Array.isArray(rows) ? rows : []).map(row => ({ name: String(row.name ?? "?"), qty: Number(row.qty_available ?? 0) }));
     },
-    async expirySummary(withinDays) {
+    async expirySummary(withinDays, at = Date.now()) {
       // Odoo renamed stock.production.lot to stock.lot in 16.0; this instance
       // is 16.0 (verified against the live server), and the domain walks
       // lot_id.expiration_date rather than reading lots directly so that a lot
       // with no stock left simply does not appear.
-      const day = 86_400_000;
-      const today = new Date(Date.now()).toISOString().slice(0, 10);
-      const until = new Date(Date.now() + withinDays * day).toISOString().slice(0, 10);
+      // "Today" is the pharmacy's today, not the server's: between midnight and
+      // 3am in Amman the UTC date is still yesterday's, and an item expiring
+      // today would land in the wrong bucket. It is also the moment the question
+      // was asked, never the moment this line happens to run.
+      const day = 86_400_000, amman = 180 * 60_000;
+      const local = (ms: number) => new Date(ms + amman).toISOString().slice(0, 10);
+      const today = local(at);
+      const until = local(at + withinDays * day);
       const internal: unknown[] = [["location_id.usage", "=", "internal"], ["quantity", ">", 0]];
       const read = async (extra: unknown[]) => {
         const groups = (await execute("stock.quant", "read_group", [[...internal, ...extra], ["quantity"], []], { lazy: true })) as Array<Record<string, unknown>> | undefined;
@@ -199,12 +234,23 @@ export async function openOdooSession(config: OdooConfig, fetcher: Fetcher = fet
       return { expiredLines: expired.lines, expiredQty: expired.qty, soonLines: soon.lines, soonQty: soon.qty, withinDays };
     },
     async openPayables() {
-      // Posted vendor bills that are still unpaid or only part-paid -- the same
-      // move_type the purchases report already uses, narrowed by payment_state.
-      const domain = [["move_type", "=", "in_invoice"], ["state", "=", "posted"], ["payment_state", "in", ["not_paid", "partial"]]];
-      const groups = (await execute("account.move", "read_group", [domain, ["amount_residual"], []], { lazy: true })) as Array<Record<string, unknown>> | undefined;
-      const row = Array.isArray(groups) ? groups[0] : undefined;
-      return { billCount: Number(row?.__count ?? 0), billTotal: Number(row?.amount_residual ?? 0) };
+      // Posted vendor bills that are still unpaid or only part-paid -- and the
+      // unpaid credit notes that reduce what is actually owed. Counting only
+      // the bills, as this did, reads high by exactly the credit notes.
+      const open = (moveType: string) => [["move_type", "=", moveType], ["state", "=", "posted"],
+        ["payment_state", "in", ["not_paid", "partial"]]];
+      const read = async (moveType: string) => {
+        const groups = (await execute("account.move", "read_group", [open(moveType), ["amount_residual"], []], { lazy: true })) as Array<Record<string, unknown>> | undefined;
+        const row = Array.isArray(groups) ? groups[0] : undefined;
+        return { count: Number(row?.__count ?? 0), total: Number(row?.amount_residual ?? 0) };
+      };
+      const [bills, credits] = await Promise.all([read("in_invoice"), read("in_refund")]);
+      return { billCount: bills.count, billTotal: bills.total, creditCount: credits.count, creditTotal: Math.abs(credits.total) };
+    },
+    async lowStockCount(thresholdQty) {
+      const count = await execute("product.product", "search_count",
+        [[["sale_ok", "=", true], ["active", "=", true], ["qty_available", "<=", thresholdQty]]]);
+      return Number(count ?? 0);
     },
     async activeProductCount() {
       const count = await execute("product.product", "search_count", [[["sale_ok", "=", true], ["active", "=", true]]]);

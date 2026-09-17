@@ -306,3 +306,71 @@ test("the daily window is yesterday's full local day, even when sent mid-morning
     "midnight-to-midnight Amman on the 16th, not 09:00-to-09:00");
   assert.match(text, /2026-09-16/, "and labelled with the day it actually covers");
 });
+
+// 2026-09-17, the audit pass. Each of these was a figure that read as correct
+// and was not.
+test("the weekly window is seven whole local days, not a rolling 168 hours", async t => {
+  const db = fixture(t);
+  let domain;
+  // Saturday 20:00 local at UTC+3 -- the weekly slot, mid-evening, exactly the
+  // case where a rolling window silently starts and ends mid-afternoon.
+  const AT = Date.UTC(1970, 0, 3, 17, 0, 0);
+  const jobs = createOdooReportJobs({ db, now: () => AT, config: {
+    enabled: true, odoo, ownerNumber: "", groupId: "1@g.us", timezoneOffsetMinutes: 180,
+    routing: { odoo_weekly: { enabled: true, group: true, owner: false } },
+    fetcher: async (url, options) => {
+      const body = JSON.parse(options.body);
+      if (body.params.service === "common") return { ok: true, json: async () => ({ result: 1 }) };
+      if (body.params.args[3] === "pos.order") domain = body.params.args[5][0];
+      return { ok: true, json: async () => ({ result: body.params.args[4] === "search_count" ? 0 : [] }) };
+    },
+  } });
+  await jobs.deliverNext(async () => ({}));
+  const since = domain.find(leaf => leaf[0] === "date_order" && leaf[1] === ">=")[2];
+  const until = domain.find(leaf => leaf[0] === "date_order" && leaf[1] === "<")[2];
+  // Amman midnight is 21:00 UTC the day before, so both ends land on :00.
+  assert.match(since, /T21:00:00/, `window start ${since}`);
+  assert.match(until, /T21:00:00/, `window end ${until}`);
+});
+
+test("the count of items running out is the real one, not the length of a capped list", async t => {
+  const db = fixture(t);
+  let text;
+  const jobs = createOdooReportJobs({ db, now: () => WEEKLY_AT, config: {
+    enabled: true, odoo, ownerNumber: "", groupId: "1@g.us", timezoneOffsetMinutes: 0,
+    routing: { odoo_weekly: { enabled: true, group: true, owner: false } },
+    fetcher: async (url, options) => {
+      const body = JSON.parse(options.body);
+      if (body.params.service === "common") return { ok: true, json: async () => ({ result: 1 }) };
+      const [, , , model, method] = body.params.args;
+      if (model === "product.product" && method === "search_count") {
+        const domain = body.params.args[5][0];
+        // The low-stock count carries the threshold; the active-product count does not.
+        return { ok: true, json: async () => ({ result: domain.some(leaf => leaf[0] === "qty_available") ? 947 : 3100 }) };
+      }
+      if (model === "product.product") return { ok: true, json: async () => ({ result: [{ name: "بنادول", qty_available: 2 }] }) };
+      return { ok: true, json: async () => ({ result: [] }) };
+    },
+  } });
+  await jobs.deliverNext(async message => { text = message.text; return {}; });
+  assert.match(text, /\(947\)/, "the real count, not the twenty the list was capped at");
+  assert.match(text, /3100/);
+});
+
+test("a manual send does not swallow the next day's report", async t => {
+  const db = fixture(t);
+  const send = async () => ({});
+  const byLocation = [{ location: "NAOOR/Stock", orderCount: 3, totalAmount: 100 }];
+  const at = (hourUtc, dayUtc) => Date.UTC(1970, 0, dayUtc, hourUtc, 0, 0);
+  const jobsAt = now => createOdooReportJobs({ db, now: () => now, config: {
+    enabled: true, odoo, ownerNumber: "", groupId: "1@g.us", timezoneOffsetMinutes: 0,
+    fetcher: odooFetcher({ byLocation }),
+  } });
+  // The scheduled report for day 2.
+  assert.equal((await jobsAt(at(0, 2)).deliverNext(send)).status, "sent");
+  // An hour later the same day is still the same report -- correctly skipped.
+  assert.deepEqual(await jobsAt(at(1, 2)).deliverNext(send), { status: "idle" });
+  // The next day's slot is a different report and must go out, even though it
+  // is under 24 hours after a send that happened at 01:00.
+  assert.equal((await jobsAt(at(0, 3)).deliverNext(send)).status, "sent");
+});

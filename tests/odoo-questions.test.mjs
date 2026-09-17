@@ -157,9 +157,11 @@ test("a different question is never answered from another question's cache", asy
     "account.move": () => [{ amount_residual: 90, __count: 3 }],
   });
   await answerOdooQuestion(matchOdooQuestion("شو مبيعات اليوم؟"), { odoo, fetcher }, AT);
+  const asked = calls.length;
   const bills = await answerOdooQuestion(matchOdooQuestion("كم فاتورة مورد مش مدفوعة"), { odoo, fetcher }, AT);
   assert.match(bills, /فواتير موردين/);
-  assert.equal(calls.length, 2);
+  assert.ok(calls.length > asked, "a different question asks Odoo again");
+  assert.ok(calls.slice(asked).every(entry => entry.model === "account.move"));
   // A branch question is its own answer too, never the all-branches one.
   const branch = await answerOdooQuestion(matchOdooQuestion("مبيعات صافوط اليوم"), { odoo, fetcher }, AT);
   assert.match(branch, /ما في مبيعات مسجّلة لفرع صافوط/);
@@ -244,4 +246,44 @@ test("only a question is worth a routing call", () => {
   for (const text of ["ذكّر خالد بالطلبية", "خلصت", "تمام", "ابعت التقرير للمحاسب"]) {
     assert.equal(looksLikeOdooQuestion(text), false, text);
   }
+});
+
+// 2026-09-17, the audit pass.
+test("what we owe suppliers is net of the credit notes that reduce it", async () => {
+  const { fetcher, calls } = fetcherFor({
+    "account.move": (args) => {
+      const type = args[0].find(leaf => leaf[0] === "move_type")[2];
+      return type === "in_refund" ? [{ amount_residual: -140, __count: 2 }] : [{ amount_residual: 900, __count: 12 }];
+    },
+  });
+  const reply = await answerOdooQuestion(matchOdooQuestion("كم علينا للموردين مش مدفوع"), { odoo, fetcher, currencyLabel: "دينار" }, AT);
+  assert.match(reply, /العدد: \*12\* فاتورة/);
+  assert.match(reply, /المتبقّي: \*900\.00 دينار\*/);
+  assert.match(reply, /إشعارات خصم غير مطبّقة: \*140\.00 دينار\* من 2 إشعار/);
+  assert.match(reply, /الصافي علينا\*: 760\.00 دينار/);
+  assert.equal(calls.length, 2, "bills and credit notes, read apart");
+});
+
+test("with no credit notes outstanding, the answer stays the one line it always was", async () => {
+  const { fetcher } = fetcherFor({
+    "account.move": (args) => args[0].find(leaf => leaf[0] === "move_type")[2] === "in_refund" ? [] : [{ amount_residual: 900, __count: 12 }],
+  });
+  const reply = await answerOdooQuestion(matchOdooQuestion("كم علينا للموردين مش مدفوع"), { odoo, fetcher }, AT);
+  assert.doesNotMatch(reply, /إشعارات خصم/);
+  assert.doesNotMatch(reply, /الصافي علينا/);
+});
+
+// Between midnight and 3am in Amman the UTC date is still yesterday's, so an
+// item expiring today was landing in the "already expired" bucket.
+test("the expiry cutoff is the pharmacy's today, taken from the moment asked", async () => {
+  let expired;
+  const { fetcher } = fetcherFor({ "stock.quant": (args) => {
+    const leaf = args[0].find(entry => entry[0] === "lot_id.expiration_date" && entry[1] === "<");
+    if (leaf) expired = leaf[2];
+    return [{ quantity: 5, __count: 1 }];
+  } });
+  // 2026-09-18 00:30 Amman == 2026-09-17 21:30 UTC. The pharmacy's today is
+  // the 18th; the server's UTC date is still the 17th.
+  await answerOdooQuestion(matchOdooQuestion("شو منتهي الصلاحية"), { odoo, fetcher }, Date.UTC(2026, 8, 17, 21, 30));
+  assert.equal(expired, "2026-09-18");
 });

@@ -223,7 +223,7 @@ async function freshAnswer(match: OdooQuestionMatch, config: OdooAnswerConfig, a
   }
   if (match.kind === "expiring") {
     const days = config.expiryWindowDays ?? 90;
-    const summary = await session.expirySummary(days);
+    const summary = await session.expirySummary(days, at);
     return [
       "⏳ *الصلاحيات*",
       "",
@@ -233,9 +233,16 @@ async function freshAnswer(match: OdooQuestionMatch, config: OdooAnswerConfig, a
   }
   if (match.kind === "unpaid_bills") {
     const summary = await session.openPayables();
-    return summary.billCount
-      ? `🧾 *فواتير موردين غير مسدّدة*\n\nالعدد: *${summary.billCount}* فاتورة\nالمتبقّي: *${money(summary.billTotal, currency)}*`
-      : "🧾 ما في فواتير موردين غير مسدّدة.";
+    if (!summary.billCount) return "🧾 ما في فواتير موردين غير مسدّدة.";
+    const lines = ["🧾 *فواتير موردين غير مسدّدة*", "",
+      `العدد: *${summary.billCount}* فاتورة`, `المتبقّي: *${money(summary.billTotal, currency)}*`];
+    // An unpaid credit note reduces what is actually owed, so leaving it out
+    // reads high. Shown only when there is one, and the net beside it.
+    if (summary.creditCount) {
+      lines.push(`↩️ إشعارات خصم غير مطبّقة: *${money(summary.creditTotal, currency)}* من ${summary.creditCount} إشعار`,
+        "━━━━━━━━━━━━━", `💰 *الصافي علينا*: ${money(summary.billTotal - summary.creditTotal, currency)}`);
+    }
+    return lines.join("\n");
   }
   if (match.kind === "purchases_month") {
     const since = dateLabel(startOfLocalMonth(at)), until = dateLabel(at);

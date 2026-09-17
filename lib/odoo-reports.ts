@@ -12,7 +12,7 @@
 import { randomBytes } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 import { migrateManagementActions } from "./management-actions.ts";
-import { openOdooSession, formatAmount, type OdooConfig, type SalesSummary, type LowStockItem, type LocationSales, type PurchaseSummary } from "./odoo-client.ts";
+import { openOdooSession, formatAmount, type OdooConfig, type SalesSummary, type InvoiceSales, type LowStockItem, type LocationSales, type PurchaseSummary } from "./odoo-client.ts";
 
 // 2026-09-12, Basim: "بدي هذا التقرير كل يوم الساعه 12:01 صباحا يروح للجروب
 // بدون موافقتي ويكون تاريخ اليوم اللي قبله" -- the daily report is this exact
@@ -130,18 +130,24 @@ function dailyText(byLocation: LocationSales[], dateLabel: string, currencyLabel
   return clean(lines.join("\n"));
 }
 
-function weeklyText(sales: SalesSummary, lowStock: LowStockItem[], activeProducts: number, sinceIso: string, untilIso: string, currencyLabel?: string): string {
-  const average = sales.orderCount ? sales.totalAmount / sales.orderCount : 0;
+function weeklyText(sales: SalesSummary, invoiced: InvoiceSales, lowStock: LowStockItem[], lowStockCount: number,
+  activeProducts: number, sinceLabel: string, untilLabel: string, currencyLabel?: string): string {
+  // The basket is sales over SALES, not over sales plus refunds -- counting a
+  // refund as an operation pushes this below the truth.
+  const average = sales.orderCount ? (sales.totalAmount + sales.refundAmount) / sales.orderCount : 0;
   const lines = [
-    `📈 التقرير الأسبوعي - من ${sinceIso.slice(0, 10)} إلى ${untilIso.slice(0, 10)}`,
+    `📈 التقرير الأسبوعي - من ${sinceLabel} إلى ${untilLabel}`,
     `إجمالي المبيعات: ${money(sales.totalAmount, currencyLabel)} من ${sales.orderCount} عملية بيع`,
-    `متوسط الفاتورة: ${money(average, currencyLabel)}`,
-    `إجمالي عدد الأصناف النشطة: ${activeProducts}`,
   ];
-  if (lowStock.length) {
-    lines.push(`الأصناف القاربة على النفاد أو الخالصة (${lowStock.length}):`);
+  if (sales.refundCount) lines.push(`↩️ مرتجعات: ${money(sales.refundAmount, currencyLabel)} من ${sales.refundCount} عملية (مطروحة من الإجمالي)`);
+  // Sales that never touch the till. Silent when there are none, so a pharmacy
+  // that only rings things up sees exactly what it saw before.
+  if (invoiced.invoiceCount) lines.push(`🧾 مبيعات بفواتير: ${money(invoiced.totalAmount, currencyLabel)} من ${invoiced.invoiceCount} فاتورة`);
+  lines.push(`متوسط الفاتورة: ${money(average, currencyLabel)}`, `إجمالي عدد الأصناف النشطة: ${activeProducts}`);
+  if (lowStockCount) {
+    lines.push(`الأصناف القاربة على النفاد أو الخالصة (${lowStockCount}):`);
     for (const item of lowStock.slice(0, 15)) lines.push(`• ${clean(item.name)} — الكمية: ${item.qty}`);
-    if (lowStock.length > 15) lines.push("…");
+    if (lowStockCount > 15) lines.push("…");
   } else lines.push("لا يوجد أصناف قاربت على النفاد.");
   return clean(lines.join("\n"));
 }
@@ -178,10 +184,20 @@ async function buildReportText(config: OdooReportConfig, kind: Kind, at: number)
     const summary = await session.purchaseSummary(sinceDate, untilDate);
     return purchasesText(summary, sinceDate, untilDate, config.currencyLabel);
   }
-  const since = new Date(at - 7 * DAY).toISOString();
-  const until = new Date(at).toISOString();
-  const [sales, lowStock, activeProducts] = await Promise.all([session.salesSummary(since, until), session.lowStock(threshold), session.activeProductCount()]);
-  return weeklyText(sales, lowStock, activeProducts, since, until, config.currencyLabel);
+  // Whole local days, not a rolling 168 hours. Basim on the daily report:
+  // "هذه المبيعات مش يومي ياخي" -- the weekly had exactly the same fault, and
+  // a week that starts mid-afternoon is a week nobody can check against a till.
+  const offset = config.timezoneOffsetMinutes ?? 180;
+  const untilMs = startOfLocalDay(at, offset);
+  const sinceMs = untilMs - 7 * DAY;
+  const since = new Date(sinceMs).toISOString();
+  const until = new Date(untilMs).toISOString();
+  const [sales, invoiced, lowStock, lowStockCount, activeProducts] = await Promise.all([
+    session.salesSummary(since, until), session.invoiceSales(since, until),
+    session.lowStock(threshold), session.lowStockCount(threshold), session.activeProductCount(),
+  ]);
+  return weeklyText(sales, invoiced, lowStock, lowStockCount, activeProducts,
+    localDateLabel(sinceMs, offset), localDateLabel(untilMs - DAY, offset), config.currencyLabel);
 }
 
 async function planOdooReports(db: DatabaseSync, config: OdooReportConfig, at: number): Promise<Planned[]> {
@@ -200,14 +216,15 @@ async function planOdooReports(db: DatabaseSync, config: OdooReportConfig, at: n
   // -- buildReportText below is never reached, so a disabled report never
   // touches the pharmacy's system at all.
   if (!routing.enabled) return [];
-  // Slightly under a day/week so a delayed retry within the same slot is not
-  // mistaken for a fresh window, but the real next firing is never blocked.
-  const dedupWindow = (kind === "odoo_daily" ? DAY : 7 * DAY) - 5 * 60_000;
+  // Keyed to the report's own local day, not to a rolling window. A rolling
+  // ~24h meant a manual test send swallowed the next scheduled report --
+  // which is exactly what happened to Basim on 2026-09-16.
+  const dedupSince = kind === "odoo_daily" ? startOfLocalDay(at, offset) : at - (7 * DAY - 5 * 60_000);
   const targets: Array<{ targetUser: string; to: string }> = [];
   if (routing.group && config.groupId) targets.push({ targetUser: "group", to: config.groupId });
   if (routing.owner && config.ownerNumber) targets.push({ targetUser: "owner", to: `${config.ownerNumber}@s.whatsapp.net` });
   if (!targets.length) return [];
-  const pending = targets.filter(target => !alreadySent(db, kind as Kind, target.targetUser, at - dedupWindow));
+  const pending = targets.filter(target => !alreadySent(db, kind as Kind, target.targetUser, dedupSince));
   if (!pending.length) return [];
   let text: string;
   try { text = await buildReportText(config, kind, at); }

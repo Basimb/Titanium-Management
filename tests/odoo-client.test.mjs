@@ -26,15 +26,41 @@ test("openOdooSession authenticates once and reuses the uid for every read", asy
   assert.equal(calls[0].service, "common");
   assert.equal(calls[1].args[3], "pos.order");
   assert.equal(calls[1].args[4], "read_group");
-  assert.equal(calls[2].args[3], "product.product");
-  assert.equal(calls[2].args[4], "search_read");
+  const products = calls.find(entry => entry.args[3] === "product.product");
+  assert.equal(products.args[4], "search_read");
+  assert.equal(calls.filter(entry => entry.service === "common").length, 1, "one login for all of it");
 });
 
-test("salesSummary reads the aggregated total and count from read_group", async () => {
-  const fake = fetcher((url, body) => body.params.service === "common" ? { result: 1 } : { result: [{ amount_total: 1234.5, __count: 8 }] });
+test("salesSummary nets refunds out of the total but counts them apart", async () => {
+  const fake = fetcher((url, body) => {
+    if (body.params.service === "common") return { result: 1 };
+    const domain = body.params.args[5][0];
+    const sign = domain.find(leaf => Array.isArray(leaf) && leaf[0] === "amount_total");
+    assert.ok(sign, "each read narrows to one side of zero");
+    return { result: sign[1] === "<" ? [{ amount_total: -100, __count: 2 }] : [{ amount_total: 1234.5, __count: 8 }] };
+  });
   const session = await openOdooSession(config, fake);
-  const summary = await session.salesSummary("2026-09-01", "2026-09-02");
-  assert.deepEqual(summary, { orderCount: 8, totalAmount: 1234.5 });
+  assert.deepEqual(await session.salesSummary("2026-09-01", "2026-09-02"),
+    { orderCount: 8, totalAmount: 1134.5, refundCount: 2, refundAmount: 100 });
+});
+
+// Insurance, corporate accounts and the clinics bill rather than ring up, and
+// every sales figure here used to miss them completely.
+test("invoiceSales reads posted customer invoices by plain date", async () => {
+  let domain;
+  const fake = fetcher((url, body) => {
+    if (body.params.service === "common") return { result: 1 };
+    assert.equal(body.params.args[3], "account.move");
+    domain = body.params.args[5][0];
+    return { result: [{ amount_total: 900, __count: 3 }] };
+  });
+  const session = await openOdooSession(config, fake);
+  assert.deepEqual(await session.invoiceSales("2026-09-01T21:00:00.000Z", "2026-09-08T21:00:00.000Z"),
+    { invoiceCount: 3, totalAmount: 900 });
+  assert.deepEqual(domain.find(leaf => leaf[0] === "move_type"), ["move_type", "=", "out_invoice"]);
+  assert.deepEqual(domain.find(leaf => leaf[0] === "state"), ["state", "=", "posted"]);
+  assert.deepEqual(domain.filter(leaf => leaf[0] === "invoice_date"),
+    [["invoice_date", ">=", "2026-09-01"], ["invoice_date", "<", "2026-09-08"]]);
 });
 
 test("salesByLocation reads per-location totals and counts from a location_id-grouped read_group", async () => {
