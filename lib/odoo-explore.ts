@@ -133,6 +133,14 @@ export async function exploreOdoo(question: string, dependencies: {
   if (!catalog) return null;
   const query = await composeOdooQuery(question, catalog, dependencies);
   if (!query) return null;
-  const result = await dependencies.session.runQuery(query);
+  let result: unknown;
+  try { result = await dependencies.session.runQuery(query); }
+  catch {
+    // Odoo refused this particular query -- a field that does not exist on that
+    // table, or a record rule saying this person may not read it. That is not
+    // the system being down, and saying so would send him looking for the wrong
+    // problem. Show what was attempted instead, so the wrong part is visible.
+    return `ما قدرت أنفّذ هذا السؤال على النظام — يمكن الحقل أو الجدول مش مضبوط، أو مش من صلاحيتك.\n\n${describeOdooQuery(query)}`;
+  }
   return `${formatOdooResult(query, result, dependencies.currencyLabel)}\n\n${describeOdooQuery(query)}`;
 }
