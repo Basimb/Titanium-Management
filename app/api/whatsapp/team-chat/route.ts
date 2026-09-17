@@ -42,9 +42,13 @@ export async function POST(request: Request) {
         // Someone with no Odoo key of their own gets null here, never the
         // owner's session -- a fallback would hand them the owner's
         // permissions while looking like it worked.
-        ...(settings.ODOO_QUESTIONS_ENABLED !== "0" && settings.OPENAI_API_KEY && settings.ODOO_USER_KEYS_JSON && settings.ODOO_URL && settings.ODOO_DB
+        ...(settings.ODOO_QUESTIONS_ENABLED !== "0" && settings.OPENAI_API_KEY && settings.ODOO_URL && settings.ODOO_DB && settings.ODOO_USERNAME && settings.ODOO_API_KEY
           ? { exploreOdoo: async (userId: string, text: string, at: number) => {
-              const person = odooPersonFor(userId, { url: settings.ODOO_URL!, db: settings.ODOO_DB! }, settings.ODOO_USER_KEYS_JSON);
+              const person = odooPersonFor(userId, { url: settings.ODOO_URL!, db: settings.ODOO_DB! }, settings.ODOO_USER_KEYS_JSON,
+                // The owner's credentials are already here -- they are what the
+                // scheduled reports run under -- so he needs no second copy of
+                // them under his own name. Bound to his id alone.
+                { userId: "basem", username: settings.ODOO_USERNAME, apiKey: settings.ODOO_API_KEY });
               if (!person) return null;
               const session = await openOdooSession(person.config);
               return exploreOdoo(text, { session, cacheKey: person.cacheKey, apiKey: settings.OPENAI_API_KEY,
