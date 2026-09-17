@@ -4,7 +4,8 @@ import { EventEmitter } from 'node:events';
 import { constants } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { readPrivateConfig, readOutboxConfig, bridgeChildEnvironment, launchPrivate } from '../src/launch-private.mjs';
+import { readPrivateConfig, readOutboxConfig, bridgeChildEnvironment, launchPrivate, SETTINGS_KEYS } from '../src/launch-private.mjs';
+import { ALLOWED_KEYS } from '../../../lib/team-chat-settings.ts';
 
 const serviceDirectory = path.join(os.tmpdir(), 'private-launch-repo', 'services', 'whatsapp-bridge');
 const configFile = path.join(os.tmpdir(), 'private-launch-settings.json');
@@ -297,6 +298,11 @@ test('unsafe marker and invalid settings fail closed without spawning or printin
 // that file would have made readPrivateConfig throw, which does not disable a
 // feature -- it pauses the entire WhatsApp bridge behind the attention marker
 // until someone re-pairs it by hand. The two lists have to stay in step.
+test('the two allowlists are the same list, checked against each other rather than by hand', () => {
+  const missing = ALLOWED_KEYS.filter(key => !SETTINGS_KEYS.has(key));
+  assert.deepEqual(missing, [], 'a key the dashboard allows but this launcher does not PAUSES THE BRIDGE');
+});
+
 test('every setting the dashboard allows is also accepted here, so one new key cannot pause the bridge', () => {
   const extras = { ODOO_REPORT_DAILY: 'group', ODOO_REPORT_WEEKLY: 'off',
     ODOO_REPORT_PURCHASES: 'off', ODOO_QUESTIONS_ENABLED: '1', ODOO_EXPIRY_WINDOW_DAYS: '90' };

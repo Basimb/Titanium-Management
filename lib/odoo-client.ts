@@ -6,6 +6,8 @@
  * anything in the pharmacy's real business system.
  */
 
+import type { SafeOdooQuery } from "./odoo-query.ts";
+
 export type OdooConfig = { url: string; db: string; username: string; apiKey: string };
 type Fetcher = typeof fetch;
 
@@ -96,6 +98,11 @@ export type ExpirySummary = { expiredLines: number; expiredQty: number; soonLine
 export type PayablesSummary = { billCount: number; billTotal: number };
 
 export type OdooSession = {
+  // The composed-query escape hatch. It takes only a SafeOdooQuery, which
+  // nothing but validateOdooQuery can produce, so the widening below cannot be
+  // reached with a query that was never checked. Still read-only: the three
+  // methods it forwards are the three the validator admits.
+  runQuery(query: SafeOdooQuery): Promise<unknown>;
   salesSummary(sinceIso: string, untilIso: string): Promise<SalesSummary>;
   salesByLocation(sinceIso: string, untilIso: string): Promise<LocationSales[]>;
   purchaseSummary(sinceIso: string, untilIso: string): Promise<PurchaseSummary>;
@@ -124,6 +131,16 @@ export async function openOdooSession(config: OdooConfig, fetcher: Fetcher = fet
     }
   };
   return {
+    async runQuery(query) {
+      if (query.method === "search_count") return execute(query.model, "search_count", [query.domain]);
+      if (query.method === "read_group") {
+        return execute(query.model, "read_group", [query.domain, query.fields ?? [], query.groupBy ?? []],
+          { lazy: false, limit: query.limit ?? 50 });
+      }
+      return execute(query.model, "search_read", [query.domain, query.fields ?? []],
+        { limit: query.limit ?? 50, ...(query.offset ? { offset: query.offset } : {}),
+          ...(query.order ? { order: query.order } : {}) });
+    },
     async salesSummary(sinceIso, untilIso) {
       const domain = [["date_order", ">=", sinceIso], ["date_order", "<", untilIso], ["state", "in", ["paid", "done", "invoiced"]]];
       const groups = (await execute("pos.order", "read_group", [domain, ["amount_total"], []])) as Array<Record<string, unknown>> | undefined;

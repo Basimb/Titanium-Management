@@ -1228,6 +1228,11 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
   // model reads the wording and nothing else: it returns which report was
   // asked for, or nothing. It never sees a figure and never writes one.
   classifyOdoo?: (text: string) => Promise<OdooQuestionMatch | null>;
+  // Basim (2026-09-17): "بدي البوت والسيرفر يوصلو لكل قاعدة البيانات باستمرار
+  // بشكل لايف". Anything the two layers above do not recognise, composed into
+  // one read-only query over any table. Runs as the ASKING PERSON in Odoo --
+  // hence the user id -- so Odoo's own record rules decide what comes back.
+  exploreOdoo?: (userId: string, text: string, at: number) => Promise<string | null>;
 }): Promise<Result> {
   migrateSecretary(db); const now = (dependencies.now || Date.now)();
   // A question about the pharmacy's own system, answered from its real numbers
@@ -1257,7 +1262,7 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
             reply: "ما قدرت أوصل لنظام الصيدلية هلأ. جرّب بعد شوي." }, [], now));
         }
       }
-    } else if (dependencies.classifyOdoo && looksLikeOdooQuestion(event.text)) {
+    } else if ((dependencies.classifyOdoo || dependencies.exploreOdoo) && looksLikeOdooQuestion(event.text)) {
       const asking = actorFor(db, event, config);
       if (asking && asking.active === 1 && config.enabled) {
         const state = stateFor(db, asking);
@@ -1265,7 +1270,7 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
         if (duplicate) return duplicate;
         // A router that is slow, unreachable or unsure returns nothing, and the
         // message carries on to the ordinary secretary exactly as before.
-        question = await dependencies.classifyOdoo(event.text);
+        question = dependencies.classifyOdoo ? await dependencies.classifyOdoo(event.text) : null;
         if (question) {
           try {
             const reply = await dependencies.askOdoo(question, now);
@@ -1274,6 +1279,19 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
             return transaction(db, () => save(db, event, asking, { status: "clarify",
               reply: "ما قدرت أوصل لنظام الصيدلية هلأ. جرّب بعد شوي." }, [], now));
           }
+        }
+        // Last: the open question over the whole database. Direct messages
+        // only. Odoo decides what a person may READ, but it has nothing to say
+        // about where the reply lands, and a figure someone is entitled to see
+        // privately is not a figure the whole team is entitled to see.
+        if (dependencies.exploreOdoo && !event.groupId) {
+          let reply: string | null = null;
+          try { reply = await dependencies.exploreOdoo(asking.id, event.text, now); }
+          catch {
+            return transaction(db, () => save(db, event, asking, { status: "clarify",
+              reply: "ما قدرت أوصل لنظام الصيدلية هلأ. جرّب بعد شوي." }, [], now));
+          }
+          if (reply) return transaction(db, () => save(db, event, asking, { status: "summary", reply }, [], now));
         }
       }
     }

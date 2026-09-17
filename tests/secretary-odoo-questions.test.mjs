@@ -8,7 +8,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { handleSecretaryEvent, migrateSecretary } from '../lib/secretary-service.ts';
 import { emptySecretaryIntent } from '../lib/secretary-intent.ts';
 
-function fixture(t, { askOdoo, classifyOdoo } = {}) {
+function fixture(t, { askOdoo, classifyOdoo, exploreOdoo } = {}) {
   const db = new DatabaseSync(':memory:'); t.after(() => db.close());
   db.exec(`PRAGMA foreign_keys=ON;
     CREATE TABLE users(id TEXT PRIMARY KEY,name TEXT UNIQUE,role TEXT,active INTEGER,pin_hash TEXT,created_at INTEGER,updated_at INTEGER);
@@ -22,7 +22,7 @@ function fixture(t, { askOdoo, classifyOdoo } = {}) {
   let count = 0, modelCalls = 0; const now = 1788580000000;
   const run = (extra = {}) => handleSecretaryEvent(db, {
     messageId: `E-${++count}`, senderNumber: '12025550101', groupId: null, text: 'x', receivedAt: now, responseMessageId: `R-${count}`, ...extra,
-  }, config, { infer: async () => { modelCalls += 1; return emptySecretaryIntent('chat', 'رد عادي'); }, now: () => now, ...(askOdoo ? { askOdoo } : {}), ...(classifyOdoo ? { classifyOdoo } : {}) });
+  }, config, { infer: async () => { modelCalls += 1; return emptySecretaryIntent('chat', 'رد عادي'); }, now: () => now, ...(askOdoo ? { askOdoo } : {}), ...(classifyOdoo ? { classifyOdoo } : {}), ...(exploreOdoo ? { exploreOdoo } : {}) });
   return { db, run, modelCalls: () => modelCalls };
 }
 
@@ -135,4 +135,65 @@ test('a router that fails is not an error the person ever sees', async t => {
     classifyOdoo: async () => { throw new Error('provider down'); },
   });
   await assert.rejects(f.run({ text: 'قديش صار عنا اليوم؟' }));
+});
+
+// The open question over the whole database (2026-09-17). It is the LAST
+// thing tried, it runs as the asking person, and its answers stay in DMs --
+// Odoo decides what a person may read, not where the reply lands.
+test('a question neither layer recognises reaches the open-question layer, as the person who asked', async t => {
+  const seen = [];
+  const f = fixture(t, {
+    askOdoo: async () => assert.fail('not one of the six'),
+    classifyOdoo: async () => null,
+    exploreOdoo: async (userId, text) => { seen.push([userId, text]); return '🔢 *42*\n\n📋 الجدول: pos.order'; },
+  });
+  const r = await f.run({ text: 'كم فاتورة مورد من شركة الدواء الأردنية هالشهر؟' });
+  assert.deepEqual(seen, [['member', 'كم فاتورة مورد من شركة الدواء الأردنية هالشهر؟']]);
+  assert.equal(r.status, 'summary');
+  assert.match(r.reply, /📋 الجدول: pos\.order/, 'the answer carries what it counted');
+  assert.equal(f.modelCalls(), 0);
+});
+
+test('the open question never runs in the group, however it is worded', async t => {
+  let ran = false;
+  const f = fixture(t, {
+    askOdoo: async () => assert.fail('not one of the six'),
+    classifyOdoo: async () => null,
+    exploreOdoo: async () => { ran = true; return '🔢 *42*'; },
+  });
+  const r = await f.run({ text: 'يا سكرتير كم فاتورة مورد هالشهر؟', groupId: '12345@g.us' });
+  assert.equal(ran, false, 'a figure someone may see privately is not a figure for the whole team');
+  assert.doesNotMatch(r.reply ?? '', /42/);
+});
+
+test('one of the six questions still answers first, without composing anything', async t => {
+  const f = fixture(t, {
+    askOdoo: async () => 'مبيعات اليوم: 1,000.00',
+    classifyOdoo: async () => assert.fail('the free path answers first'),
+    exploreOdoo: async () => assert.fail('the free path answers first'),
+  });
+  const r = await f.run({ text: 'شو مبيعات اليوم؟' });
+  assert.match(r.reply, /1,000\.00/);
+});
+
+test('an open question that composes nothing falls through to the ordinary secretary', async t => {
+  const f = fixture(t, {
+    askOdoo: async () => assert.fail('not one of the six'),
+    classifyOdoo: async () => null,
+    exploreOdoo: async () => null,
+  });
+  const r = await f.run({ text: 'مين لازم يشتغل بكرة؟' });
+  assert.equal(f.modelCalls(), 1);
+  assert.equal(r.reply, 'رد عادي');
+});
+
+test('a pharmacy system that cannot be reached says so instead of swallowing the question', async t => {
+  const f = fixture(t, {
+    askOdoo: async () => assert.fail('not one of the six'),
+    classifyOdoo: async () => null,
+    exploreOdoo: async () => { throw new Error('odoo_unreachable'); },
+  });
+  const r = await f.run({ text: 'كم صنف عندنا من شركة معينة؟' });
+  assert.equal(r.status, 'clarify');
+  assert.match(r.reply, /ما قدرت أوصل لنظام الصيدلية/);
 });
