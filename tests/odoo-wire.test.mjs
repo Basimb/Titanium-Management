@@ -19,12 +19,13 @@ const UID = 7;
 // rejected the way Odoo would reject it, so a wrong field name cannot pass.
 const SCHEMA = {
   "pos.order": ["name", "amount_total", "date_order", "state", "location_id", "partner_id"],
+  "pos.order.line": ["product_id", "qty", "price_subtotal", "order_id"],
   "account.move": ["name", "move_type", "state", "invoice_date", "amount_total", "amount_residual", "payment_state", "partner_id"],
   "product.product": ["name", "qty_available", "sale_ok", "active", "standard_price", "categ_id"],
   "stock.quant": ["quantity", "location_id", "lot_id"],
   "stock.lot": ["name", "expiration_date", "product_id"],
 };
-const LABELS = { "pos.order": "Point of Sale Orders", "account.move": "Journal Entry",
+const LABELS = { "pos.order": "Point of Sale Orders", "pos.order.line": "Point of Sale Order Lines", "account.move": "Journal Entry",
   "product.product": "Product", "stock.quant": "Quant", "stock.lot": "Lot/Serial Number" };
 
 function fakeOdoo({ onCall } = {}) {
@@ -97,6 +98,7 @@ const catalogAnswers = ({ model, call, positional }) => {
     })));
   }
   if (call === "search_count") return 128;
+  if (model === "pos.order.line") return [{ __count: 9, qty: 600, product_id: [1, "بنادول"] }];
   if (call === "read_group") return [{ __count: 3, amount_total: 1863.71, location_id: [1, "NAOOR/Stock"] }];
   return [{ id: 1, name: "بنادول", qty_available: 4 }];
 };
@@ -116,7 +118,7 @@ test("every hand-written question survives the round trip against a strict serve
   const results = await Promise.all([
     session.salesByLocation("2026-09-16T21:00:00.000Z", "2026-09-17T21:00:00.000Z"),
     session.purchaseSummary("2026-09-01", "2026-09-17"),
-    session.lowStock(10, 15),
+    session.shortages({ at: Date.UTC(2026, 8, 17) }),
     session.activeProductCount(),
     session.expirySummary(90),
     session.openPayables(),

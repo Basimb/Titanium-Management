@@ -22,12 +22,12 @@ test("openOdooSession authenticates once and reuses the uid for every read", asy
   });
   const session = await openOdooSession(config, fake);
   await session.salesSummary("2026-09-01T00:00:00.000Z", "2026-09-02T00:00:00.000Z");
-  await session.lowStock(10);
+  await session.activeProductCount();
   assert.equal(calls[0].service, "common");
   assert.equal(calls[1].args[3], "pos.order");
   assert.equal(calls[1].args[4], "read_group");
   const products = calls.find(entry => entry.args[3] === "product.product");
-  assert.equal(products.args[4], "search_read");
+  assert.equal(products.args[4], "search_count");
   assert.equal(calls.filter(entry => entry.service === "common").length, 1, "one login for all of it");
 });
 
@@ -99,17 +99,6 @@ test("purchaseSummary reads posted vendor bills (in_invoice) and vendor credit n
   }
 });
 
-test("lowStock maps search_read rows and activeProductCount reads search_count", async () => {
-  const fake = fetcher((url, body) => {
-    if (body.params.service === "common") return { result: 1 };
-    if (body.params.args[4] === "search_read") return { result: [{ name: "بنادول", qty_available: 3 }, { name: "أموكسيل", qty_available: 0 }] };
-    return { result: 214 };
-  });
-  const session = await openOdooSession(config, fake);
-  assert.deepEqual(await session.lowStock(10), [{ name: "بنادول", qty: 3 }, { name: "أموكسيل", qty: 0 }]);
-  assert.equal(await session.activeProductCount(), 214);
-});
-
 test("a failed authentication never reaches a real data call", async () => {
   const fake = fetcher(() => ({ result: 0 }));
   await assert.rejects(() => openOdooSession(config, fake), OdooError);
@@ -132,4 +121,53 @@ test("formatAmount adds thousands separators and two decimals", () => {
   assert.equal(formatAmount(1234.5), "1,234.50");
   assert.equal(formatAmount(0), "0.00");
   assert.equal(formatAmount(1000000), "1,000,000.00");
+});
+
+// Measured on the live catalogue, 2026-09-17: 60,452 saleable products, only
+// 13,540 holding any stock, and 10,896 of THOSE at ten units or fewer -- a
+// pharmacy carries one or two of most things by design. So a unit threshold
+// cannot separate "running out" from "normal", and days of cover is what does.
+test("shortages rank by how long the stock lasts, not by how little of it there is", async () => {
+  const shelf = [
+    { id: 1, name: "بنادول", qty_available: 2 },        // 10/day  -> 0.2 days
+    { id: 2, name: "كريم نادر", qty_available: 2 },      // 0.05/day -> 40 days
+    { id: 3, name: "صنف راكد", qty_available: 1 },       // never sold
+    { id: 4, name: "شامبو", qty_available: 120 },        // 30/day  -> 4 days
+  ];
+  const sold = [
+    { product_id: [1, "بنادول"], qty: 600 },
+    { product_id: [2, "كريم نادر"], qty: 3 },
+    { product_id: [4, "شامبو"], qty: 1800 },
+  ];
+  const seen = [];
+  const fake = fetcher((url, body) => {
+    if (body.params.service === "common") return { result: 1 };
+    const [, , , model, method, args, kwargs] = body.params.args;
+    seen.push({ model, method, offset: kwargs.offset, domain: args[0] });
+    if (kwargs.offset) return { result: [] };
+    return { result: model === "pos.order.line" ? sold : shelf };
+  });
+  const session = await openOdooSession(config, fake);
+  const running = await session.shortages({ windowDays: 60, maxDaysLeft: 7, at: Date.UTC(2026, 8, 17) });
+  assert.deepEqual(running.map(item => item.name), ["بنادول", "شامبو"]);
+  assert.equal(Math.round(running[0].daysLeft * 10) / 10, 0.2);
+  assert.equal(Math.round(running[1].daysLeft), 4);
+  // Only stock that exists is even looked at -- the catalogue is not the shelf.
+  const stock = seen.find(entry => entry.model === "product.product");
+  assert.ok(stock.domain.some(leaf => leaf[0] === "qty_available" && leaf[1] === ">" && leaf[2] === 0));
+});
+
+test("both reads are paged, so a long tail is never silently cut off", async () => {
+  const page = Array.from({ length: 2000 }, (unused, index) => ({ id: index + 1, name: `p${index}`, qty_available: 1 }));
+  const offsets = [];
+  const fake = fetcher((url, body) => {
+    if (body.params.service === "common") return { result: 1 };
+    const [, , , model, , , kwargs] = body.params.args;
+    offsets.push(`${model}@${kwargs.offset ?? 0}`);
+    if (model === "pos.order.line") return { result: kwargs.offset ? [] : [{ product_id: [1, "p0"], qty: 600 }] };
+    return { result: kwargs.offset === 0 ? page : kwargs.offset === 2000 ? page.slice(0, 5) : [] };
+  });
+  const session = await openOdooSession(config, fake);
+  await session.shortages({ at: Date.UTC(2026, 8, 17) });
+  assert.ok(offsets.includes("product.product@2000"), `a full page must be followed by the next: ${offsets.join(",")}`);
 });

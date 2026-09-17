@@ -89,7 +89,14 @@ export type SalesSummary = { orderCount: number; totalAmount: number; refundCoun
 // corporate accounts and the clinics bill this way, and every figure in this
 // file used to miss them entirely.
 export type InvoiceSales = { invoiceCount: number; totalAmount: number };
-export type LowStockItem = { name: string; qty: number };
+// Measured on the live system, 2026-09-17: the catalogue holds 60,452 saleable
+// products, only 13,540 of which have any stock at all -- and 10,896 of THOSE
+// sit at ten units or fewer, because a pharmacy carries one or two of most
+// things by design. So "under ten" is not a shortage, it is the normal state
+// of the shelf, and a list built on it is 46,912 items of catalogue plus the
+// entire long tail. What matters is how long the stock lasts: quantity divided
+// by how fast the item actually sells.
+export type ShortageItem = { name: string; qty: number; perDay: number; daysLeft: number };
 export type LocationSales = { location: string; orderCount: number; totalAmount: number };
 // "مشتريات" = posted vendor bills (account.move, move_type=in_invoice); "مرتجعات
 // للموردين" = posted vendor credit notes (move_type=in_refund) -- confirmed
@@ -115,9 +122,8 @@ export type OdooSession = {
   invoiceSales(sinceIso: string, untilIso: string): Promise<InvoiceSales>;
   salesByLocation(sinceIso: string, untilIso: string): Promise<LocationSales[]>;
   purchaseSummary(sinceIso: string, untilIso: string): Promise<PurchaseSummary>;
-  lowStock(thresholdQty: number, limit?: number): Promise<LowStockItem[]>;
-  // The real number, not the length of a list that was capped for display.
-  lowStockCount(thresholdQty: number): Promise<number>;
+  /** Items that run out soonest, by days of cover. See ShortageItem. */
+  shortages(options?: { windowDays?: number; maxDaysLeft?: number; limit?: number; at?: number }): Promise<ShortageItem[]>;
   activeProductCount(): Promise<number>;
   expirySummary(withinDays: number, at?: number): Promise<ExpirySummary>;
   openPayables(): Promise<PayablesSummary>;
@@ -202,12 +208,6 @@ export async function openOdooSession(config: OdooConfig, fetcher: Fetcher = fet
         returnCount: Number(returnRow?.__count ?? 0), returnAmount: Number(returnRow?.amount_total ?? 0),
       };
     },
-    async lowStock(thresholdQty, limit = 20) {
-      const domain = [["sale_ok", "=", true], ["active", "=", true], ["qty_available", "<=", thresholdQty]];
-      const rows = (await execute("product.product", "search_read", [domain, ["name", "qty_available"]],
-        { order: "qty_available asc", limit })) as Array<Record<string, unknown>> | undefined;
-      return (Array.isArray(rows) ? rows : []).map(row => ({ name: String(row.name ?? "?"), qty: Number(row.qty_available ?? 0) }));
-    },
     async expirySummary(withinDays, at = Date.now()) {
       // Odoo renamed stock.production.lot to stock.lot in 16.0; this instance
       // is 16.0 (verified against the live server), and the domain walks
@@ -247,10 +247,52 @@ export async function openOdooSession(config: OdooConfig, fetcher: Fetcher = fet
       const [bills, credits] = await Promise.all([read("in_invoice"), read("in_refund")]);
       return { billCount: bills.count, billTotal: bills.total, creditCount: credits.count, creditTotal: Math.abs(credits.total) };
     },
-    async lowStockCount(thresholdQty) {
-      const count = await execute("product.product", "search_count",
-        [[["sale_ok", "=", true], ["active", "=", true], ["qty_available", "<=", thresholdQty]]]);
-      return Number(count ?? 0);
+    async shortages({ windowDays = 60, maxDaysLeft = 7, limit = 20, at = Date.now() } = {}) {
+      const since = new Date(at - windowDays * 86_400_000).toISOString().slice(0, 19).replace("T", " ");
+      // Both reads are paged: there are more distinct products sold in two
+      // months, and more products holding stock, than one page can carry, and a
+      // truncated page silently drops exactly the items nobody happened to see.
+      const page = async (model: string, method: string, args: unknown[], extra: Record<string, unknown>): Promise<Array<Record<string, unknown>>> => {
+        const all: Array<Record<string, unknown>> = [];
+        for (let offset = 0; offset < 40_000; offset += 2000) {
+          const rows = (await execute(model, method, args, { ...extra, limit: 2000, offset })) as Array<Record<string, unknown>> | undefined;
+          if (!Array.isArray(rows) || !rows.length) break;
+          all.push(...rows);
+          if (rows.length < 2000) break;
+        }
+        return all;
+      };
+
+      const soldRows = await page("pos.order.line", "read_group",
+        [[["order_id.date_order", ">=", since], ["order_id.state", "in", ["paid", "done", "invoiced"]]], ["qty"], ["product_id"]],
+        { lazy: false });
+      const sold = new Map<number, number>();
+      for (const row of soldRows) {
+        const product = row.product_id;
+        if (!Array.isArray(product) || typeof product[0] !== "number") continue;
+        const qty = Number(row.qty);
+        if (Number.isFinite(qty) && qty > 0) sold.set(product[0], (sold.get(product[0]) ?? 0) + qty);
+      }
+
+      const stockRows = await page("product.product", "search_read",
+        [[["sale_ok", "=", true], ["active", "=", true], ["qty_available", ">", 0]], ["name", "qty_available"]],
+        { order: "id asc" });
+
+      const running: ShortageItem[] = [];
+      for (const row of stockRows) {
+        const movement = sold.get(Number(row.id));
+        // Stock that never moves is not running out, however little of it there
+        // is -- that is most of the long tail, and putting it on this list is
+        // what made the old one unusable.
+        if (!movement) continue;
+        const qty = Number(row.qty_available);
+        if (!Number.isFinite(qty) || qty <= 0) continue;
+        const perDay = movement / windowDays;
+        const daysLeft = qty / perDay;
+        if (daysLeft > maxDaysLeft) continue;
+        running.push({ name: String(row.name ?? "?"), qty, perDay, daysLeft });
+      }
+      return running.sort((a, b) => a.daysLeft - b.daysLeft).slice(0, limit);
     },
     async activeProductCount() {
       const count = await execute("product.product", "search_count", [[["sale_ok", "=", true], ["active", "=", true]]]);

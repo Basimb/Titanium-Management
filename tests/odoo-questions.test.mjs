@@ -126,12 +126,36 @@ test("no unpaid bills reads as a sentence, not as a zero", async () => {
   assert.match(text, /ما في فواتير موردين غير مسدّدة/);
 });
 
-test("low stock lists the items under the threshold", async () => {
-  const { fetcher, calls } = fetcherFor({ "product.product": () => [{ name: "بانادول", qty_available: 2 }, { name: "فيتامين د", qty_available: 0 }] });
-  const text = await answerOdooQuestion(matchOdooQuestion("شو ناقص"), { odoo, lowStockThreshold: 5, fetcher }, AT);
-  assert.ok(calls[0].domain.some(c => c[0] === "qty_available" && c[2] === 5));
-  assert.match(text, /بانادول — 2/);
-  assert.match(text, /فيتامين د — 0/);
+test("what is running out is what the shelf runs out of, not what sits under a unit count", async () => {
+  const { fetcher, calls } = fetcherFor({
+    // Sold over the 60-day window: fast mover, slow mover.
+    "pos.order.line": () => [
+      { product_id: [1, "بانادول"], qty: 600 },
+      { product_id: [2, "كريم نادر"], qty: 3 },
+    ],
+    // Both hold two units. One is half a day of stock; the other is forty days.
+    "product.product": () => [
+      { id: 1, name: "بانادول", qty_available: 2 },
+      { id: 2, name: "كريم نادر", qty_available: 2 },
+      { id: 3, name: "صنف ما بيتحرك", qty_available: 1 },
+    ],
+  });
+  const text = await answerOdooQuestion(matchOdooQuestion("شو ناقص من المخزون"), { odoo, fetcher }, AT);
+  assert.match(text, /بانادول — باقي \*0\.2\* يوم \(2 قطعة، 10\.0\/يوم\)/);
+  assert.doesNotMatch(text, /كريم نادر/, "two units that last forty days is not a shortage");
+  assert.doesNotMatch(text, /ما بيتحرك/, "stock that never moves is never running out");
+  // Only stock that exists is considered; the catalogue is not the shelf.
+  const stockCall = calls.find(entry => entry.model === "product.product");
+  assert.ok(stockCall.domain.some(leaf => leaf[0] === "qty_available" && leaf[1] === ">" && leaf[2] === 0));
+});
+
+test("when nothing on the shelf is about to run out, it says so plainly", async () => {
+  const { fetcher } = fetcherFor({
+    "pos.order.line": () => [{ product_id: [1, "بانادول"], qty: 30 }],
+    "product.product": () => [{ id: 1, name: "بانادول", qty_available: 400 }],
+  });
+  const text = await answerOdooQuestion(matchOdooQuestion("شو ناقص من المخزون"), { odoo, fetcher }, AT);
+  assert.match(text, /ما في صنف متحرّك رح يخلص خلال أسبوع/);
 });
 
 // Basim (2026-09-17): "بدي يصير جاوبني بسرعه فائقه". Two round trips per

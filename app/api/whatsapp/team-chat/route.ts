@@ -29,7 +29,6 @@ export async function POST(request: Request) {
           ? { askOdoo: (match: import("@/lib/odoo-questions").OdooQuestionMatch, at: number) => answerOdooQuestion(match, {
               odoo: { url: settings.ODOO_URL!, db: settings.ODOO_DB!, username: settings.ODOO_USERNAME!, apiKey: settings.ODOO_API_KEY! },
               ...(settings.ODOO_CURRENCY_LABEL ? { currencyLabel: settings.ODOO_CURRENCY_LABEL } : {}),
-              ...(/^\d{1,4}$/.test(settings.ODOO_LOW_STOCK_THRESHOLD || "") ? { lowStockThreshold: Number(settings.ODOO_LOW_STOCK_THRESHOLD) } : {}),
               ...(/^\d{1,3}$/.test(settings.ODOO_EXPIRY_WINDOW_DAYS || "") ? { expiryWindowDays: Number(settings.ODOO_EXPIRY_WINDOW_DAYS) } : {}),
             }, at) }
           : {}),

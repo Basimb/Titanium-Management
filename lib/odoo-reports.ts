@@ -12,7 +12,7 @@
 import { randomBytes } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 import { migrateManagementActions } from "./management-actions.ts";
-import { openOdooSession, formatAmount, type OdooConfig, type SalesSummary, type InvoiceSales, type LowStockItem, type LocationSales, type PurchaseSummary } from "./odoo-client.ts";
+import { openOdooSession, formatAmount, type OdooConfig, type SalesSummary, type InvoiceSales, type ShortageItem, type LocationSales, type PurchaseSummary } from "./odoo-client.ts";
 
 // 2026-09-12, Basim: "بدي هذا التقرير كل يوم الساعه 12:01 صباحا يروح للجروب
 // بدون موافقتي ويكون تاريخ اليوم اللي قبله" -- the daily report is this exact
@@ -31,7 +31,6 @@ export type OdooReportConfig = {
   odoo: OdooConfig;
   ownerNumber: string; // Basim's WhatsApp number, digits only, no @s.whatsapp.net suffix
   groupId: string | null;
-  lowStockThreshold?: number; // default 10 units
   currencyLabel?: string; // e.g. "دينار"; omitted if not configured
   branchNames?: Record<string, string>; // Odoo location code -> Arabic branch name, merged over DEFAULT_BRANCH_NAMES
   dailyHour?: number; // local hour (0-23) the daily report goes out; default 0 (12:01am slot)
@@ -130,7 +129,7 @@ function dailyText(byLocation: LocationSales[], dateLabel: string, currencyLabel
   return clean(lines.join("\n"));
 }
 
-function weeklyText(sales: SalesSummary, invoiced: InvoiceSales, lowStock: LowStockItem[], lowStockCount: number,
+function weeklyText(sales: SalesSummary, invoiced: InvoiceSales, shortages: ShortageItem[],
   activeProducts: number, sinceLabel: string, untilLabel: string, currencyLabel?: string): string {
   // The basket is sales over SALES, not over sales plus refunds -- counting a
   // refund as an operation pushes this below the truth.
@@ -144,11 +143,12 @@ function weeklyText(sales: SalesSummary, invoiced: InvoiceSales, lowStock: LowSt
   // that only rings things up sees exactly what it saw before.
   if (invoiced.invoiceCount) lines.push(`🧾 مبيعات بفواتير: ${money(invoiced.totalAmount, currencyLabel)} من ${invoiced.invoiceCount} فاتورة`);
   lines.push(`متوسط الفاتورة: ${money(average, currencyLabel)}`, `إجمالي عدد الأصناف النشطة: ${activeProducts}`);
-  if (lowStockCount) {
-    lines.push(`الأصناف القاربة على النفاد أو الخالصة (${lowStockCount}):`);
-    for (const item of lowStock.slice(0, 15)) lines.push(`• ${clean(item.name)} — الكمية: ${item.qty}`);
-    if (lowStockCount > 15) lines.push("…");
-  } else lines.push("لا يوجد أصناف قاربت على النفاد.");
+  if (shortages.length) {
+    lines.push("رح تخلص خلال أسبوع:");
+    for (const item of shortages) {
+      lines.push(`• ${clean(item.name)} — باقي ${Math.round(item.daysLeft * 10) / 10} يوم (${item.qty} قطعة، ${item.perDay.toFixed(1)}/يوم)`);
+    }
+  } else lines.push("ما في صنف متحرّك رح يخلص خلال أسبوع.");
   return clean(lines.join("\n"));
 }
 
@@ -168,7 +168,6 @@ function purchasesText(summary: PurchaseSummary, sinceDate: string, untilDate: s
 
 async function buildReportText(config: OdooReportConfig, kind: Kind, at: number): Promise<string> {
   const session = await openOdooSession(config.odoo, config.fetcher);
-  const threshold = config.lowStockThreshold ?? 10;
   if (kind === "odoo_daily") {
     const offset = config.timezoneOffsetMinutes ?? 180;
     const dayStart = startOfLocalDay(at, offset) - DAY;
@@ -192,11 +191,11 @@ async function buildReportText(config: OdooReportConfig, kind: Kind, at: number)
   const sinceMs = untilMs - 7 * DAY;
   const since = new Date(sinceMs).toISOString();
   const until = new Date(untilMs).toISOString();
-  const [sales, invoiced, lowStock, lowStockCount, activeProducts] = await Promise.all([
+  const [sales, invoiced, shortages, activeProducts] = await Promise.all([
     session.salesSummary(since, until), session.invoiceSales(since, until),
-    session.lowStock(threshold), session.lowStockCount(threshold), session.activeProductCount(),
+    session.shortages({ maxDaysLeft: 7, limit: 15, at }), session.activeProductCount(),
   ]);
-  return weeklyText(sales, invoiced, lowStock, lowStockCount, activeProducts,
+  return weeklyText(sales, invoiced, shortages, activeProducts,
     localDateLabel(sinceMs, offset), localDateLabel(untilMs - DAY, offset), config.currencyLabel);
 }
 

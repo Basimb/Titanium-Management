@@ -13,23 +13,32 @@ function fixture(t) {
 
 const odoo = { url: "https://pharmacy.example.com", db: "pharmacy", username: "bot@pharmacy.example.com", apiKey: "secret-key" };
 
-function odooFetcher({ orderCount = 5, totalAmount = 250.5, byLocation = null, lowStock = [], activeProducts = 100,
-  purchaseCount = 0, purchaseAmount = 0, returnCount = 0, returnAmount = 0 } = {}) {
+function odooFetcher({ orderCount = 5, totalAmount = 250.5, byLocation = null, activeProducts = 100,
+  purchaseCount = 0, purchaseAmount = 0, returnCount = 0, returnAmount = 0,
+  invoiceCount = 0, invoiceAmount = 0, shelf = [] } = {}) {
   return async (url, options) => {
     const body = JSON.parse(options.body);
     let result;
     const model = body.params.args?.[3];
+    const method = body.params.args?.[4];
     if (body.params.service === "common") result = 1;
     else if (model === "account.move") {
-      const isReturn = body.params.args[5][0].some(clause => clause[0] === "move_type" && clause[2] === "in_refund");
-      result = isReturn ? [{ amount_total: returnAmount, __count: returnCount }] : [{ amount_total: purchaseAmount, __count: purchaseCount }];
-    } else if (body.params.args[4] === "read_group") {
+      const domain = body.params.args[5][0];
+      const moveType = domain.find(clause => clause[0] === "move_type")?.[2];
+      result = moveType === "in_refund" ? [{ amount_total: returnAmount, amount_residual: returnAmount, __count: returnCount }]
+        : moveType === "out_invoice" ? [{ amount_total: invoiceAmount, __count: invoiceCount }]
+        : [{ amount_total: purchaseAmount, amount_residual: purchaseAmount, __count: purchaseCount }];
+    } else if (model === "pos.order.line") {
+      result = shelf.filter(item => item.sold).map((item, index) => ({ product_id: [index + 1, item.name], qty: item.sold }));
+    } else if (model === "product.product" && method === "search_read") {
+      result = shelf.map((item, index) => ({ id: index + 1, name: item.name, qty_available: item.qty }));
+    } else if (method === "read_group") {
       const groupBy = body.params.args[5][2];
+      const negative = body.params.args[5][0].some(clause => clause[0] === "amount_total" && clause[1] === "<");
       result = groupBy && groupBy.length
         ? (byLocation ?? []).map((row, index) => ({ location_id: [index + 1, row.location], amount_total: row.totalAmount, __count: row.orderCount }))
-        : [{ amount_total: totalAmount, __count: orderCount }];
-    } else if (body.params.args[4] === "search_read") result = lowStock.map(item => ({ name: item.name, qty_available: item.qty }));
-    else result = activeProducts;
+        : negative ? [{ amount_total: 0, __count: 0 }] : [{ amount_total: totalAmount, __count: orderCount }];
+    } else result = activeProducts;
     return { ok: true, json: async () => ({ result }) };
   };
 }
@@ -120,19 +129,21 @@ test("a day with no branch sales still sends an honest empty report instead of a
   assert.match(text, /💰 \*الإجمالي\*: 0\.00/);
 });
 
-test("at the weekly slot, sends the fuller report with the low-stock list and active product count", async t => {
+test("at the weekly slot, the report names what will run out and how soon", async t => {
   const db = fixture(t);
   let text;
   const jobs = createOdooReportJobs({ db, now: () => WEEKLY_AT, config: {
     enabled: true, odoo, ownerNumber: "", groupId: "1@g.us", timezoneOffsetMinutes: 0,
     routing: { odoo_weekly: { enabled: true, group: true, owner: true } },
-    fetcher: odooFetcher({ orderCount: 80, totalAmount: 2400, lowStock: [{ name: "بنادول", qty: 2 }], activeProducts: 314 }),
+    fetcher: odooFetcher({ orderCount: 80, totalAmount: 2400, activeProducts: 314,
+      shelf: [{ name: "بنادول", qty: 2, sold: 600 }, { name: "كريم نادر", qty: 2, sold: 3 }] }),
   } });
   const result = await jobs.deliverNext(async message => { text = message.text; return {}; });
   assert.equal(result.status, "sent");
   assert.match(text, /📈 التقرير الأسبوعي/);
   assert.match(text, /314/);
-  assert.match(text, /بنادول — الكمية: 2/);
+  assert.match(text, /بنادول — باقي 0\.2 يوم \(2 قطعة، 10\.0\/يوم\)/);
+  assert.doesNotMatch(text, /كريم نادر/, "two units that last forty days is not a shortage");
 });
 
 test("a group-only configuration never messages the owner, and vice versa", async t => {
@@ -331,30 +342,6 @@ test("the weekly window is seven whole local days, not a rolling 168 hours", asy
   // Amman midnight is 21:00 UTC the day before, so both ends land on :00.
   assert.match(since, /T21:00:00/, `window start ${since}`);
   assert.match(until, /T21:00:00/, `window end ${until}`);
-});
-
-test("the count of items running out is the real one, not the length of a capped list", async t => {
-  const db = fixture(t);
-  let text;
-  const jobs = createOdooReportJobs({ db, now: () => WEEKLY_AT, config: {
-    enabled: true, odoo, ownerNumber: "", groupId: "1@g.us", timezoneOffsetMinutes: 0,
-    routing: { odoo_weekly: { enabled: true, group: true, owner: false } },
-    fetcher: async (url, options) => {
-      const body = JSON.parse(options.body);
-      if (body.params.service === "common") return { ok: true, json: async () => ({ result: 1 }) };
-      const [, , , model, method] = body.params.args;
-      if (model === "product.product" && method === "search_count") {
-        const domain = body.params.args[5][0];
-        // The low-stock count carries the threshold; the active-product count does not.
-        return { ok: true, json: async () => ({ result: domain.some(leaf => leaf[0] === "qty_available") ? 947 : 3100 }) };
-      }
-      if (model === "product.product") return { ok: true, json: async () => ({ result: [{ name: "بنادول", qty_available: 2 }] }) };
-      return { ok: true, json: async () => ({ result: [] }) };
-    },
-  } });
-  await jobs.deliverNext(async message => { text = message.text; return {}; });
-  assert.match(text, /\(947\)/, "the real count, not the twenty the list was capped at");
-  assert.match(text, /3100/);
 });
 
 test("a manual send does not swallow the next day's report", async t => {

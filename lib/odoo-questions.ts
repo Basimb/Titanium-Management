@@ -163,7 +163,7 @@ const COLORS = ["🟢", "🔵", "🟡", "🔴", "🟣", "🟠"];
 const branchLabel = (location: string) => BRANCH_NAMES[location.split("/")[0]?.trim().toUpperCase() ?? ""] || location;
 const money = (value: number, label?: string) => label ? `${formatAmount(value)} ${label}` : formatAmount(value);
 
-export type OdooAnswerConfig = { odoo: OdooConfig; currencyLabel?: string; lowStockThreshold?: number; expiryWindowDays?: number; fetcher?: typeof fetch };
+export type OdooAnswerConfig = { odoo: OdooConfig; currencyLabel?: string; expiryWindowDays?: number; fetcher?: typeof fetch };
 
 // Basim (2026-09-17): "بدي يصير جاوبني بسرعه فائقه". The same question asked
 // twice in a row -- which is what happens when he checks, then shows someone,
@@ -258,8 +258,14 @@ async function freshAnswer(match: OdooQuestionMatch, config: OdooAnswerConfig, a
       `💰 *الصافي*: ${money(net, currency)}`,
     ].join("\n");
   }
-  const threshold = config.lowStockThreshold ?? 10;
-  const items = await session.lowStock(threshold, 15);
-  if (!items.length) return `📦 ما في أصناف تحت ${threshold} قطعة.`;
-  return [`📦 *أصناف قاربت على النفاد* (أقل من ${threshold})`, "", ...items.map(item => `• ${item.name} — ${item.qty}`)].join("\n");
+  // Not "under ten units" -- on the live catalogue that is 80% of everything
+  // with stock, because a pharmacy carries one or two of most things. What is
+  // running out is what will be gone within the week at the rate it sells.
+  const items = await session.shortages({ maxDaysLeft: 7, limit: 15, at });
+  if (!items.length) return "📦 ما في صنف متحرّك رح يخلص خلال أسبوع.";
+  return [
+    "📦 *رح تخلص خلال أسبوع*",
+    "",
+    ...items.map(item => `• ${item.name} — باقي *${Math.round(item.daysLeft * 10) / 10}* يوم (${item.qty} قطعة، ${item.perDay.toFixed(1)}/يوم)`),
+  ].join("\n");
 }

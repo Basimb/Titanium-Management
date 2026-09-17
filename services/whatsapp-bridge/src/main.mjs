@@ -70,7 +70,6 @@ async function main() {
         odoo: { url: process.env.ODOO_URL || '', db: process.env.ODOO_DB || '', username: process.env.ODOO_USERNAME || '', apiKey: process.env.ODOO_API_KEY || '' },
         ownerNumber: contacts.find(contact => contact.userId === 'basem')?.number ?? '',
         groupId: [...config.allowedGroups][0] ?? null,
-        lowStockThreshold: process.env.ODOO_LOW_STOCK_THRESHOLD ? Number(process.env.ODOO_LOW_STOCK_THRESHOLD) : undefined,
         currencyLabel: process.env.ODOO_CURRENCY_LABEL || undefined,
         dailyHour: process.env.ODOO_REPORT_DAILY_HOUR ? Number(process.env.ODOO_REPORT_DAILY_HOUR) : undefined,
         weeklyDay: process.env.ODOO_REPORT_WEEKLY_DAY ? Number(process.env.ODOO_REPORT_WEEKLY_DAY) : undefined,
