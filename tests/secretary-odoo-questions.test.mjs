@@ -8,7 +8,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { handleSecretaryEvent, migrateSecretary } from '../lib/secretary-service.ts';
 import { emptySecretaryIntent } from '../lib/secretary-intent.ts';
 
-function fixture(t, { askOdoo } = {}) {
+function fixture(t, { askOdoo, classifyOdoo } = {}) {
   const db = new DatabaseSync(':memory:'); t.after(() => db.close());
   db.exec(`PRAGMA foreign_keys=ON;
     CREATE TABLE users(id TEXT PRIMARY KEY,name TEXT UNIQUE,role TEXT,active INTEGER,pin_hash TEXT,created_at INTEGER,updated_at INTEGER);
@@ -22,7 +22,7 @@ function fixture(t, { askOdoo } = {}) {
   let count = 0, modelCalls = 0; const now = 1788580000000;
   const run = (extra = {}) => handleSecretaryEvent(db, {
     messageId: `E-${++count}`, senderNumber: '12025550101', groupId: null, text: 'x', receivedAt: now, responseMessageId: `R-${count}`, ...extra,
-  }, config, { infer: async () => { modelCalls += 1; return emptySecretaryIntent('chat', 'رد عادي'); }, now: () => now, ...(askOdoo ? { askOdoo } : {}) });
+  }, config, { infer: async () => { modelCalls += 1; return emptySecretaryIntent('chat', 'رد عادي'); }, now: () => now, ...(askOdoo ? { askOdoo } : {}), ...(classifyOdoo ? { classifyOdoo } : {}) });
   return { db, run, modelCalls: () => modelCalls };
 }
 
@@ -78,4 +78,61 @@ test('asking the same thing twice replays the stored answer instead of hitting O
   const again = await f.run({ messageId: 'SAME', responseMessageId: 'R', text: 'شو مبيعات اليوم؟' });
   assert.equal(calls, 1);
   assert.equal(first.reply, again.reply);
+});
+
+// Basim (2026-09-17): "بدي يصير الذكاء يربط الاسئله انها مبيعات وهيك". The
+// router reads the wording when the written-out patterns do not recognise it.
+// It is asked LAST and for routing only -- these tests pin both halves of that.
+test('a question the patterns miss is routed by the model, and answered from Odoo', async t => {
+  const routed = [];
+  const asked = [];
+  const f = fixture(t, {
+    askOdoo: async match => { asked.push(match); return '📊 الرقم من النظام'; },
+    classifyOdoo: async text => { routed.push(text); return { kind: 'sales_month', branch: 'DABOQ' }; },
+  });
+  const r = await f.run({ text: 'قديش صار عنا بدابوق من أول الشهر؟' });
+  assert.deepEqual(routed, ['قديش صار عنا بدابوق من أول الشهر؟']);
+  assert.deepEqual(asked, [{ kind: 'sales_month', branch: 'DABOQ' }]);
+  assert.equal(r.status, 'summary');
+  assert.equal(f.modelCalls(), 0, 'the ordinary planner must not also run');
+});
+
+test('a wording the patterns already know never reaches the router', async t => {
+  let routerCalls = 0;
+  const f = fixture(t, {
+    askOdoo: async () => 'ok',
+    classifyOdoo: async () => { routerCalls += 1; return null; },
+  });
+  await f.run({ text: 'شو مبيعات اليوم؟' });
+  assert.equal(routerCalls, 0, 'the free path answers first');
+});
+
+test('an ordinary instruction is not a question, so it never costs a routing call', async t => {
+  let routerCalls = 0;
+  const f = fixture(t, {
+    askOdoo: async () => assert.fail('must not answer from Odoo'),
+    classifyOdoo: async () => { routerCalls += 1; return null; },
+  });
+  const r = await f.run({ text: 'ذكّر خالد بالطلبية' });
+  assert.equal(routerCalls, 0);
+  assert.equal(f.modelCalls(), 1, 'it goes to the ordinary secretary instead');
+  assert.equal(r.reply, 'رد عادي');
+});
+
+test('a question the router declines falls through to the ordinary secretary', async t => {
+  const f = fixture(t, {
+    askOdoo: async () => assert.fail('nothing to answer'),
+    classifyOdoo: async () => null,
+  });
+  const r = await f.run({ text: 'مين مسؤول عن الطلبية؟' });
+  assert.equal(f.modelCalls(), 1);
+  assert.equal(r.reply, 'رد عادي');
+});
+
+test('a router that fails is not an error the person ever sees', async t => {
+  const f = fixture(t, {
+    askOdoo: async () => assert.fail('nothing to answer'),
+    classifyOdoo: async () => { throw new Error('provider down'); },
+  });
+  await assert.rejects(f.run({ text: 'قديش صار عنا اليوم؟' }));
 });

@@ -14,7 +14,8 @@ const SETTINGS_KEYS = new Set(['TEAM_CHAT_ENABLED', 'TEAM_CHAT_SHARED_KEY', 'TEA
   // launcher, but they live in the SAME settings file, and an unknown key here
   // makes readPrivateConfig throw -- which pauses the whole bridge behind the
   // attention marker. Any key the dashboard allows must be accepted here too.
-  'ODOO_REPORT_DAILY', 'ODOO_REPORT_WEEKLY', 'ODOO_REPORT_PURCHASES', 'ODOO_QUESTIONS_ENABLED', 'ODOO_EXPIRY_WINDOW_DAYS']);
+  'ODOO_REPORT_DAILY', 'ODOO_REPORT_WEEKLY', 'ODOO_REPORT_PURCHASES', 'ODOO_QUESTIONS_ENABLED', 'ODOO_EXPIRY_WINDOW_DAYS',
+  'OPENAI_ROUTER_MODEL']);
 const MAX_BYTES = 32_768;
 const SERVICE_DIRECTORY = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 

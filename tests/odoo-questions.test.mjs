@@ -5,7 +5,7 @@
 // all. A wrong number would be worse than no answer, because he acts on it.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { matchOdooQuestion, answerOdooQuestion, normalizeArabic, forgetOdooAnswers } from "../lib/odoo-questions.ts";
+import { matchOdooQuestion, answerOdooQuestion, normalizeArabic, forgetOdooAnswers, looksLikeOdooQuestion } from "../lib/odoo-questions.ts";
 import { forgetOdooSessions } from "../lib/odoo-client.ts";
 
 // Answers are cached for a minute and logins for half an hour, both keyed by
@@ -185,4 +185,63 @@ test("the login happens once and is reused by later questions, and a rejected lo
   const reply = await answerOdooQuestion(match, { odoo, fetcher }, AT + 122_000);
   assert.match(reply, /فواتير موردين/);
   assert.equal(logins, 2);
+});
+
+// Basim (2026-09-17): "اربطه مباشر بالمصطلحات العربيه مشان يفهمني". He should
+// not have to remember one blessed phrasing, so the words the team actually
+// uses are written out -- and the ones that live inside other words are
+// matched as whole words only, or "دخلت المخزن" would read as a sales question.
+test("the words the team actually uses all land on the right question", () => {
+  const cases = [
+    ["قديش الإيرادات اليوم", "sales_today"],
+    ["شو المدخول", "sales_today"],
+    ["كم كاش اليوم", "sales_today"],
+    ["شو مبيعات الأسبوع", "sales_week"],
+    ["مبيعات هالاسبوع", "sales_week"],
+    ["شو الوضع بالنواقص", "low_stock"],
+    ["في ذمم علينا؟", "unpaid_bills"],
+    ["شو مستحقات الموردين", "unpaid_bills"],
+    ["شو شرينا هالشهر", "purchases_month"],
+    ["شو بتعرف تجاوب؟", "help"],
+    ["شو بقدر اسألك", "help"],
+  ];
+  for (const [text, kind] of cases) {
+    assert.equal(matchOdooQuestion(text)?.kind, kind, text);
+  }
+});
+
+test("a word that merely contains a question word is not that question", () => {
+  for (const text of ["دخلت على المخزن", "ذكّر خالد بالطلبية", "خلصت المهمة", "بعث الملف للمحاسب"]) {
+    assert.equal(matchOdooQuestion(text), null, text);
+  }
+});
+
+test("the misspellings the branches get typed with still find the branch", () => {
+  assert.equal(matchOdooQuestion("مبيعات دبوق")?.branch, "DABOQ");
+  assert.equal(matchOdooQuestion("مبيعات النعور")?.branch, "NAOOR");
+  assert.equal(matchOdooQuestion("مبيعات صافوت اليوم")?.branch, "SAFOT");
+  assert.equal(matchOdooQuestion("مبيعات الجمارك")?.branch, "JUMRK");
+});
+
+test("the help answer lists only questions that are really wired up", async () => {
+  const reply = await answerOdooQuestion({ kind: "help", branch: null },
+    { odoo, fetcher: async () => assert.fail("the list must never need the pharmacy system") }, AT);
+  for (const wording of ["مبيعات اليوم", "مبيعات امبارح", "مبيعات الأسبوع", "مبيعات الشهر",
+    "ناقص من المخزون", "الصلاحيات", "مش مدفوع", "المشتريات", "الناعور"]) {
+    assert.ok(reply.includes(wording), wording);
+  }
+  // Every wording it advertises has to actually match something.
+  for (const wording of ["شو مبيعات اليوم", "مبيعات امبارح", "مبيعات الأسبوع", "مبيعات الشهر",
+    "شو ناقص من المخزون", "شو بينتهي قريب", "كم علينا مش مدفوع", "شو المشتريات هالشهر"]) {
+    assert.ok(matchOdooQuestion(wording), wording);
+  }
+});
+
+test("only a question is worth a routing call", () => {
+  for (const text of ["قديش صار عنا بدابوق؟", "كم صرفنا", "شو الوضع", "وين وصلت الطلبية", "how much today"]) {
+    assert.equal(looksLikeOdooQuestion(text), true, text);
+  }
+  for (const text of ["ذكّر خالد بالطلبية", "خلصت", "تمام", "ابعت التقرير للمحاسب"]) {
+    assert.equal(looksLikeOdooQuestion(text), false, text);
+  }
 });

@@ -4,6 +4,7 @@ import { readTeamChatSettings } from "@/lib/team-chat-settings";
 import { handleSecretaryEvent } from "@/lib/secretary-service";
 import { inferSecretaryIntent, searchSecretaryWeb } from "@/lib/secretary-intent";
 import { answerOdooQuestion } from "@/lib/odoo-questions";
+import { classifyOdooQuestion } from "@/lib/odoo-question-model";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -28,6 +29,11 @@ export async function POST(request: Request) {
               ...(/^\d{1,4}$/.test(settings.ODOO_LOW_STOCK_THRESHOLD || "") ? { lowStockThreshold: Number(settings.ODOO_LOW_STOCK_THRESHOLD) } : {}),
               ...(/^\d{1,3}$/.test(settings.ODOO_EXPIRY_WINDOW_DAYS || "") ? { expiryWindowDays: Number(settings.ODOO_EXPIRY_WINDOW_DAYS) } : {}),
             }, at) }
+          : {}),
+        // Wording only. The router says WHICH report was asked for; the figures
+        // in the reply still come from the query above, never from the model.
+        ...(settings.ODOO_QUESTIONS_ENABLED !== "0" && settings.OPENAI_API_KEY && settings.ODOO_URL && settings.ODOO_DB && settings.ODOO_USERNAME && settings.ODOO_API_KEY
+          ? { classifyOdoo: (text: string) => classifyOdooQuestion(text, { apiKey: settings.OPENAI_API_KEY, model: settings.OPENAI_ROUTER_MODEL }) }
           : {}),
       }) } : {}),
     });

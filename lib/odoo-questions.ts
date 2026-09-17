@@ -14,8 +14,8 @@
 import { openOdooSession, formatAmount, type OdooConfig } from "./odoo-client.ts";
 
 export type OdooQuestionKind =
-  | "sales_today" | "sales_yesterday" | "sales_month"
-  | "low_stock" | "expiring" | "unpaid_bills" | "purchases_month";
+  | "sales_today" | "sales_yesterday" | "sales_week" | "sales_month"
+  | "low_stock" | "expiring" | "unpaid_bills" | "purchases_month" | "help";
 export type OdooQuestionMatch = { kind: OdooQuestionKind; branch: string | null };
 
 const DAY = 24 * 60 * 60_000;
@@ -36,10 +36,10 @@ export function normalizeArabic(value: string): string {
 // Branch names as the team says them, mapped to the location code Odoo uses.
 // The codes come from the live system (NAOOR/Stock, SAFOT/Stock, ...).
 const BRANCH_ALIASES: Array<{ code: string; names: string[] }> = [
-  { code: "NAOOR", names: ["الناعور", "ناعور", "naoor"] },
-  { code: "SAFOT", names: ["صافوط", "صفوط", "safot"] },
-  { code: "JUMRK", names: ["الجمرك", "جمرك", "دوار الجمرك", "jumrk"] },
-  { code: "DABOQ", names: ["دابوق", "داबوق", "daboq", "dabouq"] },
+  { code: "NAOOR", names: ["الناعور", "ناعور", "النعور", "naoor"] },
+  { code: "SAFOT", names: ["صافوط", "صفوط", "صافوت", "safot"] },
+  { code: "JUMRK", names: ["الجمرك", "جمرك", "دوار الجمرك", "الجمارك", "jumrk"] },
+  { code: "DABOQ", names: ["دابوق", "دبوق", "الدابوق", "daboq", "dabouq"] },
 ];
 function matchBranch(text: string): string | null {
   for (const branch of BRANCH_ALIASES) {
@@ -48,32 +48,105 @@ function matchBranch(text: string): string | null {
   return null;
 }
 
-// Each entry is "this question, in the ways it gets asked". Order matters:
-// the more specific period wins, so "مبيعات امبارح" never falls into the
-// plain "مبيعات" (today) bucket.
-const PATTERNS: Array<{ kind: OdooQuestionKind; any: string[]; all?: string[] }> = [
-  { kind: "expiring", any: ["منتهي الصلاحيه", "منتهيه الصلاحيه", "الصلاحيه", "بتنتهي", "ينتهي", "قرب ينتهي", "قاربه على الانتهاء", "expiry", "expiring"] },
-  // "كم فاتورة مورد مش مدفوعة" and "الفواتير غير المدفوعة" are the same
-  // question -- match the state words, not one exact plural.
-  { kind: "unpaid_bills", any: ["مش مدفوع", "غير مدفوع", "غير مسدد", "مش مسدد", "مستحقات", "ذمم", "مديونيه", "علينا للمورد", "كم علينا"] },
-  { kind: "purchases_month", any: ["مشتريات"], },
-  { kind: "low_stock", any: ["ناقص", "نواقص", "خالص", "قارب على النفاد", "المخزون", "مخزون"] },
-  { kind: "sales_yesterday", any: ["مبيعات", "بعنا", "المبيعات"], all: ["امبارح"] },
-  { kind: "sales_month", any: ["مبيعات", "بعنا", "المبيعات"], all: ["الشهر"] },
-  { kind: "sales_today", any: ["مبيعات", "بعنا", "المبيعات", "مبيعاتنا"] },
+// Basim (2026-09-17): "اربطه مباشر بالمصطلحات العربيه مشان يفهمني" -- he should
+// not have to guess the one wording that works. So each question carries the
+// words the team actually uses for it, in Jordanian Arabic, plus the English
+// ones that show up in the system itself.
+//
+// Two kinds of matching, because Arabic makes a plain substring dangerous:
+//   any   -- substring, for words long and distinctive enough that a false
+//            positive is not realistic ("مبيعات" also catches "مبيعاتنا").
+//   words -- whole word only, for short ones that live inside other words
+//            ("دخل" would otherwise fire on "دخلت المخزن").
+// `period` narrows an otherwise identical question to a time span: at least
+// one of its words must appear, and the more specific span is listed first so
+// "مبيعات امبارح" never falls into today's bucket.
+type Pattern = { kind: OdooQuestionKind; any?: string[]; words?: string[]; period?: string[] };
+
+const SALES_ANY = ["مبيعات", "المبيعات", "مبيعاتنا", "مبيعاتي", "بعنا", "بيعنا", "ايرادات", "الايرادات",
+  "ايراد", "الايراد", "مدخول", "المدخول", "تحصيل", "التحصيل", "sales", "turnover"];
+const SALES_WORDS = ["بيع", "البيع", "دخل", "الدخل", "كاش", "الكاش"];
+
+const PATTERNS: Pattern[] = [
+  // Asked first, so "شو بتعرف تجاوب؟" is answered with the list rather than
+  // with whichever word happened to appear in the question.
+  { kind: "help", any: ["شو بتعرف تجاوب", "شو بتعرف ترد", "شو بقدر اسالك", "شو بقدر اسال", "شو الاسئله",
+    "قائمه الاسئله", "شو بتفهم", "شو بتعرف تعمل", "كيف اسالك", "شو ممكن اسالك"], words: ["مساعده", "help"] },
+
+  { kind: "expiring", any: ["منتهي الصلاحيه", "منتهيه الصلاحيه", "الصلاحيه", "صلاحيه", "صلاحيات",
+    "بتنتهي", "بينتهي", "ينتهي", "قرب ينتهي", "قاربه على الانتهاء", "تواريخ الانتهاء", "اكسباير",
+    "expiry", "expiring", "expired"] },
+
+  // The state of the bill is what makes this question, not the word "فاتوره" --
+  // which belongs just as much to the purchases question below.
+  { kind: "unpaid_bills", any: ["مش مدفوع", "مش مدفوعه", "غير مدفوع", "غير مدفوعه", "غير مسدد", "مش مسدد",
+    "ما دفعنا", "لسه ما دفعنا", "مستحقات", "مستحق للمورد", "ذمم", "الذمم", "مديونيه", "مديونيات",
+    "علينا للمورد", "علينا للموردين", "كم علينا", "مطلوب مننا", "دائنين", "unpaid", "payables"] },
+
+  { kind: "purchases_month", any: ["مشتريات", "المشتريات", "اشترينا", "شرينا", "مرتجعات للمورد",
+    "مرتجعات الموردين", "purchases"] },
+
+  { kind: "low_stock", any: ["نواقص", "النواقص", "ناقصه", "قارب على النفاد", "قربت تخلص", "قرب يخلص",
+    "قربت تنفد", "تحت الحد", "المخزون", "مخزون", "ستوك", "كميات قليله", "شحيح", "stock"],
+    words: ["ناقص", "خلص", "خالص", "نفد", "نفذ"] },
+
+  { kind: "sales_yesterday", any: SALES_ANY, words: SALES_WORDS, period: ["امبارح", "مبارح", "البارحه", "امس", "الامس"] },
+  { kind: "sales_week", any: SALES_ANY, words: SALES_WORDS, period: ["الاسبوع", "اسبوع", "هالاسبوع", "اسبوعي"] },
+  { kind: "sales_month", any: SALES_ANY, words: SALES_WORDS, period: ["الشهر", "هالشهر", "شهري", "الشهري"] },
+  { kind: "sales_today", any: SALES_ANY, words: SALES_WORDS },
 ];
+
+// Whether it is worth asking the model to route this at all. The hand-written
+// patterns above already answer the common wordings for free; this gate decides
+// which of the leftovers are worth one cheap model call, so an ordinary message
+// ("ذكّر أحمد بالطلبية") never pays for one. A question mark, or a question word
+// standing on its own, is the whole test -- deliberately loose, because the
+// router's own answer for anything else is "none".
+const QUESTION_WORDS = ["كم", "شو", "قديش", "اديش", "كيف", "وين", "ايش", "شقد", "هل", "اعطيني",
+  "جيبلي", "طلعلي", "وريني", "بدي اعرف", "ممكن اعرف", "how", "what"];
+export function looksLikeOdooQuestion(text: string): boolean {
+  if (!text || text.length > 200) return false;
+  if (/[؟?]/.test(text)) return true;
+  const value = normalizeArabic(text);
+  if (!value) return false;
+  const tokens = value.split(" ");
+  return QUESTION_WORDS.some(word => {
+    const normalized = normalizeArabic(word);
+    return normalized.includes(" ") ? value.includes(normalized) : tokens.includes(normalized);
+  });
+}
 
 /** The question this message is asking, or null when it is not one of them. */
 export function matchOdooQuestion(text: string): OdooQuestionMatch | null {
   const value = normalizeArabic(text);
   if (!value || value.length > 200) return null;
+  const tokens = value.split(" ");
   for (const pattern of PATTERNS) {
-    if (pattern.all && !pattern.all.every(word => value.includes(normalizeArabic(word)))) continue;
-    if (!pattern.any.some(word => value.includes(normalizeArabic(word)))) continue;
+    if (pattern.period && !pattern.period.some(word => value.includes(normalizeArabic(word)))) continue;
+    const hit = (pattern.any ?? []).some(word => value.includes(normalizeArabic(word)))
+      || (pattern.words ?? []).some(word => tokens.includes(normalizeArabic(word)));
+    if (!hit) continue;
     return { kind: pattern.kind, branch: matchBranch(value) };
   }
   return null;
 }
+
+// The answer to "شو بتعرف تجاوب؟", in the wording the questions themselves
+// take. It is a constant on purpose: it lists what is really wired up, so it
+// can never promise a question that is not in PATTERNS above.
+const HELP_REPLY = [
+  "🤖 *بقدر أجاوبك على:*",
+  "",
+  "📊 *المبيعات* — «شو مبيعات اليوم» · «مبيعات امبارح» · «مبيعات الأسبوع» · «مبيعات الشهر»",
+  "🏪 *لفرع لحاله* — زيد اسم الفرع: «مبيعات الناعور اليوم»",
+  "   (الناعور · صافوط · دابوق · الجمرك)",
+  "📦 *النواقص* — «شو ناقص من المخزون»",
+  "⏳ *الصلاحيات* — «شو بينتهي قريب» · «في إشي منتهي؟»",
+  "🧾 *فواتير الموردين* — «كم علينا مش مدفوع»",
+  "🛒 *المشتريات* — «شو المشتريات هالشهر»",
+  "",
+  "كل رقم بيجي من دواء تك مباشرة، ما بألّفه.",
+].join("\n");
 
 function startOfLocalDay(at: number): number {
   const shifted = new Date(at + AMMAN_OFFSET_MINUTES * 60_000);
@@ -119,14 +192,21 @@ export async function answerOdooQuestion(match: OdooQuestionMatch, config: OdooA
 }
 
 async function freshAnswer(match: OdooQuestionMatch, config: OdooAnswerConfig, at: number): Promise<string> {
+  if (match.kind === "help") return HELP_REPLY;
   const session = await openOdooSession(config.odoo, config.fetcher);
   const currency = config.currencyLabel;
-  if (match.kind === "sales_today" || match.kind === "sales_yesterday" || match.kind === "sales_month") {
+  if (match.kind === "sales_today" || match.kind === "sales_yesterday" || match.kind === "sales_week" || match.kind === "sales_month") {
+    // "آخر ٧ أيام" rather than "since Sunday": the week he means is the last
+    // seven days of trading, and a label that says exactly which days were
+    // counted can never be read as a different week than the one summed.
+    const weekFrom = startOfLocalDay(at) - 6 * DAY;
     const [from, to, heading] = match.kind === "sales_today"
       ? [startOfLocalDay(at), at, `📊 *مبيعات اليوم لحد الآن* (${dateLabel(at)})`]
       : match.kind === "sales_yesterday"
         ? [startOfLocalDay(at) - DAY, startOfLocalDay(at), `📊 *مبيعات أمس* (${dateLabel(startOfLocalDay(at) - DAY)})`]
-        : [startOfLocalMonth(at), at, `📊 *مبيعات الشهر* (من ${dateLabel(startOfLocalMonth(at))})`];
+        : match.kind === "sales_week"
+          ? [weekFrom, at, `📊 *مبيعات آخر ٧ أيام* (من ${dateLabel(weekFrom)} إلى ${dateLabel(at)})`]
+          : [startOfLocalMonth(at), at, `📊 *مبيعات الشهر* (من ${dateLabel(startOfLocalMonth(at))})`];
     const rows = await session.salesByLocation(new Date(from).toISOString(), new Date(to).toISOString());
     const picked = match.branch ? rows.filter(row => row.location.split("/")[0]?.toUpperCase() === match.branch) : rows;
     if (!picked.length) return `${heading}\n\nما في مبيعات مسجّلة${match.branch ? ` لفرع ${BRANCH_NAMES[match.branch]}` : ""} لهاي الفترة.`;

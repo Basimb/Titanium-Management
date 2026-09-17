@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
-import { matchOdooQuestion, type OdooQuestionMatch } from "./odoo-questions.ts";
+import { matchOdooQuestion, looksLikeOdooQuestion, type OdooQuestionMatch } from "./odoo-questions.ts";
 import type { DatabaseSync } from "node:sqlite";
 import { executeManagementAction, getManagementSnapshot, migrateManagementActions, ManagementActionError, ACTION_KEYS, type ManagementActor, type ManagementCommand, type ManagementResult } from "./management-actions.ts";
 import { resolveChatUser, normalizeContactNumber, type ChatUser } from "./team-chat-policy.ts";
@@ -1224,6 +1224,10 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
   // system is configured; absent, every question below simply is not one, and
   // the message goes to the ordinary secretary untouched.
   askOdoo?: (match: OdooQuestionMatch, at: number) => Promise<string>;
+  // Basim (2026-09-17): "بدي يصير الذكاء يربط الاسئله انها مبيعات وهيك". The
+  // model reads the wording and nothing else: it returns which report was
+  // asked for, or nothing. It never sees a figure and never writes one.
+  classifyOdoo?: (text: string) => Promise<OdooQuestionMatch | null>;
 }): Promise<Result> {
   migrateSecretary(db); const now = (dependencies.now || Date.now)();
   // A question about the pharmacy's own system, answered from its real numbers
@@ -1233,7 +1237,10 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
   // from Odoo, never composed. Anything it does not recognise falls straight
   // through and is handled exactly as before.
   if (dependencies.askOdoo && event.choice === undefined && !event.replyToMessageId && event.inputKind !== "voice") {
-    const question = matchOdooQuestion(event.text);
+    // The written-out wordings answer first and cost nothing. Only what they
+    // do not recognise -- and only when it reads like a question at all -- is
+    // worth one routing call to the model.
+    let question = matchOdooQuestion(event.text);
     if (question) {
       const asking = actorFor(db, event, config);
       if (asking && asking.active === 1 && config.enabled) {
@@ -1248,6 +1255,25 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
           // debug, and it must never swallow their message silently.
           return transaction(db, () => save(db, event, asking, { status: "clarify",
             reply: "ما قدرت أوصل لنظام الصيدلية هلأ. جرّب بعد شوي." }, [], now));
+        }
+      }
+    } else if (dependencies.classifyOdoo && looksLikeOdooQuestion(event.text)) {
+      const asking = actorFor(db, event, config);
+      if (asking && asking.active === 1 && config.enabled) {
+        const state = stateFor(db, asking);
+        const duplicate = lookup(db, event, asking, state);
+        if (duplicate) return duplicate;
+        // A router that is slow, unreachable or unsure returns nothing, and the
+        // message carries on to the ordinary secretary exactly as before.
+        question = await dependencies.classifyOdoo(event.text);
+        if (question) {
+          try {
+            const reply = await dependencies.askOdoo(question, now);
+            return transaction(db, () => save(db, event, asking, { status: "summary", reply }, [], now));
+          } catch {
+            return transaction(db, () => save(db, event, asking, { status: "clarify",
+              reply: "ما قدرت أوصل لنظام الصيدلية هلأ. جرّب بعد شوي." }, [], now));
+          }
         }
       }
     }
