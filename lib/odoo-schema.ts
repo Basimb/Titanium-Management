@@ -105,8 +105,16 @@ export function pickModels(catalog: OdooModelInfo[], question: string, max = 20)
     .map(entry => entry.info.model);
 }
 
+// Measured against the live system on 2026-09-17: 678 tables and 12,963 stored
+// fields. Twenty tables at sixty fields each would put roughly six thousand
+// tokens of schema in front of every question -- slow, costly, and mostly
+// fields nobody asks about. These two caps are what goes in the prompt; the
+// cache still holds the fuller list.
+const PROMPT_MODELS = 12;
+const PROMPT_FIELDS = 30;
+
 /** The slice of the database map that goes into the prompt, as text. */
-export async function promptCatalog(session: OdooSession, cacheKey: string, question: string, max = 20): Promise<string> {
+export async function promptCatalog(session: OdooSession, cacheKey: string, question: string, max = PROMPT_MODELS): Promise<string> {
   const catalog = await odooCatalog(session, cacheKey);
   const wanted = pickModels(catalog, question, max);
   const byModel = await odooFields(session, cacheKey, wanted);
@@ -114,6 +122,6 @@ export async function promptCatalog(session: OdooSession, cacheKey: string, ques
   return wanted
     .filter(model => (byModel.get(model) ?? []).length > 0)
     .map(model => `${model} (${labels.get(model) ?? model}): `
-      + (byModel.get(model) ?? []).map(field => `${field.name}:${field.type}`).join(", "))
+      + (byModel.get(model) ?? []).slice(0, PROMPT_FIELDS).map(field => `${field.name}:${field.type}`).join(", "))
     .join("\n");
 }

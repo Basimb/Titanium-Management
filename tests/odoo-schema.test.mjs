@@ -105,3 +105,20 @@ test("the prompt slice names each table with its fields and types, and skips the
   assert.match(slice, /pos\.order .*amount_total:monetary/);
   assert.ok(!slice.includes("ir.cron"));
 });
+
+// The live system has 678 tables and 12,963 stored fields (measured
+// 2026-09-17), so "put the schema in the prompt" is a budget question, not a
+// formality. These caps are what keeps a question from carrying thousands of
+// tokens of fields nobody asked about.
+test("the prompt slice is capped in both directions, however big the database is", async () => {
+  const many = Array.from({ length: 40 }, (unused, index) => ({ model: `x.model${index}`, name: `Model ${index}` }));
+  const manyFields = many.flatMap(info => Array.from({ length: 80 }, (unused, index) => ({
+    model: info.model, name: `field_${index}`, ttype: "char", field_description: `Field ${index}`,
+  })));
+  const slice = await promptCatalog(sessionFor({ models: many, fields: manyFields }).session, "big", "model1 model2 model3");
+  const lines = slice.split("\n");
+  assert.ok(lines.length <= 12, `tables in the prompt: ${lines.length}`);
+  for (const line of lines) {
+    assert.ok(line.split(", ").length <= 30, "fields per table in the prompt");
+  }
+});
