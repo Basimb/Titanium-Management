@@ -16,7 +16,7 @@
 import type { OdooQuestionKind, OdooQuestionMatch } from "./odoo-questions.ts";
 
 const KINDS: readonly OdooQuestionKind[] = ["sales_today", "sales_yesterday", "sales_week", "sales_month",
-  "low_stock", "expiring", "unpaid_bills", "purchases_month", "help"];
+  "shifts_today", "shifts_yesterday", "low_stock", "expiring", "unpaid_bills", "purchases_month", "help"];
 const BRANCHES = ["NAOOR", "SAFOT", "DABOQ", "JUMRK"] as const;
 
 const PROMPT = [
@@ -28,6 +28,8 @@ const PROMPT = [
   "  sales_yesterday  - sales for yesterday",
   "  sales_week       - sales over the last week",
   "  sales_month      - sales this month / since the start of the month",
+  "  shifts_today     - today's sales split by work shift (morning 08-16, evening 16-24, night 00-08)",
+  "  shifts_yesterday - the same for yesterday",
   "  low_stock        - which items are running out / nearly out of stock",
   "  expiring         - stock that has expired or expires soon",
   "  unpaid_bills     - unpaid or outstanding VENDOR bills, what the company owes suppliers",

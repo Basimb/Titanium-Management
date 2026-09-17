@@ -98,6 +98,14 @@ export type InvoiceSales = { invoiceCount: number; totalAmount: number };
 // by how fast the item actually sells.
 export type ShortageItem = { name: string; qty: number; perDay: number; daysLeft: number };
 export type LocationSales = { location: string; orderCount: number; totalAmount: number };
+// Basim (2026-09-17): the three shifts the branches run -- 08:00-16:00,
+// 16:00-24:00, and 00:00-08:00, all Amman time. Each belongs to the calendar
+// day it falls in, so Wednesday's night shift is the small hours of Wednesday
+// morning. Odoo stores date_order in UTC, so every boundary here is the local
+// hour minus the offset: 08:00 in the pharmacy is 05:00 in the database, and
+// a shift report that forgets that is wrong by three hours while looking right.
+export type ShiftName = "morning" | "evening" | "night";
+export type ShiftSales = { shift: ShiftName; orderCount: number; totalAmount: number; byLocation: LocationSales[] };
 // "مشتريات" = posted vendor bills (account.move, move_type=in_invoice); "مرتجعات
 // للموردين" = posted vendor credit notes (move_type=in_refund) -- confirmed
 // 2026-09-12 with Basim ("مرتجعات للموردين", not customer/POS returns).
@@ -121,6 +129,8 @@ export type OdooSession = {
   salesSummary(sinceIso: string, untilIso: string): Promise<SalesSummary>;
   invoiceSales(sinceIso: string, untilIso: string): Promise<InvoiceSales>;
   salesByLocation(sinceIso: string, untilIso: string): Promise<LocationSales[]>;
+  /** One local day, split into the three shifts. dayStart is that day's local midnight. */
+  salesByShift(dayStart: number, offsetMinutes?: number): Promise<ShiftSales[]>;
   purchaseSummary(sinceIso: string, untilIso: string): Promise<PurchaseSummary>;
   /** Items that run out soonest, by days of cover. See ShortageItem. */
   shortages(options?: { windowDays?: number; maxDaysLeft?: number; limit?: number; at?: number }): Promise<ShortageItem[]>;
@@ -147,6 +157,16 @@ export async function openOdooSession(config: OdooConfig, fetcher: Fetcher = fet
       return call(config, "object", "execute_kw", [config.db, uid, config.apiKey, model, method, args, kwargs], fetcher);
     }
   };
+  const locationSales = async (sinceIso: string, untilIso: string): Promise<LocationSales[]> => {
+    const domain = [["date_order", ">=", sinceIso], ["date_order", "<", untilIso], ["state", "in", ["paid", "done", "invoiced"]]];
+    const groups = (await execute("pos.order", "read_group", [domain, ["amount_total"], ["location_id"]])) as Array<Record<string, unknown>> | undefined;
+    return (Array.isArray(groups) ? groups : []).map(row => {
+      const locationId = row.location_id;
+      const location = Array.isArray(locationId) && typeof locationId[1] === "string" ? locationId[1] : "?";
+      return { location, orderCount: Number(row.__count ?? 0), totalAmount: Number(row.amount_total ?? 0) };
+    });
+  };
+
   return {
     async runQuery(query) {
       if (query.method === "search_count") return execute(query.model, "search_count", [query.domain]);
@@ -183,14 +203,27 @@ export async function openOdooSession(config: OdooConfig, fetcher: Fetcher = fet
       const row = Array.isArray(groups) ? groups[0] : undefined;
       return { invoiceCount: Number(row?.__count ?? 0), totalAmount: Number(row?.amount_total ?? 0) };
     },
-    async salesByLocation(sinceIso, untilIso) {
-      const domain = [["date_order", ">=", sinceIso], ["date_order", "<", untilIso], ["state", "in", ["paid", "done", "invoiced"]]];
-      const groups = (await execute("pos.order", "read_group", [domain, ["amount_total"], ["location_id"]])) as Array<Record<string, unknown>> | undefined;
-      return (Array.isArray(groups) ? groups : []).map(row => {
-        const locationId = row.location_id;
-        const location = Array.isArray(locationId) && typeof locationId[1] === "string" ? locationId[1] : "?";
-        return { location, orderCount: Number(row.__count ?? 0), totalAmount: Number(row.amount_total ?? 0) };
-      });
+    salesByLocation: locationSales,
+    async salesByShift(dayStart, offsetMinutes = 180) {
+      const hour = 3_600_000;
+      // Within one day each shift IS a contiguous stretch of time, so this is
+      // three ordinary window reads rather than anything clever -- and reading
+      // them as windows is what keeps the UTC conversion in one place.
+      const windows: Array<{ shift: ShiftName; from: number; to: number }> = [
+        { shift: "morning", from: dayStart + 8 * hour, to: dayStart + 16 * hour },
+        { shift: "evening", from: dayStart + 16 * hour, to: dayStart + 24 * hour },
+        { shift: "night", from: dayStart, to: dayStart + 8 * hour },
+      ];
+      void offsetMinutes; // dayStart already carries the offset; kept for callers that pass it.
+      return Promise.all(windows.map(async (window): Promise<ShiftSales> => {
+        const byLocation = await locationSales(new Date(window.from).toISOString(), new Date(window.to).toISOString());
+        return {
+          shift: window.shift,
+          orderCount: byLocation.reduce((sum, row) => sum + row.orderCount, 0),
+          totalAmount: byLocation.reduce((sum, row) => sum + row.totalAmount, 0),
+          byLocation,
+        };
+      }));
     },
     async purchaseSummary(sinceIso, untilIso) {
       // account.move's invoice_date is an Odoo Date field, not a datetime --

@@ -15,6 +15,7 @@ import { openOdooSession, formatAmount, type OdooConfig } from "./odoo-client.ts
 
 export type OdooQuestionKind =
   | "sales_today" | "sales_yesterday" | "sales_week" | "sales_month"
+  | "shifts_today" | "shifts_yesterday"
   | "low_stock" | "expiring" | "unpaid_bills" | "purchases_month" | "help";
 export type OdooQuestionMatch = { kind: OdooQuestionKind; branch: string | null };
 
@@ -90,6 +91,14 @@ const PATTERNS: Pattern[] = [
     "قربت تنفد", "تحت الحد", "المخزون", "مخزون", "ستوك", "كميات قليله", "شحيح", "stock"],
     words: ["ناقص", "خلص", "خالص", "نفد", "نفذ"] },
 
+  // Basim (2026-09-17): the branches run three shifts -- 08:00-16:00, 16:00-24:00
+  // and 00:00-08:00. Asked ahead of the plain sales questions, because "مبيعات
+  // الشفتات امبارح" is a shift question that happens to contain the word for
+  // sales, and the more specific reading has to win.
+  { kind: "shifts_yesterday", any: ["شفت", "الشفت", "شفتات", "الشفتات", "ورديه", "وردية", "ورديات", "الورديات", "shift", "shifts"],
+    period: ["امبارح", "مبارح", "البارحه", "امس", "الامس"] },
+  { kind: "shifts_today", any: ["شفت", "الشفت", "شفتات", "الشفتات", "ورديه", "وردية", "ورديات", "الورديات", "shift", "shifts"] },
+
   { kind: "sales_yesterday", any: SALES_ANY, words: SALES_WORDS, period: ["امبارح", "مبارح", "البارحه", "امس", "الامس"] },
   { kind: "sales_week", any: SALES_ANY, words: SALES_WORDS, period: ["الاسبوع", "اسبوع", "هالاسبوع", "اسبوعي"] },
   { kind: "sales_month", any: SALES_ANY, words: SALES_WORDS, period: ["الشهر", "هالشهر", "شهري", "الشهري"] },
@@ -142,6 +151,7 @@ const HELP_REPLY = [
   "   (الناعور · صافوط · دابوق · الجمرك)",
   "📦 *النواقص* — «شو ناقص من المخزون»",
   "⏳ *الصلاحيات* — «شو بينتهي قريب» · «في إشي منتهي؟»",
+  "🕐 *الشفتات* — «شفتات امبارح» · «شفت المسا بالناعور»",
   "🧾 *فواتير الموردين* — «كم علينا مش مدفوع»",
   "🛒 *المشتريات* — «شو المشتريات هالشهر»",
   "",
@@ -218,6 +228,39 @@ async function freshAnswer(match: OdooQuestionMatch, config: OdooAnswerConfig, a
       const pct = total > 0 ? (row.totalAmount / total) * 100 : 0;
       lines.push(`${COLORS[index % COLORS.length]} *${branchLabel(row.location)}* — ${money(row.totalAmount, currency)} (${pct.toFixed(1)}%)`);
     });
+    lines.push("", "━━━━━━━━━━━━━", `💰 *الإجمالي*: ${money(total, currency)} من ${orders} عملية`);
+    return lines.join("\n");
+  }
+  if (match.kind === "shifts_today" || match.kind === "shifts_yesterday") {
+    const day = match.kind === "shifts_today" ? startOfLocalDay(at) : startOfLocalDay(at) - DAY;
+    const shifts = await session.salesByShift(day, AMMAN_OFFSET_MINUTES);
+    const forBranch = (rows: Array<{ location: string; orderCount: number; totalAmount: number }>) =>
+      match.branch ? rows.filter(row => row.location.split("/")[0]?.toUpperCase() === match.branch) : rows;
+    const picked = shifts.map(shift => {
+      const rows = forBranch(shift.byLocation);
+      return {
+        shift: shift.shift,
+        orderCount: rows.reduce((sum, row) => sum + row.orderCount, 0),
+        totalAmount: rows.reduce((sum, row) => sum + row.totalAmount, 0),
+      };
+    });
+    const total = picked.reduce((sum, row) => sum + row.totalAmount, 0);
+    const orders = picked.reduce((sum, row) => sum + row.orderCount, 0);
+    const where = match.branch ? ` — ${BRANCH_NAMES[match.branch]}` : "";
+    const heading = `🕐 *شفتات ${match.kind === "shifts_today" ? "اليوم" : "أمس"}*${where} (${dateLabel(day)})`;
+    if (!total && !orders) return `${heading}\n\nما في مبيعات مسجّلة لهاي الفترة.`;
+    const labels: Record<string, string> = {
+      morning: "☀️ صبح ٨–٤", evening: "🌆 مسا ٤–١٢", night: "🌙 ليل ١٢–٨",
+    };
+    const lines = [heading, ""];
+    for (const row of picked) {
+      const pct = total > 0 ? (row.totalAmount / total) * 100 : 0;
+      lines.push(`${labels[row.shift]} — ${money(row.totalAmount, currency)} (${pct.toFixed(1)}%) · ${row.orderCount} عملية`);
+    }
+    // Today's night shift has already happened and the evening one has not, so
+    // saying which hours are actually in the numbers keeps a small morning
+    // figure from reading as a bad night.
+    if (match.kind === "shifts_today") lines.push("", `_لحد الساعة ${new Date(at + AMMAN_OFFSET_MINUTES * 60_000).toISOString().slice(11, 16)}_`);
     lines.push("", "━━━━━━━━━━━━━", `💰 *الإجمالي*: ${money(total, currency)} من ${orders} عملية`);
     return lines.join("\n");
   }
