@@ -16,10 +16,12 @@ export async function POST(request: Request) {
       ...(settings.SECRETARY_ENABLED === "1" ? { secretary: (database: ReturnType<typeof chatDatabase>, event: import("@/lib/team-chat-gateway").TeamChatEnvelope, config: import("@/lib/team-chat-gateway").TeamChatConfig) => handleSecretaryEvent(database, event, config, {
         infer: input => inferSecretaryIntent(input, { apiKey: settings.OPENAI_API_KEY, model: settings.OPENAI_MODEL }),
         ...(settings.SECRETARY_WEB_ENABLED === "1" ? { search: (query: string) => searchSecretaryWeb(query, { apiKey: settings.OPENAI_API_KEY, model: settings.OPENAI_SEARCH_MODEL }) } : {}),
-        // Live questions about the pharmacy's own system. Off unless every
-        // Odoo setting is present AND explicitly switched on, so a half-filled
-        // config can never half-answer a question about real money or stock.
-        ...(settings.ODOO_QUESTIONS_ENABLED === "1" && settings.ODOO_URL && settings.ODOO_DB && settings.ODOO_USERNAME && settings.ODOO_API_KEY
+        // Live questions about the pharmacy's own system. Every one of the four
+        // connection settings must be present -- a half-filled config can never
+        // half-answer a question about real money or stock -- but once they are,
+        // answering is the point of having configured Odoo at all, so this needs
+        // no second switch. ODOO_QUESTIONS_ENABLED="0" turns it back off.
+        ...(settings.ODOO_QUESTIONS_ENABLED !== "0" && settings.ODOO_URL && settings.ODOO_DB && settings.ODOO_USERNAME && settings.ODOO_API_KEY
           ? { askOdoo: (match: import("@/lib/odoo-questions").OdooQuestionMatch, at: number) => answerOdooQuestion(match, {
               odoo: { url: settings.ODOO_URL!, db: settings.ODOO_DB!, username: settings.ODOO_USERNAME!, apiKey: settings.ODOO_API_KEY! },
               ...(settings.ODOO_CURRENCY_LABEL ? { currencyLabel: settings.ODOO_CURRENCY_LABEL } : {}),

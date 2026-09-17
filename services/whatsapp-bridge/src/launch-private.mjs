@@ -9,7 +9,12 @@ const SETTINGS_KEYS = new Set(['TEAM_CHAT_ENABLED', 'TEAM_CHAT_SHARED_KEY', 'TEA
   'WHATSAPP_LOGIN_SECRET', 'WHATSAPP_LOGIN_DATABASE', 'WHATSAPP_LOGIN_ORIGIN',
   'SECRETARY_ENABLED', 'SECRETARY_WEB_ENABLED', 'SECRETARY_VOICE_ENABLED', 'SECRETARY_FOLLOWUP_ENABLED', 'TITANIUM_PUBLIC_URL', 'DASHBOARD_READONLY',
   'ODOO_REPORT_ENABLED', 'ODOO_URL', 'ODOO_DB', 'ODOO_USERNAME', 'ODOO_API_KEY', 'ODOO_LOW_STOCK_THRESHOLD', 'ODOO_CURRENCY_LABEL',
-  'ODOO_REPORT_DAILY_HOUR', 'ODOO_REPORT_WEEKLY_DAY', 'ODOO_REPORT_WEEKLY_HOUR', 'ODOO_REPORT_PURCHASES_WEEKLY_HOUR']);
+  'ODOO_REPORT_DAILY_HOUR', 'ODOO_REPORT_WEEKLY_DAY', 'ODOO_REPORT_WEEKLY_HOUR', 'ODOO_REPORT_PURCHASES_WEEKLY_HOUR',
+  // Read by the dashboard half (lib/team-chat-settings.ts) rather than by this
+  // launcher, but they live in the SAME settings file, and an unknown key here
+  // makes readPrivateConfig throw -- which pauses the whole bridge behind the
+  // attention marker. Any key the dashboard allows must be accepted here too.
+  'ODOO_REPORT_DAILY', 'ODOO_REPORT_WEEKLY', 'ODOO_REPORT_PURCHASES', 'ODOO_QUESTIONS_ENABLED', 'ODOO_EXPIRY_WINDOW_DAYS']);
 const MAX_BYTES = 32_768;
 const SERVICE_DIRECTORY = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -126,25 +131,38 @@ export function bridgeChildEnvironment(settings, env, pair, serviceDirectory = S
   }
   // Read-only pharmacy sales/inventory reports. A misconfigured Odoo setting only
   // disables this one feature -- it must never take down the whole WhatsApp bridge.
-  const odooEnabled = childEnv.SECRETARY_ENABLED === '1' && settings.ODOO_REPORT_ENABLED === '1'
-    && typeof settings.ODOO_URL === 'string' && /^https:\/\/[\w.-]+(?::\d+)?$/.test(settings.ODOO_URL)
-    && typeof settings.ODOO_DB === 'string' && settings.ODOO_DB.trim() && !/[\r\n]/.test(settings.ODOO_DB)
-    && typeof settings.ODOO_USERNAME === 'string' && settings.ODOO_USERNAME.trim() && !/[\r\n]/.test(settings.ODOO_USERNAME)
-    && typeof settings.ODOO_API_KEY === 'string' && settings.ODOO_API_KEY.trim() && !/[\r\n]/.test(settings.ODOO_API_KEY);
+  // The settings file is the preferred home, but these same values are also
+  // exported by the supervisor script that starts this launcher, and that script
+  // is as owner-private as the settings file is. Reading them from either place
+  // means an existing install keeps working without its secrets being rewritten
+  // by hand -- the launcher's own environment is already trusted for the path of
+  // the settings file itself. Every value is validated below either way.
+  const odoo = key => {
+    const stored = settings[key];
+    if (typeof stored === 'string' && stored.trim()) return stored;
+    const inherited = env[key];
+    return typeof inherited === 'string' && inherited.trim() ? inherited : undefined;
+  };
+  const odooUrl = odoo('ODOO_URL'), odooDb = odoo('ODOO_DB');
+  const odooUser = odoo('ODOO_USERNAME'), odooKey = odoo('ODOO_API_KEY');
+  const odooEnabled = childEnv.SECRETARY_ENABLED === '1' && odoo('ODOO_REPORT_ENABLED') === '1'
+    && typeof odooUrl === 'string' && /^https:\/\/[\w.-]+(?::\d+)?$/.test(odooUrl)
+    && typeof odooDb === 'string' && !/[\r\n]/.test(odooDb)
+    && typeof odooUser === 'string' && !/[\r\n]/.test(odooUser)
+    && typeof odooKey === 'string' && !/[\r\n]/.test(odooKey);
   childEnv.ODOO_REPORT_ENABLED = odooEnabled ? '1' : '0';
   if (odooEnabled) {
-    childEnv.ODOO_URL = settings.ODOO_URL;
-    childEnv.ODOO_DB = settings.ODOO_DB;
-    childEnv.ODOO_USERNAME = settings.ODOO_USERNAME;
-    childEnv.ODOO_API_KEY = settings.ODOO_API_KEY;
-    if (/^\d{1,4}$/.test(settings.ODOO_LOW_STOCK_THRESHOLD || '')) childEnv.ODOO_LOW_STOCK_THRESHOLD = settings.ODOO_LOW_STOCK_THRESHOLD;
-    if (typeof settings.ODOO_CURRENCY_LABEL === 'string' && settings.ODOO_CURRENCY_LABEL.length <= 20 && !/[\r\n]/.test(settings.ODOO_CURRENCY_LABEL)) {
-      childEnv.ODOO_CURRENCY_LABEL = settings.ODOO_CURRENCY_LABEL;
-    }
-    if (/^([0-9]|1[0-9]|2[0-3])$/.test(settings.ODOO_REPORT_DAILY_HOUR || '')) childEnv.ODOO_REPORT_DAILY_HOUR = settings.ODOO_REPORT_DAILY_HOUR;
-    if (/^[0-6]$/.test(settings.ODOO_REPORT_WEEKLY_DAY || '')) childEnv.ODOO_REPORT_WEEKLY_DAY = settings.ODOO_REPORT_WEEKLY_DAY;
-    if (/^([0-9]|1[0-9]|2[0-3])$/.test(settings.ODOO_REPORT_WEEKLY_HOUR || '')) childEnv.ODOO_REPORT_WEEKLY_HOUR = settings.ODOO_REPORT_WEEKLY_HOUR;
-    if (/^([0-9]|1[0-9]|2[0-3])$/.test(settings.ODOO_REPORT_PURCHASES_WEEKLY_HOUR || '')) childEnv.ODOO_REPORT_PURCHASES_WEEKLY_HOUR = settings.ODOO_REPORT_PURCHASES_WEEKLY_HOUR;
+    childEnv.ODOO_URL = odooUrl;
+    childEnv.ODOO_DB = odooDb;
+    childEnv.ODOO_USERNAME = odooUser;
+    childEnv.ODOO_API_KEY = odooKey;
+    if (/^\d{1,4}$/.test(odoo('ODOO_LOW_STOCK_THRESHOLD') || '')) childEnv.ODOO_LOW_STOCK_THRESHOLD = odoo('ODOO_LOW_STOCK_THRESHOLD');
+    const currency = odoo('ODOO_CURRENCY_LABEL');
+    if (typeof currency === 'string' && currency.length <= 20 && !/[\r\n]/.test(currency)) childEnv.ODOO_CURRENCY_LABEL = currency;
+    if (/^([0-9]|1[0-9]|2[0-3])$/.test(odoo('ODOO_REPORT_DAILY_HOUR') || '')) childEnv.ODOO_REPORT_DAILY_HOUR = odoo('ODOO_REPORT_DAILY_HOUR');
+    if (/^[0-6]$/.test(odoo('ODOO_REPORT_WEEKLY_DAY') || '')) childEnv.ODOO_REPORT_WEEKLY_DAY = odoo('ODOO_REPORT_WEEKLY_DAY');
+    if (/^([0-9]|1[0-9]|2[0-3])$/.test(odoo('ODOO_REPORT_WEEKLY_HOUR') || '')) childEnv.ODOO_REPORT_WEEKLY_HOUR = odoo('ODOO_REPORT_WEEKLY_HOUR');
+    if (/^([0-9]|1[0-9]|2[0-3])$/.test(odoo('ODOO_REPORT_PURCHASES_WEEKLY_HOUR') || '')) childEnv.ODOO_REPORT_PURCHASES_WEEKLY_HOUR = odoo('ODOO_REPORT_PURCHASES_WEEKLY_HOUR');
     // Per-report routing (off | group | owner | both). This list is the only
     // way a setting reaches the bridge child at all -- the child environment is
     // built from scratch above and inherits nothing, which is exactly why the
@@ -153,9 +171,8 @@ export function bridgeChildEnvironment(settings, env, pair, serviceDirectory = S
     // not one of the four words is dropped rather than passed through, so a
     // typo leaves the report on its built-in default instead of disabling it.
     for (const key of ['ODOO_REPORT_DAILY', 'ODOO_REPORT_WEEKLY', 'ODOO_REPORT_PURCHASES']) {
-      if (/^(off|group|owner|both)$/.test(String(settings[key] || '').trim().toLowerCase())) {
-        childEnv[key] = String(settings[key]).trim().toLowerCase();
-      }
+      const routing = String(odoo(key) || '').trim().toLowerCase();
+      if (/^(off|group|owner|both)$/.test(routing)) childEnv[key] = routing;
     }
   }
   // Phone/user mapping only; no names or AI key. launchPrivate separately grants

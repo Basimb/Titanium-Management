@@ -290,3 +290,53 @@ test('unsafe marker and invalid settings fail closed without spawning or printin
   assert.ok(g.reports.every(message => !message.includes('secret-invalid')));
 });
 
+
+// 2026-09-17: ODOO_QUESTIONS_ENABLED and the three routing keys were added to
+// the dashboard's allowlist (lib/team-chat-settings.ts) but not to this
+// launcher's, and BOTH read the same settings file. Writing one of them into
+// that file would have made readPrivateConfig throw, which does not disable a
+// feature -- it pauses the entire WhatsApp bridge behind the attention marker
+// until someone re-pairs it by hand. The two lists have to stay in step.
+test('every setting the dashboard allows is also accepted here, so one new key cannot pause the bridge', () => {
+  const extras = { ODOO_REPORT_DAILY: 'group', ODOO_REPORT_WEEKLY: 'off',
+    ODOO_REPORT_PURCHASES: 'off', ODOO_QUESTIONS_ENABLED: '1', ODOO_EXPIRY_WINDOW_DAYS: '90' };
+  const f = fixture(extras);
+  const parsed = readPrivateConfig(configFile, f.fs);
+  for (const [key, value] of Object.entries(extras)) assert.equal(parsed[key], value);
+});
+
+const odooSettings = { SECRETARY_ENABLED: '1', ODOO_REPORT_ENABLED: '1', ODOO_URL: 'https://odoo.example.com',
+  ODOO_DB: 'pharmacy', ODOO_USERNAME: 'bot@example.com', ODOO_API_KEY: 'synthetic-odoo-key' };
+
+test('pharmacy settings reach the child from the settings file', () => {
+  const child = bridgeChildEnvironment({ ...settings, ...odooSettings, ODOO_REPORT_DAILY: 'group' }, env, false, serviceDirectory);
+  assert.equal(child.ODOO_REPORT_ENABLED, '1');
+  assert.equal(child.ODOO_URL, 'https://odoo.example.com');
+  assert.equal(child.ODOO_API_KEY, 'synthetic-odoo-key');
+  assert.equal(child.ODOO_REPORT_DAILY, 'group');
+});
+
+// The supervisor script that starts this launcher exports these same values.
+// That script is as owner-private as the settings file, and the launcher
+// already trusts its environment for the PATH of the settings file itself, so
+// falling back to it means a live install that predates the settings file
+// keeps working instead of needing its API key retyped by hand.
+test('pharmacy settings the file omits are taken from the launcher environment instead', () => {
+  const child = bridgeChildEnvironment({ ...settings, SECRETARY_ENABLED: '1' },
+    { ...env, ...odooSettings, ODOO_CURRENCY_LABEL: 'دينار', ODOO_REPORT_DAILY: 'GROUP ' }, false, serviceDirectory);
+  assert.equal(child.ODOO_REPORT_ENABLED, '1');
+  assert.equal(child.ODOO_DB, 'pharmacy');
+  assert.equal(child.ODOO_API_KEY, 'synthetic-odoo-key');
+  assert.equal(child.ODOO_CURRENCY_LABEL, 'دينار');
+  assert.equal(child.ODOO_REPORT_DAILY, 'group');
+});
+
+test('the settings file wins over the launcher environment, and an invalid value disables only the reports', () => {
+  const child = bridgeChildEnvironment({ ...settings, ...odooSettings, ODOO_DB: 'from-file' },
+    { ...env, ODOO_DB: 'from-environment' }, false, serviceDirectory);
+  assert.equal(child.ODOO_DB, 'from-file');
+  const broken = bridgeChildEnvironment({ ...settings, ...odooSettings, ODOO_URL: 'http://insecure.example.com' }, env, false, serviceDirectory);
+  assert.equal(broken.ODOO_REPORT_ENABLED, '0');
+  assert.equal(broken.ODOO_API_KEY, undefined);
+  assert.equal(broken.TEAM_CHAT_BRIDGE_ENABLED, '1', 'a bad pharmacy setting must never take the bridge down');
+});

@@ -56,11 +56,16 @@ export type OdooReportConfig = {
 
 type Kind = "odoo_daily" | "odoo_weekly" | "odoo_purchases_weekly";
 export type ReportRouting = { enabled: boolean; group: boolean; owner: boolean };
+// Basim, 2026-09-17: "مبيعات يومي بالفرع كل يوم ١٢ منتصف الليل الجروب بس
+// والغي الثاني لغاية ما اقولك" -- daily sales per branch, midnight, group only;
+// both weeklies off until he says otherwise. These are the defaults rather than
+// a setting he has to write down, because the only settings file the bridge
+// reads holds secrets and is edited by hand on the server. `routing` still
+// overrides any of them, so turning a report back on stays a config change.
 const DEFAULT_ROUTING: Record<Kind, ReportRouting> = {
-  odoo_daily: { enabled: true, group: true, owner: true },
-  odoo_weekly: { enabled: true, group: true, owner: true },
-  // He only ever asked for the purchases report in the group, never privately.
-  odoo_purchases_weekly: { enabled: true, group: true, owner: false },
+  odoo_daily: { enabled: true, group: true, owner: false },
+  odoo_weekly: { enabled: false, group: false, owner: false },
+  odoo_purchases_weekly: { enabled: false, group: false, owner: false },
 };
 type Planned = { id: string; kind: Kind; targetUser: string; to: string; text: string };
 

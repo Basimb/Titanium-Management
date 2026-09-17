@@ -60,7 +60,7 @@ test("outside the configured hour, nothing is due", async t => {
 // 2026-09-12, Basim: "بدي هذا التقرير كل يوم الساعه 12:01 صباحا يروح للجروب
 // بدون موافقتي" -- the default daily slot is hour 0 (see DAILY_AT above), and
 // this job already sends straight to its targets with no confirmation step.
-test("at the daily slot, sends the branch report once to the group and once to the owner, then goes idle for the day", async t => {
+test("at the daily slot, sends the branch report to the group and then goes idle for the day", async t => {
   const db = fixture(t);
   const sent = [];
   const byLocation = [{ location: "NAOOR/Stock", orderCount: 177, totalAmount: 1863.71 }, { location: "SAFOT/Stock", orderCount: 58, totalAmount: 467.9 }];
@@ -70,11 +70,10 @@ test("at the daily slot, sends the branch report once to the group and once to t
   } });
   const first = await jobs.deliverNext(async message => { sent.push(message.to); return {}; });
   assert.equal(first.status, "sent");
-  const second = await jobs.deliverNext(async message => { sent.push(message.to); return {}; });
-  assert.equal(second.status, "sent");
-  assert.deepEqual(sent.sort(), ["1@g.us", "962790000000@s.whatsapp.net"]);
-  const third = await jobs.deliverNext(async () => assert.fail("must not send a third report the same day"));
-  assert.deepEqual(third, { status: "idle" });
+  assert.deepEqual(sent, ["1@g.us"]);
+  // "الجروب بس" -- the owner DM that used to follow is gone unless he asks for it.
+  const second = await jobs.deliverNext(async () => assert.fail("must not send a second report the same day"));
+  assert.deepEqual(second, { status: "idle" });
 });
 
 // 2026-09-12, Basim: "طلعلي بيع امبارح بالفرع واعملي فورم او صيغه حلوه للفرع
@@ -126,6 +125,7 @@ test("at the weekly slot, sends the fuller report with the low-stock list and ac
   let text;
   const jobs = createOdooReportJobs({ db, now: () => WEEKLY_AT, config: {
     enabled: true, odoo, ownerNumber: "", groupId: "1@g.us", timezoneOffsetMinutes: 0,
+    routing: { odoo_weekly: { enabled: true, group: true, owner: true } },
     fetcher: odooFetcher({ orderCount: 80, totalAmount: 2400, lowStock: [{ name: "بنادول", qty: 2 }], activeProducts: 314 }),
   } });
   const result = await jobs.deliverNext(async message => { text = message.text; return {}; });
@@ -168,6 +168,7 @@ test("at the purchases slot on Saturday, sends the month-to-date purchases repor
   const sent = [];
   const jobs = createOdooReportJobs({ db, now: () => PURCHASES_AT, config: {
     enabled: true, odoo, ownerNumber: "962790000000", groupId: "1@g.us", timezoneOffsetMinutes: 0,
+    routing: { odoo_purchases_weekly: { enabled: true, group: true, owner: false } },
     fetcher: odooFetcher({ purchaseCount: 5, purchaseAmount: 900, returnCount: 2, returnAmount: 150 }),
   } });
   const first = await jobs.deliverNext(async message => { sent.push(message.to); return {}; });
@@ -185,6 +186,7 @@ test("the purchases report text covers from the start of the local month to now,
   const AT_UTC3 = Date.UTC(1970, 0, 3, 16, 0, 0);
   const jobs = createOdooReportJobs({ db, now: () => AT_UTC3, config: {
     enabled: true, odoo, ownerNumber: "", groupId: "1@g.us", timezoneOffsetMinutes: 180,
+    routing: { odoo_purchases_weekly: { enabled: true, group: true, owner: false } },
     fetcher: odooFetcher({ purchaseCount: 5, purchaseAmount: 900, returnCount: 2, returnAmount: 150 }),
   } });
   await jobs.deliverNext(async message => { text = message.text; return {}; });
@@ -207,7 +209,9 @@ test("a month with no purchases or returns still nets to zero instead of a blank
   const db = fixture(t);
   let text;
   const jobs = createOdooReportJobs({ db, now: () => PURCHASES_AT, config: {
-    enabled: true, odoo, ownerNumber: "", groupId: "1@g.us", timezoneOffsetMinutes: 0, fetcher: odooFetcher(),
+    enabled: true, odoo, ownerNumber: "", groupId: "1@g.us", timezoneOffsetMinutes: 0,
+    routing: { odoo_purchases_weekly: { enabled: true, group: true, owner: false } },
+    fetcher: odooFetcher(),
   } });
   await jobs.deliverNext(async message => { text = message.text; return {}; });
   assert.match(text, /🛒 المشتريات: 0\.00 من 0 فاتورة مورد/);
@@ -246,7 +250,10 @@ test("a report switched off produces nothing and never calls the pharmacy system
   assert.equal(calls, 0, "a disabled report must not even authenticate against Odoo");
 });
 
-test("routing left unset keeps the original targets", async t => {
+// Left unset, the defaults are the arrangement he asked for on 2026-09-17:
+// the daily branch report in the group and nowhere else, both weekly reports
+// silent. They are defaults precisely so that the live install needs no edit.
+test("routing left unset sends the daily report to the group alone and keeps both weeklies silent", async t => {
   const db = fixture(t);
   const sent = [];
   const jobs = createOdooReportJobs({ db, now: () => DAILY_AT, config: {
@@ -256,7 +263,15 @@ test("routing left unset keeps the original targets", async t => {
   } });
   await jobs.deliverNext(async message => { sent.push(message.to); });
   await jobs.deliverNext(async message => { sent.push(message.to); });
-  assert.deepEqual(sent.sort(), ["123@g.us", "966500000000@s.whatsapp.net"].sort());
+  assert.deepEqual(sent, ["123@g.us"]);
+
+  for (const at of [WEEKLY_AT, PURCHASES_AT]) {
+    const quiet = createOdooReportJobs({ db: fixture(t), now: () => at, config: {
+      enabled: true, odoo, ownerNumber: "966500000000", groupId: "123@g.us", timezoneOffsetMinutes: 0,
+      fetcher: async () => assert.fail("a report that is off must never reach the pharmacy system"),
+    } });
+    assert.deepEqual(await quiet.deliverNext(async () => assert.fail("nothing may go out")), { status: "idle" });
+  }
 });
 
 // Basim (2026-09-16): "هذه المبيعات مش يومي ياخي". The daily window used to be
