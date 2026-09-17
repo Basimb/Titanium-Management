@@ -31,7 +31,7 @@ test('a recognised question is answered from Odoo, and the model is never asked'
   const f = fixture(t, { askOdoo: async (match) => { seen.push(match); return '📊 مبيعات اليوم: 1,000.00'; } });
   const r = await f.run({ text: 'شو مبيعات اليوم؟' });
   assert.equal(f.modelCalls(), 0);
-  assert.deepEqual(seen, [{ kind: 'sales_today', branch: null }]);
+  assert.deepEqual(seen, [{ kind: 'sales_today', branch: null, shift: null }]);
   assert.equal(r.status, 'summary');
   assert.match(r.reply, /1,000\.00/);
 });

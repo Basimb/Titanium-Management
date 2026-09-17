@@ -73,6 +73,20 @@ async function cachedUid(config: OdooConfig, fetcher: Fetcher, now: number): Pro
 /** Test seam: forget every cached login, so a test starts from a clean slate. */
 export function forgetOdooSessions(): void { uidCache.clear(); }
 
+// Odoo returns the row count under `__count` when read_group is called with
+// lazy:false, and under `<groupby>_count` when it is lazy -- which is the
+// default. Reading only `__count` is how a grouped report ends up saying zero
+// operations next to a correct amount. Both are accepted here so a caller that
+// forgets the kwarg is merely slower, never wrong.
+function groupCount(row: Record<string, unknown>, groupBy?: string): number {
+  const candidates = [row.__count, groupBy ? row[`${groupBy}_count`] : undefined, row.__domain_count];
+  for (const value of candidates) {
+    const count = Number(value);
+    if (Number.isFinite(count)) return count;
+  }
+  return 0;
+}
+
 function formatAmount(value: number): string {
   const fixed = (Number.isFinite(value) ? value : 0).toFixed(2);
   const [whole, fraction] = fixed.split(".");
@@ -129,8 +143,8 @@ export type OdooSession = {
   salesSummary(sinceIso: string, untilIso: string): Promise<SalesSummary>;
   invoiceSales(sinceIso: string, untilIso: string): Promise<InvoiceSales>;
   salesByLocation(sinceIso: string, untilIso: string): Promise<LocationSales[]>;
-  /** One local day, split into the three shifts. dayStart is that day's local midnight. */
-  salesByShift(dayStart: number, offsetMinutes?: number): Promise<ShiftSales[]>;
+  /** Any window, split into the three shifts by local clock time. */
+  salesByShift(sinceMs: number, untilMs: number, offsetMinutes?: number): Promise<ShiftSales[]>;
   purchaseSummary(sinceIso: string, untilIso: string): Promise<PurchaseSummary>;
   /** Items that run out soonest, by days of cover. See ShortageItem. */
   shortages(options?: { windowDays?: number; maxDaysLeft?: number; limit?: number; at?: number }): Promise<ShortageItem[]>;
@@ -159,11 +173,11 @@ export async function openOdooSession(config: OdooConfig, fetcher: Fetcher = fet
   };
   const locationSales = async (sinceIso: string, untilIso: string): Promise<LocationSales[]> => {
     const domain = [["date_order", ">=", sinceIso], ["date_order", "<", untilIso], ["state", "in", ["paid", "done", "invoiced"]]];
-    const groups = (await execute("pos.order", "read_group", [domain, ["amount_total"], ["location_id"]])) as Array<Record<string, unknown>> | undefined;
+    const groups = (await execute("pos.order", "read_group", [domain, ["amount_total"], ["location_id"]], { lazy: false })) as Array<Record<string, unknown>> | undefined;
     return (Array.isArray(groups) ? groups : []).map(row => {
       const locationId = row.location_id;
       const location = Array.isArray(locationId) && typeof locationId[1] === "string" ? locationId[1] : "?";
-      return { location, orderCount: Number(row.__count ?? 0), totalAmount: Number(row.amount_total ?? 0) };
+      return { location, orderCount: groupCount(row, "location_id"), totalAmount: Number(row.amount_total ?? 0) };
     });
   };
 
@@ -183,7 +197,7 @@ export async function openOdooSession(config: OdooConfig, fetcher: Fetcher = fet
       const read = async (extra: unknown[]) => {
         const groups = (await execute("pos.order", "read_group", [[...window, ...extra], ["amount_total"], []], { lazy: true })) as Array<Record<string, unknown>> | undefined;
         const row = Array.isArray(groups) ? groups[0] : undefined;
-        return { count: Number(row?.__count ?? 0), amount: Number(row?.amount_total ?? 0) };
+        return { count: row ? groupCount(row) : 0, amount: Number(row?.amount_total ?? 0) };
       };
       const [sales, refunds] = await Promise.all([read([["amount_total", ">=", 0]]), read([["amount_total", "<", 0]])]);
       return {
@@ -201,29 +215,52 @@ export async function openOdooSession(config: OdooConfig, fetcher: Fetcher = fet
         ["invoice_date", ">=", since], ["invoice_date", "<", until]];
       const groups = (await execute("account.move", "read_group", [domain, ["amount_total"], []], { lazy: true })) as Array<Record<string, unknown>> | undefined;
       const row = Array.isArray(groups) ? groups[0] : undefined;
-      return { invoiceCount: Number(row?.__count ?? 0), totalAmount: Number(row?.amount_total ?? 0) };
+      return { invoiceCount: row ? groupCount(row) : 0, totalAmount: Number(row?.amount_total ?? 0) };
     },
     salesByLocation: locationSales,
-    async salesByShift(dayStart, offsetMinutes = 180) {
-      const hour = 3_600_000;
-      // Within one day each shift IS a contiguous stretch of time, so this is
-      // three ordinary window reads rather than anything clever -- and reading
-      // them as windows is what keeps the UTC conversion in one place.
-      const windows: Array<{ shift: ShiftName; from: number; to: number }> = [
-        { shift: "morning", from: dayStart + 8 * hour, to: dayStart + 16 * hour },
-        { shift: "evening", from: dayStart + 16 * hour, to: dayStart + 24 * hour },
-        { shift: "night", from: dayStart, to: dayStart + 8 * hour },
-      ];
-      void offsetMinutes; // dayStart already carries the offset; kept for callers that pass it.
-      return Promise.all(windows.map(async (window): Promise<ShiftSales> => {
-        const byLocation = await locationSales(new Date(window.from).toISOString(), new Date(window.to).toISOString());
+    async salesByShift(sinceMs, untilMs, offsetMinutes = 180) {
+      // A shift is contiguous within one day, but "the morning shift this
+      // month" is thirty separate stretches. Rather than thirty reads, the
+      // orders themselves are read once and bucketed by their local hour --
+      // which is also the only place the UTC-to-Amman conversion happens.
+      const rows: Array<Record<string, unknown>> = [];
+      for (let offset = 0; offset < 40_000; offset += 2000) {
+        const page = (await execute("pos.order", "search_read",
+          [[["date_order", ">=", new Date(sinceMs).toISOString()], ["date_order", "<", new Date(untilMs).toISOString()],
+            ["state", "in", ["paid", "done", "invoiced"]]], ["date_order", "amount_total", "location_id"]],
+          { limit: 2000, offset, order: "id asc" })) as Array<Record<string, unknown>> | undefined;
+        if (!Array.isArray(page) || !page.length) break;
+        rows.push(...page);
+        if (page.length < 2000) break;
+      }
+
+      const buckets = new Map<ShiftName, Map<string, LocationSales>>([
+        ["morning", new Map()], ["evening", new Map()], ["night", new Map()],
+      ]);
+      for (const row of rows) {
+        // Odoo hands back "YYYY-MM-DD HH:MM:SS" in UTC, with no zone marker.
+        const stamp = typeof row.date_order === "string" ? Date.parse(row.date_order.replace(" ", "T") + "Z") : NaN;
+        if (!Number.isFinite(stamp)) continue;
+        const localHour = new Date(stamp + offsetMinutes * 60_000).getUTCHours();
+        const shift: ShiftName = localHour >= 8 && localHour < 16 ? "morning" : localHour >= 16 ? "evening" : "night";
+        const locationId = row.location_id;
+        const location = Array.isArray(locationId) && typeof locationId[1] === "string" ? locationId[1] : "?";
+        const bucket = buckets.get(shift)!;
+        const entry = bucket.get(location) ?? { location, orderCount: 0, totalAmount: 0 };
+        entry.orderCount += 1;
+        entry.totalAmount += Number(row.amount_total) || 0;
+        bucket.set(location, entry);
+      }
+
+      return (["morning", "evening", "night"] as ShiftName[]).map(shift => {
+        const byLocation = [...buckets.get(shift)!.values()];
         return {
-          shift: window.shift,
+          shift,
           orderCount: byLocation.reduce((sum, row) => sum + row.orderCount, 0),
           totalAmount: byLocation.reduce((sum, row) => sum + row.totalAmount, 0),
           byLocation,
         };
-      }));
+      });
     },
     async purchaseSummary(sinceIso, untilIso) {
       // account.move's invoice_date is an Odoo Date field, not a datetime --
@@ -237,8 +274,8 @@ export async function openOdooSession(config: OdooConfig, fetcher: Fetcher = fet
       const purchaseRow = Array.isArray(purchases) ? purchases[0] : undefined;
       const returnRow = Array.isArray(returns) ? returns[0] : undefined;
       return {
-        purchaseCount: Number(purchaseRow?.__count ?? 0), purchaseAmount: Number(purchaseRow?.amount_total ?? 0),
-        returnCount: Number(returnRow?.__count ?? 0), returnAmount: Number(returnRow?.amount_total ?? 0),
+        purchaseCount: purchaseRow ? groupCount(purchaseRow) : 0, purchaseAmount: Number(purchaseRow?.amount_total ?? 0),
+        returnCount: returnRow ? groupCount(returnRow) : 0, returnAmount: Number(returnRow?.amount_total ?? 0),
       };
     },
     async expirySummary(withinDays, at = Date.now()) {
@@ -258,7 +295,7 @@ export async function openOdooSession(config: OdooConfig, fetcher: Fetcher = fet
       const read = async (extra: unknown[]) => {
         const groups = (await execute("stock.quant", "read_group", [[...internal, ...extra], ["quantity"], []], { lazy: true })) as Array<Record<string, unknown>> | undefined;
         const row = Array.isArray(groups) ? groups[0] : undefined;
-        return { lines: Number(row?.__count ?? 0), qty: Number(row?.quantity ?? 0) };
+        return { lines: row ? groupCount(row) : 0, qty: Number(row?.quantity ?? 0) };
       };
       const [expired, soon] = await Promise.all([
         read([["lot_id.expiration_date", "<", today]]),
@@ -275,7 +312,7 @@ export async function openOdooSession(config: OdooConfig, fetcher: Fetcher = fet
       const read = async (moveType: string) => {
         const groups = (await execute("account.move", "read_group", [open(moveType), ["amount_residual"], []], { lazy: true })) as Array<Record<string, unknown>> | undefined;
         const row = Array.isArray(groups) ? groups[0] : undefined;
-        return { count: Number(row?.__count ?? 0), total: Number(row?.amount_residual ?? 0) };
+        return { count: row ? groupCount(row) : 0, total: Number(row?.amount_residual ?? 0) };
       };
       const [bills, credits] = await Promise.all([read("in_invoice"), read("in_refund")]);
       return { billCount: bills.count, billTotal: bills.total, creditCount: credits.count, creditTotal: Math.abs(credits.total) };

@@ -15,9 +15,11 @@ import { openOdooSession, formatAmount, type OdooConfig } from "./odoo-client.ts
 
 export type OdooQuestionKind =
   | "sales_today" | "sales_yesterday" | "sales_week" | "sales_month"
-  | "shifts_today" | "shifts_yesterday"
+  | "shifts_today" | "shifts_yesterday" | "shifts_week" | "shifts_month"
   | "low_stock" | "expiring" | "unpaid_bills" | "purchases_month" | "help";
-export type OdooQuestionMatch = { kind: OdooQuestionKind; branch: string | null };
+// `shift` is set when the question names ONE of them -- "الشفت الصباحي", or the
+// hours written out as "من ٨ الصباح لـ٤ العصر". Null means all three.
+export type OdooQuestionMatch = { kind: OdooQuestionKind; branch: string | null; shift?: "morning" | "evening" | "night" | null };
 
 const DAY = 24 * 60 * 60_000;
 const AMMAN_OFFSET_MINUTES = 180;
@@ -64,6 +66,37 @@ function matchBranch(text: string): string | null {
 // "مبيعات امبارح" never falls into today's bucket.
 type Pattern = { kind: OdooQuestionKind; any?: string[]; words?: string[]; period?: string[] };
 
+const SHIFT_WORDS = ["شفت", "الشفت", "شفتات", "الشفتات", "ورديه", "وردية", "ورديات", "الورديات", "shift", "shifts"];
+
+// Basim asked for a shift by the clock, not by its name: "من ال 8 الصباح ل 4
+// العصر". So the hours themselves have to be readable, in both digit sets, and
+// so do the names people use for the same three windows.
+const SHIFT_NAMES: Array<{ shift: "morning" | "evening" | "night"; any: string[] }> = [
+  { shift: "morning", any: ["الصباحي", "صباحي", "الصباحيه", "شفت الصباح", "وردية الصباح", "morning"] },
+  { shift: "evening", any: ["المسائي", "مسائي", "المسائيه", "شفت المسا", "وردية المسا", "شفت العصر", "evening"] },
+  { shift: "night", any: ["الليلي", "ليلي", "الليليه", "شفت الليل", "وردية الليل", "night"] },
+];
+const SHIFT_HOURS: Array<{ shift: "morning" | "evening" | "night"; from: number; to: number }> = [
+  { shift: "morning", from: 8, to: 4 }, { shift: "evening", from: 4, to: 12 }, { shift: "night", from: 12, to: 8 },
+];
+const westernDigits = (value: string) => value.replace(/[٠-٩]/g, digit => String("٠١٢٣٤٥٦٧٨٩".indexOf(digit)));
+
+/** Which single shift this wording names, or null for all three. */
+export function matchShiftName(text: string): "morning" | "evening" | "night" | null {
+  const value = westernDigits(normalizeArabic(text));
+  for (const named of SHIFT_NAMES) {
+    if (named.any.some(word => value.includes(normalizeArabic(word)))) return named.shift;
+  }
+  // "من 8 ... ل 4 ..." -- the first two standalone numbers, read as the hours.
+  const hours = (value.match(/(?<![\d])([01]?\d|2[0-4])(?![\d])/g) ?? []).map(Number);
+  if (hours.length >= 2) {
+    for (const window of SHIFT_HOURS) {
+      if (hours[0] === window.from && hours[1] === window.to) return window.shift;
+    }
+  }
+  return null;
+}
+
 const SALES_ANY = ["مبيعات", "المبيعات", "مبيعاتنا", "مبيعاتي", "بعنا", "بيعنا", "ايرادات", "الايرادات",
   "ايراد", "الايراد", "مدخول", "المدخول", "تحصيل", "التحصيل", "sales", "turnover"];
 const SALES_WORDS = ["بيع", "البيع", "دخل", "الدخل", "كاش", "الكاش"];
@@ -95,13 +128,14 @@ const PATTERNS: Pattern[] = [
   // and 00:00-08:00. Asked ahead of the plain sales questions, because "مبيعات
   // الشفتات امبارح" is a shift question that happens to contain the word for
   // sales, and the more specific reading has to win.
-  { kind: "shifts_yesterday", any: ["شفت", "الشفت", "شفتات", "الشفتات", "ورديه", "وردية", "ورديات", "الورديات", "shift", "shifts"],
-    period: ["امبارح", "مبارح", "البارحه", "امس", "الامس"] },
-  { kind: "shifts_today", any: ["شفت", "الشفت", "شفتات", "الشفتات", "ورديه", "وردية", "ورديات", "الورديات", "shift", "shifts"] },
+  { kind: "shifts_yesterday", any: SHIFT_WORDS, period: ["امبارح", "مبارح", "البارحه", "امس", "الامس", "لامبارح"] },
+  { kind: "shifts_week", any: SHIFT_WORDS, period: ["الاسبوع", "اسبوع", "هالاسبوع", "للاسبوع", "لاسبوع", "بالاسبوع", "اسبوعي"] },
+  { kind: "shifts_month", any: SHIFT_WORDS, period: ["الشهر", "هالشهر", "للشهر", "لشهر", "بالشهر", "شهري", "الشهري"] },
+  { kind: "shifts_today", any: SHIFT_WORDS },
 
-  { kind: "sales_yesterday", any: SALES_ANY, words: SALES_WORDS, period: ["امبارح", "مبارح", "البارحه", "امس", "الامس"] },
-  { kind: "sales_week", any: SALES_ANY, words: SALES_WORDS, period: ["الاسبوع", "اسبوع", "هالاسبوع", "اسبوعي"] },
-  { kind: "sales_month", any: SALES_ANY, words: SALES_WORDS, period: ["الشهر", "هالشهر", "شهري", "الشهري"] },
+  { kind: "sales_yesterday", any: SALES_ANY, words: SALES_WORDS, period: ["امبارح", "مبارح", "البارحه", "امس", "الامس", "لامبارح"] },
+  { kind: "sales_week", any: SALES_ANY, words: SALES_WORDS, period: ["الاسبوع", "اسبوع", "هالاسبوع", "للاسبوع", "لاسبوع", "بالاسبوع", "اسبوعي"] },
+  { kind: "sales_month", any: SALES_ANY, words: SALES_WORDS, period: ["الشهر", "هالشهر", "للشهر", "لشهر", "بالشهر", "شهري", "الشهري"] },
   { kind: "sales_today", any: SALES_ANY, words: SALES_WORDS },
 ];
 
@@ -135,7 +169,13 @@ export function matchOdooQuestion(text: string): OdooQuestionMatch | null {
     const hit = (pattern.any ?? []).some(word => value.includes(normalizeArabic(word)))
       || (pattern.words ?? []).some(word => tokens.includes(normalizeArabic(word)));
     if (!hit) continue;
-    return { kind: pattern.kind, branch: matchBranch(value) };
+    const shift = matchShiftName(text);
+    // A sales question that names a shift IS a shift question, even when the
+    // word for shift never appears: "البيع من ال 8 الصباح ل 4 العصر".
+    const kind = shift && pattern.kind.startsWith("sales_")
+      ? (pattern.kind.replace("sales_", "shifts_") as OdooQuestionKind)
+      : pattern.kind;
+    return { kind, branch: matchBranch(value), shift };
   }
   return null;
 }
@@ -231,37 +271,46 @@ async function freshAnswer(match: OdooQuestionMatch, config: OdooAnswerConfig, a
     lines.push("", "━━━━━━━━━━━━━", `💰 *الإجمالي*: ${money(total, currency)} من ${orders} عملية`);
     return lines.join("\n");
   }
-  if (match.kind === "shifts_today" || match.kind === "shifts_yesterday") {
-    const day = match.kind === "shifts_today" ? startOfLocalDay(at) : startOfLocalDay(at) - DAY;
-    const shifts = await session.salesByShift(day, AMMAN_OFFSET_MINUTES);
+  if (match.kind.startsWith("shifts_")) {
+    const midnight = startOfLocalDay(at);
+    const [from, to, when] = match.kind === "shifts_today" ? [midnight, at, "اليوم"]
+      : match.kind === "shifts_yesterday" ? [midnight - DAY, midnight, "أمس"]
+      : match.kind === "shifts_week" ? [midnight - 6 * DAY, at, "آخر ٧ أيام"]
+      : [startOfLocalMonth(at), at, "الشهر"];
+    const shifts = await session.salesByShift(from, to, AMMAN_OFFSET_MINUTES);
     const forBranch = (rows: Array<{ location: string; orderCount: number; totalAmount: number }>) =>
       match.branch ? rows.filter(row => row.location.split("/")[0]?.toUpperCase() === match.branch) : rows;
-    const picked = shifts.map(shift => {
-      const rows = forBranch(shift.byLocation);
-      return {
-        shift: shift.shift,
-        orderCount: rows.reduce((sum, row) => sum + row.orderCount, 0),
-        totalAmount: rows.reduce((sum, row) => sum + row.totalAmount, 0),
-      };
-    });
+    const picked = shifts
+      .filter(shift => !match.shift || shift.shift === match.shift)
+      .map(shift => {
+        const rows = forBranch(shift.byLocation);
+        return {
+          shift: shift.shift,
+          orderCount: rows.reduce((sum, row) => sum + row.orderCount, 0),
+          totalAmount: rows.reduce((sum, row) => sum + row.totalAmount, 0),
+        };
+      });
     const total = picked.reduce((sum, row) => sum + row.totalAmount, 0);
     const orders = picked.reduce((sum, row) => sum + row.orderCount, 0);
+    const labels: Record<string, string> = { morning: "☀️ صبح ٨–٤", evening: "🌆 مسا ٤–١٢", night: "🌙 ليل ١٢–٨" };
     const where = match.branch ? ` — ${BRANCH_NAMES[match.branch]}` : "";
-    const heading = `🕐 *شفتات ${match.kind === "shifts_today" ? "اليوم" : "أمس"}*${where} (${dateLabel(day)})`;
+    const named = match.shift ? ` (${labels[match.shift].replace(/^\S+ /, "")})` : "";
+    const span = match.kind === "shifts_yesterday" ? dateLabel(from)
+      : `من ${dateLabel(from)} إلى ${dateLabel(to)}`;
+    const heading = `🕐 *شفتات ${when}*${named}${where} — ${span}`;
     if (!total && !orders) return `${heading}\n\nما في مبيعات مسجّلة لهاي الفترة.`;
-    const labels: Record<string, string> = {
-      morning: "☀️ صبح ٨–٤", evening: "🌆 مسا ٤–١٢", night: "🌙 ليل ١٢–٨",
-    };
     const lines = [heading, ""];
     for (const row of picked) {
       const pct = total > 0 ? (row.totalAmount / total) * 100 : 0;
-      lines.push(`${labels[row.shift]} — ${money(row.totalAmount, currency)} (${pct.toFixed(1)}%) · ${row.orderCount} عملية`);
+      const share = match.shift ? "" : ` (${pct.toFixed(1)}%)`;
+      lines.push(`${labels[row.shift]} — ${money(row.totalAmount, currency)}${share} · ${row.orderCount} عملية`);
     }
-    // Today's night shift has already happened and the evening one has not, so
-    // saying which hours are actually in the numbers keeps a small morning
-    // figure from reading as a bad night.
-    if (match.kind === "shifts_today") lines.push("", `_لحد الساعة ${new Date(at + AMMAN_OFFSET_MINUTES * 60_000).toISOString().slice(11, 16)}_`);
-    lines.push("", "━━━━━━━━━━━━━", `💰 *الإجمالي*: ${money(total, currency)} من ${orders} عملية`);
+    // Today's evening shift has not happened yet, so a small figure would read
+    // as a bad night unless the cut-off is stated.
+    if (match.kind === "shifts_today") {
+      lines.push("", `_لحد الساعة ${new Date(at + AMMAN_OFFSET_MINUTES * 60_000).toISOString().slice(11, 16)}_`);
+    }
+    if (!match.shift) lines.push("", "━━━━━━━━━━━━━", `💰 *الإجمالي*: ${money(total, currency)} من ${orders} عملية`);
     return lines.join("\n");
   }
   if (match.kind === "expiring") {

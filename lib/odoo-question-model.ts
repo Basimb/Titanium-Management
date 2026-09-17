@@ -16,7 +16,8 @@
 import type { OdooQuestionKind, OdooQuestionMatch } from "./odoo-questions.ts";
 
 const KINDS: readonly OdooQuestionKind[] = ["sales_today", "sales_yesterday", "sales_week", "sales_month",
-  "shifts_today", "shifts_yesterday", "low_stock", "expiring", "unpaid_bills", "purchases_month", "help"];
+  "shifts_today", "shifts_yesterday", "shifts_week", "shifts_month",
+  "low_stock", "expiring", "unpaid_bills", "purchases_month", "help"];
 const BRANCHES = ["NAOOR", "SAFOT", "DABOQ", "JUMRK"] as const;
 
 const PROMPT = [
@@ -30,6 +31,8 @@ const PROMPT = [
   "  sales_month      - sales this month / since the start of the month",
   "  shifts_today     - today's sales split by work shift (morning 08-16, evening 16-24, night 00-08)",
   "  shifts_yesterday - the same for yesterday",
+  "  shifts_week      - the same over the last week",
+  "  shifts_month     - the same since the start of the month",
   "  low_stock        - which items are running out / nearly out of stock",
   "  expiring         - stock that has expired or expires soon",
   "  unpaid_bills     - unpaid or outstanding VENDOR bills, what the company owes suppliers",
@@ -40,7 +43,9 @@ const PROMPT = [
   "",
   "Branches (return the code only if the message names one): NAOOR الناعور, SAFOT صافوط, DABOQ دابوق, JUMRK الجمرك.",
   "",
-  'Reply with JSON only: {"kind":"<one of the kinds or none>","branch":"<code or null>"}',
+  'Reply with JSON only: {"kind":"<one of the kinds or none>","branch":"<code or null>","shift":"<morning|evening|night or null>"}',
+  "On a shifts_* kind, set shift when the message names ONE shift -- by name, or by its hours",
+  "(08-16 morning, 16-24 evening, 00-08 night). Otherwise leave it null.",
   "When unsure, answer none. Never explain. Never invent a kind.",
 ].join("\n");
 
@@ -49,10 +54,15 @@ function parse(content: unknown): OdooQuestionMatch | null {
   let value: unknown;
   try { value = JSON.parse(content); } catch { return null; }
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
-  const { kind, branch } = value as { kind?: unknown; branch?: unknown };
+  const { kind, branch, shift } = value as { kind?: unknown; branch?: unknown; shift?: unknown };
   if (typeof kind !== "string" || !(KINDS as readonly string[]).includes(kind)) return null;
   const code = typeof branch === "string" ? branch.toUpperCase() : null;
-  return { kind: kind as OdooQuestionKind, branch: code && (BRANCHES as readonly string[]).includes(code) ? code : null };
+  const named = typeof shift === "string" ? shift.toLowerCase() : null;
+  return {
+    kind: kind as OdooQuestionKind,
+    branch: code && (BRANCHES as readonly string[]).includes(code) ? code : null,
+    shift: named === "morning" || named === "evening" || named === "night" ? named : null,
+  };
 }
 
 /** The question this message is asking, as the model reads it, or null. Never throws. */

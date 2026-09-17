@@ -320,54 +320,60 @@ test("the expiry cutoff is the pharmacy's today, taken from the moment asked", a
 });
 
 // Basim (2026-09-17): the branches run three shifts -- 08:00-16:00, 16:00-24:00
-// and 00:00-08:00, Amman time. Odoo stores date_order in UTC, so every boundary
-// is the local hour minus three, and a report that forgets that is wrong by
-// three hours while looking entirely right.
-test("the three shifts are asked for in UTC, at the right boundaries", async () => {
-  const windows = [];
-  const { fetcher } = fetcherFor({ "pos.order": (args) => {
-    const from = args[0].find(leaf => leaf[0] === "date_order" && leaf[1] === ">=")[2];
-    const to = args[0].find(leaf => leaf[0] === "date_order" && leaf[1] === "<")[2];
-    windows.push(`${from.slice(11, 16)}-${to.slice(11, 16)}`);
-    return [{ location_id: [1, "NAOOR/Stock"], amount_total: 100, __count: 4 }];
-  } });
-  // 2026-09-17 12:00 Amman -> yesterday is the 16th.
-  await answerOdooQuestion(matchOdooQuestion("شفتات امبارح"), { odoo, fetcher }, AT);
-  assert.deepEqual(windows.sort(), ["05:00-13:00", "13:00-21:00", "21:00-05:00"].sort(),
-    "08:00 in the pharmacy is 05:00 in the database");
+// and 00:00-08:00, Amman time. Odoo stores date_order in UTC with no zone
+// marker, so the bucketing has to add the three hours back, and a report that
+// forgets is wrong by three hours while looking entirely right.
+const ordersAt = (...localHours) => localHours.map((hour, index) => ({
+  id: index + 1,
+  // 2026-09-16 at this LOCAL hour, expressed the way Odoo returns it: UTC.
+  date_order: new Date(Date.UTC(2026, 8, 16, hour - 3, 30)).toISOString().slice(0, 19).replace("T", " "),
+  amount_total: 100,
+  location_id: [1, "NAOOR/Stock"],
+}));
+
+test("orders land in the shift their LOCAL clock time falls in", async () => {
+  const { fetcher } = fetcherFor({ "pos.order": () => ordersAt(8, 15, 16, 23, 0, 7) });
+  const reply = await answerOdooQuestion(matchOdooQuestion("شفتات امبارح"), { odoo, fetcher, currencyLabel: "دينار" }, AT);
+  assert.match(reply, /☀️ صبح ٨–٤ — 200\.00 دينار \(33\.3%\) · 2 عملية/);
+  assert.match(reply, /🌆 مسا ٤–١٢ — 200\.00 دينار \(33\.3%\) · 2 عملية/);
+  assert.match(reply, /🌙 ليل ١٢–٨ — 200\.00 دينار \(33\.3%\) · 2 عملية/);
+  assert.match(reply, /2026-09-16/);
+  assert.match(reply, /الإجمالي\*: 600\.00 دينار من 6 عملية/);
 });
 
-test("each shift is named, given its share, and the day it belongs to is stated", async () => {
-  const byShift = { "05:00": 600, "13:00": 300, "21:00": 100 };
-  const { fetcher } = fetcherFor({ "pos.order": (args) => {
-    const from = args[0].find(leaf => leaf[0] === "date_order" && leaf[1] === ">=")[2];
-    return [{ location_id: [1, "NAOOR/Stock"], amount_total: byShift[from.slice(11, 16)], __count: 10 }];
-  } });
-  const reply = await answerOdooQuestion(matchOdooQuestion("شفتات امبارح"), { odoo, fetcher, currencyLabel: "دينار" }, AT);
-  assert.match(reply, /شفتات \*?أمس/);
-  assert.match(reply, /2026-09-16/);
-  assert.match(reply, /☀️ صبح ٨–٤ — 600\.00 دينار \(60\.0%\)/);
-  assert.match(reply, /🌆 مسا ٤–١٢ — 300\.00 دينار \(30\.0%\)/);
-  assert.match(reply, /🌙 ليل ١٢–٨ — 100\.00 دينار \(10\.0%\)/);
-  assert.match(reply, /الإجمالي\*: 1,000\.00 دينار من 30 عملية/);
+test("a shift named in words, or written as its hours, narrows the answer to that one", async () => {
+  assert.equal(matchOdooQuestion("بدي بيع الشفت الصباحي للشهر هذا")?.kind, "shifts_month");
+  assert.equal(matchOdooQuestion("بدي بيع الشفت الصباحي للشهر هذا")?.shift, "morning");
+  const hours = matchOdooQuestion("اعطيني البيع من ال 8 الصباح ل 4 العصر من اول الشهر لفرع الناعور");
+  assert.equal(hours.kind, "shifts_month", "the hours make it a shift question even without the word");
+  assert.equal(hours.shift, "morning");
+  assert.equal(hours.branch, "NAOOR");
+  assert.equal(matchOdooQuestion("شفت الليل امبارح")?.shift, "night");
+  assert.equal(matchOdooQuestion("شفتات امبارح")?.shift, null, "no name means all three");
+});
+
+test("one named shift is reported alone, with no share and no grand total", async () => {
+  const { fetcher } = fetcherFor({ "pos.order": () => ordersAt(9, 10, 20, 2) });
+  const reply = await answerOdooQuestion(matchOdooQuestion("الشفت الصباحي امبارح"), { odoo, fetcher }, AT);
+  assert.match(reply, /☀️ صبح ٨–٤ — 200\.00 · 2 عملية/);
+  assert.doesNotMatch(reply, /مسا|ليل/);
+  assert.doesNotMatch(reply, /الإجمالي/);
 });
 
 test("a shift question about one branch counts only that branch", async () => {
   const { fetcher } = fetcherFor({ "pos.order": () => [
-    { location_id: [1, "NAOOR/Stock"], amount_total: 900, __count: 9 },
-    { location_id: [2, "SAFOT/Stock"], amount_total: 100, __count: 1 },
+    { id: 1, date_order: "2026-09-16 06:00:00", amount_total: 900, location_id: [1, "NAOOR/Stock"] },
+    { id: 2, date_order: "2026-09-16 06:30:00", amount_total: 100, location_id: [2, "SAFOT/Stock"] },
   ] });
   const match = matchOdooQuestion("شفتات صافوط امبارح");
   assert.equal(match.branch, "SAFOT");
   const reply = await answerOdooQuestion(match, { odoo, fetcher }, AT);
   assert.match(reply, /صافوط/);
-  assert.match(reply, /الإجمالي\*: 300\.00 من 3 عملية/, "three shifts of 100 each, Naoor excluded");
+  assert.match(reply, /الإجمالي\*: 100\.00 من 1 عملية/);
 });
 
-// Today's night shift has already happened and the evening one has not, so a
-// small morning figure would otherwise read as a bad night.
 test("today's shifts say how far into the day the numbers go", async () => {
-  const { fetcher } = fetcherFor({ "pos.order": () => [{ location_id: [1, "NAOOR/Stock"], amount_total: 50, __count: 2 }] });
+  const { fetcher } = fetcherFor({ "pos.order": () => [{ id: 1, date_order: "2026-09-17 06:00:00", amount_total: 50, location_id: [1, "NAOOR/Stock"] }] });
   const reply = await answerOdooQuestion(matchOdooQuestion("شو الشفتات اليوم"), { odoo, fetcher }, AT);
   assert.match(reply, /شفتات \*?اليوم/);
   assert.match(reply, /لحد الساعة 12:00/);

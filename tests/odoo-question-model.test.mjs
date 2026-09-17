@@ -14,17 +14,17 @@ const options = (content, extra = {}) => ({
 
 test("a routed question comes back as its kind and branch", async () => {
   const match = await classifyOdooQuestion("قديش صار عنا بدابوق هالشهر؟", options('{"kind":"sales_month","branch":"DABOQ"}'));
-  assert.deepEqual(match, { kind: "sales_month", branch: "DABOQ" });
+  assert.deepEqual(match, { kind: "sales_month", branch: "DABOQ", shift: null });
 });
 
 test("a question with no branch in it carries no branch", async () => {
   const match = await classifyOdooQuestion("شو الوضع بالمخزون", options('{"kind":"low_stock","branch":null}'));
-  assert.deepEqual(match, { kind: "low_stock", branch: null });
+  assert.deepEqual(match, { kind: "low_stock", branch: null, shift: null });
 });
 
 test("a branch spelled in lower case is still the branch", async () => {
   const match = await classifyOdooQuestion("naoor sales", options('{"kind":"sales_today","branch":"naoor"}'));
-  assert.deepEqual(match, { kind: "sales_today", branch: "NAOOR" });
+  assert.deepEqual(match, { kind: "sales_today", branch: "NAOOR", shift: null });
 });
 
 test("anything that is not one of the known kinds routes nowhere", async () => {
@@ -36,7 +36,7 @@ test("anything that is not one of the known kinds routes nowhere", async () => {
 
 test("an invented branch is dropped, but the question it belongs to is kept", async () => {
   const match = await classifyOdooQuestion("مبيعات الجاردنز", options('{"kind":"sales_today","branch":"GARDENS"}'));
-  assert.deepEqual(match, { kind: "sales_today", branch: null });
+  assert.deepEqual(match, { kind: "sales_today", branch: null, shift: null });
 });
 
 test("a provider that errors, refuses or hangs routes nowhere instead of throwing", async () => {
@@ -66,4 +66,15 @@ test("only the message is sent -- no key material, catalog or history rides alon
   assert.equal(body.response_format.type, "json_object");
   assert.ok(body.max_completion_tokens <= 60, "a routing answer is a few tokens, never a paragraph");
   assert.doesNotMatch(JSON.stringify(body), /synthetic-key-never-real/);
+});
+
+// A named shift survives the router the same way a branch does, and anything
+// that is not one of the three is dropped rather than passed along.
+test("the router may name one shift, and only one of the three", async () => {
+  const routed = await classifyOdooQuestion("بيع الشفت الصباحي هالشهر",
+    options('{"kind":"shifts_month","branch":null,"shift":"morning"}'));
+  assert.deepEqual(routed, { kind: "shifts_month", branch: null, shift: "morning" });
+  const invented = await classifyOdooQuestion("شفتات",
+    options('{"kind":"shifts_today","branch":null,"shift":"afternoon"}'));
+  assert.deepEqual(invented, { kind: "shifts_today", branch: null, shift: null });
 });
