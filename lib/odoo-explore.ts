@@ -78,8 +78,15 @@ export async function composeOdooQuery(question: string, catalog: string,
 const NUMERIC = /(amount|qty|quantity|price|total|count|residual|balance|credit|debit|weight|volume)/;
 function display(value: unknown, field: string, currency?: string): string {
   if (value === null || value === undefined || value === false) return "—";
-  if (Array.isArray(value)) return typeof value[1] === "string" ? value[1] : String(value[0] ?? "—");
-  if (typeof value === "number") return NUMERIC.test(field) ? formatAmount(value) + (currency ? ` ${currency}` : "") : String(value);
+  if (Array.isArray(value)) {
+    if (typeof value[1] === "string") return value[1];
+    return Number.isFinite(value[0]) || typeof value[0] === "string" ? String(value[0]) : "—";
+  }
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) return "—";
+    return NUMERIC.test(field) ? formatAmount(value) + (currency ? ` ${currency}` : "") : String(value);
+  }
+  if (typeof value === "object") return "—";
   if (typeof value === "boolean") return value ? "نعم" : "لأ";
   return String(value).slice(0, 80);
 }
@@ -87,7 +94,7 @@ function display(value: unknown, field: string, currency?: string): string {
 /** The result, as lines a person reads. The footer is added by the caller. */
 export function formatOdooResult(query: SafeOdooQuery, result: unknown, currency?: string): string {
   if (query.method === "search_count") {
-    return `🔢 *${typeof result === "number" ? result.toLocaleString("en-US") : "—"}*`;
+    return `🔢 *${Number.isFinite(result) ? (result as number).toLocaleString("en-US") : "—"}*`;
   }
   const rows = Array.isArray(result) ? result.filter(row => !!row && typeof row === "object") as Array<Record<string, unknown>> : [];
   if (!rows.length) return "ما في ولا سجل بهاي الفلترة.";

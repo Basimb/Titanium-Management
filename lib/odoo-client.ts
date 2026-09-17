@@ -43,8 +43,8 @@ async function call(config: OdooConfig, service: "common" | "object", method: st
 
 async function authenticate(config: OdooConfig, fetcher: Fetcher): Promise<number> {
   const result = await call(config, "common", "authenticate", [config.db, config.username, config.apiKey, {}], fetcher);
-  if (typeof result !== "number" || result <= 0) throw new OdooError("odoo_authentication_failed");
-  return result;
+  if (!Number.isInteger(result) || (result as number) <= 0) throw new OdooError("odoo_authentication_failed");
+  return result as number;
 }
 
 // Basim (2026-09-17): "بدي يصير جاوبني بسرعه فائقه". Every live question used
