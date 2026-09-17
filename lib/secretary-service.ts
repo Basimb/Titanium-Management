@@ -1,4 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
+import { matchOdooQuestion, type OdooQuestionMatch } from "./odoo-questions.ts";
 import type { DatabaseSync } from "node:sqlite";
 import { executeManagementAction, getManagementSnapshot, migrateManagementActions, ManagementActionError, ACTION_KEYS, type ManagementActor, type ManagementCommand, type ManagementResult } from "./management-actions.ts";
 import { resolveChatUser, normalizeContactNumber, type ChatUser } from "./team-chat-policy.ts";
@@ -1219,8 +1220,38 @@ function privateSearchQuestion(query: string, state: Snapshot): boolean {
 
 export async function handleSecretaryEvent(db: DatabaseSync, event: Event, config: TeamChatConfig, dependencies: {
   infer: (input: SecretaryModelInput) => Promise<SecretaryIntent>; search?: (query: string) => Promise<string>; now?: () => number;
+  // Basim (2026-09-17): "بدي اسالو لايف ويجاوب". Present only when the pharmacy
+  // system is configured; absent, every question below simply is not one, and
+  // the message goes to the ordinary secretary untouched.
+  askOdoo?: (match: OdooQuestionMatch, at: number) => Promise<string>;
 }): Promise<Result> {
   migrateSecretary(db); const now = (dependencies.now || Date.now)();
+  // A question about the pharmacy's own system, answered from its real numbers
+  // before anything else looks at the message. Deliberately ahead of the model:
+  // matchOdooQuestion recognises a fixed set of questions by their wording (see
+  // lib/odoo-questions.ts) and nothing else, so a figure in the reply was read
+  // from Odoo, never composed. Anything it does not recognise falls straight
+  // through and is handled exactly as before.
+  if (dependencies.askOdoo && event.choice === undefined && !event.replyToMessageId && event.inputKind !== "voice") {
+    const question = matchOdooQuestion(event.text);
+    if (question) {
+      const asking = actorFor(db, event, config);
+      if (asking && asking.active === 1 && config.enabled) {
+        const state = stateFor(db, asking);
+        const duplicate = lookup(db, event, asking, state);
+        if (duplicate) return duplicate;
+        try {
+          const reply = await dependencies.askOdoo(question, now);
+          return transaction(db, () => save(db, event, asking, { status: "summary", reply }, [], now));
+        } catch {
+          // The pharmacy system being unreachable is not the person's problem to
+          // debug, and it must never swallow their message silently.
+          return transaction(db, () => save(db, event, asking, { status: "clarify",
+            reply: "ما قدرت أوصل لنظام الصيدلية هلأ. جرّب بعد شوي." }, [], now));
+        }
+      }
+    }
+  }
   event = resolveConfirmChoice(event);
   event = resolveTaskCommandsLegendChoice(db, event, config, now);
   event = resolveTaskCloseDecisionRejectChoice(db, event);

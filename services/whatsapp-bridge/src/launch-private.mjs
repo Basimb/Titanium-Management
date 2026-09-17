@@ -145,6 +145,18 @@ export function bridgeChildEnvironment(settings, env, pair, serviceDirectory = S
     if (/^[0-6]$/.test(settings.ODOO_REPORT_WEEKLY_DAY || '')) childEnv.ODOO_REPORT_WEEKLY_DAY = settings.ODOO_REPORT_WEEKLY_DAY;
     if (/^([0-9]|1[0-9]|2[0-3])$/.test(settings.ODOO_REPORT_WEEKLY_HOUR || '')) childEnv.ODOO_REPORT_WEEKLY_HOUR = settings.ODOO_REPORT_WEEKLY_HOUR;
     if (/^([0-9]|1[0-9]|2[0-3])$/.test(settings.ODOO_REPORT_PURCHASES_WEEKLY_HOUR || '')) childEnv.ODOO_REPORT_PURCHASES_WEEKLY_HOUR = settings.ODOO_REPORT_PURCHASES_WEEKLY_HOUR;
+    // Per-report routing (off | group | owner | both). This list is the only
+    // way a setting reaches the bridge child at all -- the child environment is
+    // built from scratch above and inherits nothing, which is exactly why the
+    // reports stayed silent on 2026-09-17 while every ODOO_ export sat in
+    // run-bridge.sh: the child never saw one of them. A routing value that is
+    // not one of the four words is dropped rather than passed through, so a
+    // typo leaves the report on its built-in default instead of disabling it.
+    for (const key of ['ODOO_REPORT_DAILY', 'ODOO_REPORT_WEEKLY', 'ODOO_REPORT_PURCHASES']) {
+      if (/^(off|group|owner|both)$/.test(String(settings[key] || '').trim().toLowerCase())) {
+        childEnv[key] = String(settings[key]).trim().toLowerCase();
+      }
+    }
   }
   // Phone/user mapping only; no names or AI key. launchPrivate separately grants
   // the validated settings path for fresh outbox authorization, never from an override.

@@ -60,12 +60,23 @@ export type LocationSales = { location: string; orderCount: number; totalAmount:
 // 2026-09-12 with Basim ("مرتجعات للموردين", not customer/POS returns).
 export type PurchaseSummary = { purchaseCount: number; purchaseAmount: number; returnCount: number; returnAmount: number };
 
+// Basim (2026-09-16), after the first look at his live data: 2,767 stock lines
+// holding 11,829 units whose expiry date has already passed, still sitting in
+// internal locations. Counting LOTS would have overstated it wildly (68,330
+// lots exist, 13,997 of them expired) -- a lot record outlives the stock it
+// described. These read stock.quant instead, filtered to internal locations
+// and a positive quantity, so the number is what is actually on a shelf.
+export type ExpirySummary = { expiredLines: number; expiredQty: number; soonLines: number; soonQty: number; withinDays: number };
+export type PayablesSummary = { billCount: number; billTotal: number };
+
 export type OdooSession = {
   salesSummary(sinceIso: string, untilIso: string): Promise<SalesSummary>;
   salesByLocation(sinceIso: string, untilIso: string): Promise<LocationSales[]>;
   purchaseSummary(sinceIso: string, untilIso: string): Promise<PurchaseSummary>;
   lowStock(thresholdQty: number, limit?: number): Promise<LowStockItem[]>;
   activeProductCount(): Promise<number>;
+  expirySummary(withinDays: number): Promise<ExpirySummary>;
+  openPayables(): Promise<PayablesSummary>;
 };
 
 /** Authenticates once, then reuses that session for every read below. */
@@ -111,6 +122,34 @@ export async function openOdooSession(config: OdooConfig, fetcher: Fetcher = fet
       const rows = (await execute("product.product", "search_read", [domain, ["name", "qty_available"]],
         { order: "qty_available asc", limit })) as Array<Record<string, unknown>> | undefined;
       return (Array.isArray(rows) ? rows : []).map(row => ({ name: String(row.name ?? "?"), qty: Number(row.qty_available ?? 0) }));
+    },
+    async expirySummary(withinDays) {
+      // Odoo renamed stock.production.lot to stock.lot in 16.0; this instance
+      // is 16.0 (verified against the live server), and the domain walks
+      // lot_id.expiration_date rather than reading lots directly so that a lot
+      // with no stock left simply does not appear.
+      const day = 86_400_000;
+      const today = new Date(Date.now()).toISOString().slice(0, 10);
+      const until = new Date(Date.now() + withinDays * day).toISOString().slice(0, 10);
+      const internal: unknown[] = [["location_id.usage", "=", "internal"], ["quantity", ">", 0]];
+      const read = async (extra: unknown[]) => {
+        const groups = (await execute("stock.quant", "read_group", [[...internal, ...extra], ["quantity"], []], { lazy: true })) as Array<Record<string, unknown>> | undefined;
+        const row = Array.isArray(groups) ? groups[0] : undefined;
+        return { lines: Number(row?.__count ?? 0), qty: Number(row?.quantity ?? 0) };
+      };
+      const [expired, soon] = await Promise.all([
+        read([["lot_id.expiration_date", "<", today]]),
+        read([["lot_id.expiration_date", ">=", today], ["lot_id.expiration_date", "<=", until]]),
+      ]);
+      return { expiredLines: expired.lines, expiredQty: expired.qty, soonLines: soon.lines, soonQty: soon.qty, withinDays };
+    },
+    async openPayables() {
+      // Posted vendor bills that are still unpaid or only part-paid -- the same
+      // move_type the purchases report already uses, narrowed by payment_state.
+      const domain = [["move_type", "=", "in_invoice"], ["state", "=", "posted"], ["payment_state", "in", ["not_paid", "partial"]]];
+      const groups = (await execute("account.move", "read_group", [domain, ["amount_residual"], []], { lazy: true })) as Array<Record<string, unknown>> | undefined;
+      const row = Array.isArray(groups) ? groups[0] : undefined;
+      return { billCount: Number(row?.__count ?? 0), billTotal: Number(row?.amount_residual ?? 0) };
     },
     async activeProductCount() {
       const count = await execute("product.product", "search_count", [[["sale_ok", "=", true], ["active", "=", true]]]);
