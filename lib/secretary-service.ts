@@ -1297,7 +1297,20 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
     }
   }
   event = resolveConfirmChoice(event);
+  const beforeLegend = event.text;
   event = resolveTaskCommandsLegendChoice(db, event, config, now);
+  // Basim, 2026-09-19: "جيت افتح مهمه ولقيتو سالني عن اللي فاتحها الصبح ...
+  // ورجع نشرها كمان مره". He tapped "1" to open a NEW task and the assistant
+  // answered with a finished confirmation for "برمجة كاميرات دابوق" -- the
+  // task he had already opened that morning -- which he confirmed, leaving
+  // two identical open tasks for خالد three hours apart. A menu tap is
+  // rewritten to the bare words "اضافة مهمة" (just above), so the message
+  // provably carries no work in it: the only place that title could have come
+  // from is the 24-hour conversation history the model is shown. Remembered
+  // below so the questionnaire asks what the work is instead of the model
+  // reciting an old answer. Narrow on purpose -- a typed request, even the
+  // same words, is untouched, because there the person really did write them.
+  const openedFromMenu = event.text !== beforeLegend && event.text === "اضافة مهمة";
   event = resolveTaskCloseDecisionRejectChoice(db, event);
   const actor = actorFor(db, event, config); if (!actor) return { status: "denied", reply: "" };
   // The team group is one-way by default: automated notices only (task
@@ -2167,6 +2180,10 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
       : directTaskList ? emptySecretaryIntent("summary")
         : bareOwnershipCandidate ? { ...emptySecretaryIntent("ownership_request"), taskId: bareOwnershipCandidate.id }
         : directCreation ?? validateSecretaryIntent(await dependencies.infer(input), input);
+    // A creation opened from the menu starts empty, whatever the model
+    // recited from history -- see openedFromMenu above.
+    if (openedFromMenu && plan.kind === "task_draft" && !taskDraft)
+      plan = { ...plan, intakeMode: "start", fields: { ...emptySecretaryIntent().fields } };
   } catch (error) {
     // Only standalone, unqualified read questions may recover from provider failure.
     // Never reinterpret a write, priority filter, quoted reply, or active intake.
