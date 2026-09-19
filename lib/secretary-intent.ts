@@ -352,7 +352,11 @@ export function validateSecretaryIntent(value: unknown, input: SecretaryModelInp
     if (plan.kind === "task_draft" && plan.action !== null) return emptySecretaryIntent("clarify", "بدك تفتح مهمة جديدة، ولا تنفذ إجراء على مهمة موجودة أصلًا؟ وضحلي المقصود.");
     let mode = plan.intakeMode ?? (input.taskDraft ? "continue" : "start");
     if (mode === "continue" && !input.taskDraft) return emptySecretaryIntent("clarify", "ما في مسودة مهمة نشطة؛ احكيلي المهمة الجديدة المطلوبة.");
-    if (mode === "start" && !/(?:ضيف|اضف|اضيف|اضافه|اضافة|انشئ|انشي|انشاء|اعمل|نعمل|سجل|افتح|جهز|مهم[هة]\s+جديد[هة]|\b(?:add|create|new)\b)/u.test(normalizedArabic(input.text))) {
+    // Basim (2026-09-19): "نعم . عمل لوجو العيادات من الداخل" was refused here
+    // because the list wanted "اعمل" and he wrote the noun, "عمل". A person
+    // naming the work rarely conjugates a verb for it -- "تصميم", "برمجة",
+    // "تركيب", "بدي", "لازم" are all how the job actually arrives.
+    if (mode === "start" && !/(?:ضيف|اضف|اضيف|اضافه|اضافة|انشئ|انشي|انشاء|اعمل|نعمل|عمل|سوي|اسوي|نسوي|سجل|افتح|جهز|تجهيز|تصميم|تصليح|تركيب|برمجه|برمجة|متابعه|متابعة|بدي|بدنا|لازم|مطلوب|مهم[هة]\s+جديد[هة]|\b(?:add|create|new)\b)/u.test(normalizedArabic(input.text))) {
       // The model sometimes tags a plain, verb-less answer to the intake
       // question it JUST asked (e.g. a bare task title, no "أضف"/"اضافة"
       // anywhere in it) as a fresh "start" instead of "continue", even
