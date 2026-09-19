@@ -2131,6 +2131,16 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
     knowledgeContext: event.groupId === null ? safeKnowledge(db, actor, review?.question || event.text)
       .slice(0, 3).map(hit => ({ title: hit.title, snippet: hit.snippet.slice(0, 600) })) : [] };
   const directCreation = !review && event.inputKind !== "voice" && !event.replyToMessageId ? directTaskCreationIntent(input) : null;
+  // Tapping "1" on the menu is not a sentence to be classified -- it is the
+  // person pressing "open a task". Sending it to the model produced both
+  // halves of what Basim hit on 2026-09-19 (see openedFromMenu above): once
+  // it answered with that morning's task filled in, and he confirmed a
+  // duplicate; once it answered with a clarify instead of opening anything,
+  // so his next message -- the title itself -- arrived with no draft waiting
+  // for it and bounced back the same question three times over. An empty
+  // draft, opened here without asking anyone, does both jobs: the
+  // questionnaire asks what the work is, and the answer has somewhere to go.
+  const menuCreation = openedFromMenu && !taskDraft ? { ...emptySecretaryIntent("task_draft"), intakeMode: "start" as const } : null;
   // Basim (2026-09-12): pressed "1" (LGDADD => "اضافة مهمة"), got asked "شو
   // المهمة أو الشغل المطلوب بالضبط؟", then answered with a full sentence
   // ("شادي يكلم رند ويبلغها انه اجالها طلب سحب ملف جوجل خليها توافق") that
@@ -2179,11 +2189,7 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
       : priorityQuery ? emptySecretaryIntent(priorityQuery.kind === "clarify" ? "clarify" : "summary", priorityQuery.kind === "clarify" ? priorityQuery.reply : null)
       : directTaskList ? emptySecretaryIntent("summary")
         : bareOwnershipCandidate ? { ...emptySecretaryIntent("ownership_request"), taskId: bareOwnershipCandidate.id }
-        : directCreation ?? validateSecretaryIntent(await dependencies.infer(input), input);
-    // A creation opened from the menu starts empty, whatever the model
-    // recited from history -- see openedFromMenu above.
-    if (openedFromMenu && plan.kind === "task_draft" && !taskDraft)
-      plan = { ...plan, intakeMode: "start", fields: { ...emptySecretaryIntent().fields } };
+        : menuCreation ?? directCreation ?? validateSecretaryIntent(await dependencies.infer(input), input);
   } catch (error) {
     // Only standalone, unqualified read questions may recover from provider failure.
     // Never reinterpret a write, priority filter, quoted reply, or active intake.

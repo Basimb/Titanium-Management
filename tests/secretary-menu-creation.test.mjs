@@ -46,9 +46,7 @@ const draftRow = db => db.prepare('SELECT draft_json FROM secretary_task_intake'
 
 test('a task opened from the menu starts empty, even when the model recites this morning\'s task', async t => {
   const f = fixture(t);
-  let seen = null;
-  const reply = await f.run('1', async input => { seen = input.text; return RECONSTRUCTED; });
-  assert.equal(seen, 'اضافة مهمة', 'the digit still reaches the model as the add-task wording');
+  const reply = await f.run('1', async () => { assert.fail('a menu tap must open a task without asking the model'); });
   assert.equal(reply.status, 'clarify');
   assert.match(reply.reply, /الشغل المطلوب/, 'it asks what the work is');
   assert.doesNotMatch(reply.reply, /كاميرات/, 'and never offers the old task back as the new one');
@@ -66,11 +64,15 @@ test('typing the same words is left alone -- there the person really did write t
   assert.match(JSON.stringify(reply), /كاميرات/);
 });
 
-test('a menu tap that the model reads as something else is untouched', async t => {
+// The second half of the same morning: with no draft open, his answer to the
+// question -- the title itself -- has nowhere to land, so the start guard
+// bounces it back. He sent the same title three times and got the same
+// sentence three times. The draft now exists before the question is asked.
+test('the title he answers with lands in the draft the tap opened', async t => {
   const f = fixture(t);
-  const summary = { kind: 'summary', intakeMode: null, action: null, taskId: null, recipientIds: [], message: null,
-    fields: { title: null, details: null, ownerId: null, priority: null, dueDate: null, name: null, reason: null, body: null, remindAt: null, status: null } };
-  const reply = await f.run('1', async () => summary);
-  assert.notEqual(reply.status, 'denied');
-  assert.equal(draftRow(f.db), undefined, 'no creation draft is invented for a non-creation plan');
+  await f.run('1', async () => { assert.fail('a menu tap must open a task without asking the model'); });
+  const reply = await f.run('عمل لوجو العيادات من الداخل', async () => { assert.fail('the only missing field is the title; the model is not consulted'); });
+  assert.doesNotMatch(reply.reply, /بدك أضيف مهمة جديدة؟/, 'it must not bounce the answer back as a fresh question');
+  assert.match(reply.reply, /مين بدك/, 'it moves on to the next missing field');
+  assert.equal(JSON.parse(draftRow(f.db).draft_json).title, 'عمل لوجو العيادات من الداخل');
 });

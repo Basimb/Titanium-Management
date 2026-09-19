@@ -144,8 +144,11 @@ test('typing the bare phrase "تمديد الموعد" resolves exactly like tap
 
 test('a bare digit "1".."5" resolves to the matching quick command when the employee has no tasks at all to pick from', async t => {
   const f = fixture(t, { withTasks: false });
-  let seenAdd; await f.run('1', async input => { seenAdd = input.text; return emptySecretaryIntent('clarify', 'أي مشروع؟'); });
-  assert.equal(seenAdd, 'اضافة مهمة', 'digit 1 -- اضافة مهمة');
+  // Basim, 2026-09-19: a menu tap is not a sentence to classify, so digit 1
+  // opens the empty draft here and the model is never consulted at all.
+  const add = await f.run('1', async () => { throw Error('a menu tap must open a task without asking the model'); });
+  assert.equal(add.status, 'clarify', 'digit 1 -- اضافة مهمة');
+  assert.match(add.reply, /الشغل المطلوب/, 'it asks what the work is instead of guessing');
   const finish = await f.run('5'); // LGDFINISH with zero candidates resolves deterministically, no model call
   assert.equal(finish.status, 'clarify');
   assert.match(finish.reply, /ما عندك مهمة قيد التنفيذ حاليًا لإنهائها/);
@@ -183,9 +186,8 @@ test('a bare digit never hijacks the ordinal task-picker for an employee who has
 // the ownershipCandidates-empty gate reintroduces no ambiguity.
 test('Basim himself now gets the same digit-menu shortcut as an employee with no tasks -- "1" always means اضافة مهمة for him', async t => {
   const f = fixture(t, { withTasks: false });
-  let seenText;
-  await handleSecretaryEvent(f.db, f.event({ text: '1', senderNumber: '12025550103' }), f.config, { infer: async input => { seenText = input.text; return emptySecretaryIntent('clarify', 'أي مشروع؟'); }, now: () => f.now });
-  assert.equal(seenText, 'اضافة مهمة', 'digit 1 always starts add-task for Basim too, per his 2026-09-12 request');
+  const add = await handleSecretaryEvent(f.db, f.event({ text: '1', senderNumber: '12025550103' }), f.config, { infer: async () => { throw Error('a menu tap must open a task without asking the model'); }, now: () => f.now });
+  assert.match(add.reply, /الشغل المطلوب/, 'digit 1 always starts add-task for Basim too, per his 2026-09-12 request');
 });
 
 test('Basim: a digit with exactly one of his own eligible tasks (e.g. "5" -- finish) resolves deterministically by name', async t => {
@@ -214,7 +216,7 @@ test('the ordinal task-picker still never fires for Basim -- exempting him from 
   // still unconditionally excludes basem/admin (unchanged), so this must
   // still resolve via the digit menu, never via an ownership_request.
   f.db.exec(`INSERT INTO tasks (id,title,details,priority,status,owner,suggested_owner,watcher,created_at,updated_at) VALUES('${PROGRESS}','مهمة مرصودة','تفاصيل','yellow','open',NULL,NULL,'باسم',1,1)`);
-  let seen;
-  await handleSecretaryEvent(f.db, f.event({ text: '1', senderNumber: '12025550103' }), f.config, { infer: async input => { seen = input.text; return emptySecretaryIntent('clarify', 'أي مشروع؟'); }, now: () => f.now });
-  assert.equal(seen, 'اضافة مهمة', 'still resolves to the digit-menu action, never an ownership_request for a watched task');
+  const add = await handleSecretaryEvent(f.db, f.event({ text: '1', senderNumber: '12025550103' }), f.config, { infer: async () => { throw Error('a menu tap must open a task without asking the model'); }, now: () => f.now });
+  assert.match(add.reply, /الشغل المطلوب/, 'still resolves to the digit-menu action, never an ownership_request for a watched task');
+  assert.doesNotMatch(add.reply, /مهمة مرصودة/, 'the watched task is never offered back as the new one');
 });

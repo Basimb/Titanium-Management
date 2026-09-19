@@ -353,8 +353,11 @@ test('the standalone command legend carries a tappable poll of its own five numb
 // when there is truly one possible task to mean.
 test('LGDADD always rewrites outright -- a brand-new task touches no existing record, so no ambiguity is possible', async t => {
   const f = fixture(t);
-  let seenAdd; await f.run(undefined, tap('LGDQ', 'LGDADD'), async input => { seenAdd = input.text; return emptySecretaryIntent('clarify', 'أي مشروع؟'); });
-  assert.equal(seenAdd, 'اضافة مهمة');
+  // Basim, 2026-09-19: the rewrite now also ends there -- an add opened from
+  // the menu carries no work in it, so it opens an empty draft and asks,
+  // rather than handing the model a bare word plus a day of history.
+  const add = await f.run(undefined, tap('LGDQ', 'LGDADD'), async () => { throw Error('a menu tap must open a task without asking the model'); });
+  assert.match(add.reply, /الشغل المطلوب/);
 });
 test('LGDFINISH/LGDNOTE resolve to the actor\'s one eligible (in-progress, owned) task by name, never the bare word', async t => {
   const f = fixture(t); // خالد owns exactly one in-progress task here: PROGRESS ("لوحة")
