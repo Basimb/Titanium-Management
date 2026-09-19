@@ -33,7 +33,11 @@ function fixture(t) {
     config, { infer: async () => emptySecretaryIntent("clarify", "..."), now: () => NOW });
   return { db, task, say };
 }
-const labels = result => (result.choices?.options ?? []).map(option => option.label);
+const CANCEL = "✖️ ولا إشي — ألغِ الطلب";
+// Basim, 2026-09-19: every task picker now ends with a way out. These tests
+// are about which TASKS are offered, so it is dropped here and asserted once,
+// on its own, at the bottom of this file.
+const labels = result => (result.choices?.options ?? []).map(option => option.label).filter(label => label !== CANCEL);
 
 test("Basim's note poll offers the team's in-progress tasks, not only his own", async t => {
   const f = fixture(t);
@@ -94,4 +98,13 @@ test("an employee is unaffected -- still only their own in-progress task", async
   // Exactly one candidate resolves straight through, so no picker poll at all;
   // what matters is that شادي's task never became خالد's business.
   assert.doesNotMatch(asked.reply ?? "", /السجل التجاري/);
+});
+
+test("every task picker ends with a way out for a digit pressed by mistake", async t => {
+  const f = fixture(t);
+  f.task("a", "مزاولات الصيادلة", "خالد");
+  f.task("b", "السجل التجاري", "شادي");
+  const asked = await f.say("اضافة ملاحظة");
+  const all = asked.choices.options.map(option => option.label);
+  assert.equal(all.at(-1), CANCEL, "the way out is last, so no thumb lands on it by accident");
 });

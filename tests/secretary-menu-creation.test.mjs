@@ -39,7 +39,10 @@ function fixture(t) {
   const run = (text, infer) => handleSecretaryEvent(db,
     { messageId: `EVENT-${++count}`, senderNumber: '12025550103', groupId: null, text, receivedAt: now, responseMessageId: `REPLY-${count}` },
     config, { infer, now: () => now });
-  return { db, run };
+  const tap = (questionId, optionId) => handleSecretaryEvent(db,
+    { messageId: `EVENT-${++count}`, senderNumber: '12025550103', groupId: null, text: '', receivedAt: now, responseMessageId: `REPLY-${count}`, choice: { questionId, optionId } },
+    config, { infer: async () => { assert.fail('a tap is resolved here, never by the model'); }, now: () => now });
+  return { db, run, tap };
 }
 const taskCount = db => db.prepare('SELECT COUNT(*) AS n FROM tasks').get().n;
 const draftRow = db => db.prepare('SELECT draft_json FROM secretary_task_intake').get();
@@ -75,4 +78,44 @@ test('the title he answers with lands in the draft the tap opened', async t => {
   assert.doesNotMatch(reply.reply, /بدك أضيف مهمة جديدة؟/, 'it must not bounce the answer back as a fresh question');
   assert.match(reply.reply, /مين بدك/, 'it moves on to the next missing field');
   assert.equal(JSON.parse(draftRow(f.db).draft_json).title, 'عمل لوجو العيادات من الداخل');
+});
+
+// Basim, 2026-09-19: he tapped 5 (إنهاء مهمة), and the question that came
+// back -- "عندك أكثر من مهمة تنطبق، أي وحدة بالضبط؟" over two titles -- said
+// nothing about which of the five actions he was answering for. "ليش ما
+// بيوضح انه انهاء مهمه". Picking wrong here closes a task that is not done.
+test('the which-task question names the action it is asking about', async t => {
+  const f = fixture(t);
+  f.db.exec(`INSERT INTO tasks (id,title,details,priority,status,owner,suggested_owner,created_at,updated_at) VALUES
+    ('t-a','اضافة فرع دابوق على جوجل','','yellow','progress','باسم','باسم',1,1),
+    ('t-b','تعديل راسلة سنترال افايا','','yellow','progress','باسم','باسم',1,1)`);
+  const reply = await f.run('5', async () => { assert.fail('the picker is deterministic; the model is never asked'); });
+  assert.match(reply.reply, /إنهاء مهمة/, 'the question says what tapping an option will do');
+  assert.match(reply.choices.title, /إنهاء مهمة/, 'and so does the poll itself, which is all he sees on a phone');
+  assert.match(reply.reply, /اضافة فرع دابوق على جوجل/);
+  assert.match(reply.reply, /تعديل راسلة سنترال افايا/);
+});
+
+// Basim, 2026-09-19: "ما بدي اعمل ايشي كتبت الرقم بالغلط مثلا مشان ينهي
+// الامر". Every option on the picker acts on a real task, so a mistyped
+// digit had no exit. Tapping the way out, or typing "لا", ends it.
+test('a digit pressed by mistake can be taken back, tapped or typed', async t => {
+  for (const back of ['tap', 'type']) {
+    const f = fixture(t);
+    f.db.exec(`INSERT INTO tasks (id,title,details,priority,status,owner,suggested_owner,created_at,updated_at) VALUES
+      ('t-a','اضافة فرع دابوق على جوجل','','yellow','progress','باسم','باسم',1,1),
+      ('t-b','تعديل راسلة سنترال افايا','','yellow','progress','باسم','باسم',1,1)`);
+    const asked = await f.run('5', async () => { assert.fail('the picker is deterministic'); });
+    const options = asked.choices.options;
+    assert.match(options.at(-1).label, /ولا إشي/, 'the way out is the last option');
+
+    const out = back === 'tap'
+      ? await f.tap(asked.choices.id, options.at(-1).id)
+      : await f.run('لا', async () => { assert.fail('a cancellation never reaches the model') });
+    assert.equal(out.status, 'cancelled', back);
+    assert.match(out.reply, /ما صار إشي/, back);
+    // Nothing moved: both tasks are still in progress, and the question is gone.
+    assert.equal(f.db.prepare("SELECT COUNT(*) AS n FROM tasks WHERE status='progress'").get().n, 2, back);
+    assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM secretary_task_choice').get().n, 0, back);
+  }
 });

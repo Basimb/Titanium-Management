@@ -44,7 +44,7 @@ test('a bare-keyword "clarify" the model gave up on ("ضيف ملاحظه", Basi
   const r = await f.run('ضيف ملاحظه', genericClarify('أين تود إضافة الملاحظة بالضبط؟ يمكنني إضافة تعليق على إحدى المهام المدرجة، أي واحد منها تحديداً؟'));
   assert.equal(r.status, 'clarify');
   assert.ok(r.choices, 'must offer a real tappable poll, not the model\'s own plain question');
-  assert.deepEqual(r.choices.options.map(o => o.label), ['لوحة', 'تسليم التقرير']);
+  assert.deepEqual(r.choices.options.map(o => o.label), ['لوحة', 'تسليم التقرير', '✖️ ولا إشي — ألغِ الطلب']);
 });
 
 test('tapping that fallback poll adds the note to the tapped task once the text is supplied', async t => {
@@ -135,5 +135,5 @@ test('a "command" comment with no taskId at all (never even a guess) also gets t
   const r = await f.run('اضافة تعليق ان العميل وافق على العرض', plan);
   assert.equal(r.status, 'clarify');
   assert.ok(r.choices, 'must offer a real poll instead of failing downstream on a missing taskId');
-  assert.deepEqual(r.choices.options.map(o => o.label), ['لوحة', 'تسليم التقرير']);
+  assert.deepEqual(r.choices.options.map(o => o.label), ['لوحة', 'تسليم التقرير', '✖️ ولا إشي — ألغِ الطلب']);
 });

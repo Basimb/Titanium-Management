@@ -131,7 +131,26 @@ const LEGEND_NO_TASK: Record<string, string> = {
 // hands back to the model on the very next plain message -- so "٣" alone is
 // enough for the model to complete the extension against the RIGHT task,
 // never re-asking which one.
-const LEGEND_MANY_TASK = "عندك أكثر من مهمة تنطبق، أي وحدة بالضبط؟";
+// Basim, 2026-09-19: he tapped 5 (إنهاء مهمة), got "عندك أكثر من مهمة
+// تنطبق، أي وحدة بالضبط؟" and two task titles -- "ليش ما بيوضح انه
+// انهاء مهمه". Nothing in the question or the poll said which of the
+// five actions he was answering for, and picking the wrong one here closes
+// a task that is not finished. The question now names the action, exactly
+// like LEGEND_NO_TASK above already does for the empty case.
+const MANY_TASK_FALLBACK = "عندك أكثر من مهمة تنطبق، أي وحدة بالضبط؟";
+// Keyed on the pending request's own kind, so every path that shows this
+// picker -- the tapped menu, the typed phrase, the model's own fallback --
+// names the same action the person is actually answering for.
+const MANY_TASK_QUESTION: Record<string, string> = {
+  close_request: "إنهاء مهمة — عندك أكثر من مهمة قيد التنفيذ، أي وحدة بدك تنهيها؟",
+  submit: "إنهاء مهمة — عندك أكثر من مهمة قيد التنفيذ، أي وحدة بدك تنهيها؟",
+  task_transfer_request: "تحويل مهمة — عندك أكثر من مهمة، أي وحدة بدك تحوّلها؟",
+  reassign: "تحويل مهمة — عندك أكثر من مهمة، أي وحدة بدك تحوّلها؟",
+  comment: "إضافة ملاحظة — عندك أكثر من مهمة، على أي وحدة بدك تضيفها؟",
+  extension_pick: "تمديد موعد — عندك أكثر من مهمة، أي وحدة بدك تمدد موعدها؟",
+  set_expected: "تمديد موعد — عندك أكثر من مهمة، أي وحدة بدك تمدد موعدها؟",
+};
+const manyTaskQuestion = (kind: string) => MANY_TASK_QUESTION[kind] ?? MANY_TASK_FALLBACK;
 // Basim: typing "انهاء المهمة"/"تحويل المهمة"/"اضافة ملاحظة" (close_request/
 // task_transfer_request/comment, below) without clearly naming which task let
 // the model silently guess one of several eligible tasks on its own -- "على
@@ -197,15 +216,27 @@ function parseExtensionDurationChoice(event: Event): { taskId: string; days: num
   const days = Number(choice.optionId.slice(prefix.length));
   return (EXTENSION_DAY_OPTIONS as readonly number[]).includes(days) ? { taskId, days } : null;
 }
-function taskChoicePoll(token: string, candidates: Task[], now: number): SecretaryChoices {
-  return { id: `TDQ${token}`, title: LEGEND_MANY_TASK, expiresAt: now + CONFIRM_MS,
-    options: candidates.map((task, index) => ({ id: `TDQ${token}_${index}`, label: clean(task.title, 90) })) };
+// Basim, 2026-09-19: "بدي كمان اضيف انه ما بدي اعمل ايشي كتبت
+// الرقم بالغلط مثلا مشان ينهي الامر". Every option on this poll acts on a real
+// task, so a mistyped digit left him with no way out but to pick one of
+// them. The way out is part of the poll now, and it is the last option so
+// it is never the one a thumb lands on by accident.
+// The bridge refuses a poll with more than 12 options and drops it whole
+// (services/whatsapp-bridge/src/polls.mjs), so the way out costs one slot:
+// eleven tasks offered, never twelve.
+const MAX_CHOICE_CANDIDATES = 11;
+const CHOICE_CANCEL = "✖️ ولا إشي — ألغِ الطلب";
+function taskChoicePoll(token: string, candidates: Task[], now: number, title: string): SecretaryChoices {
+  return { id: `TDQ${token}`, title, expiresAt: now + CONFIRM_MS,
+    options: [...candidates.slice(0, MAX_CHOICE_CANDIDATES).map((task, index) => ({ id: `TDQ${token}_${index}`, label: clean(task.title, 90) })),
+      { id: `TDQ${token}_X`, label: CHOICE_CANCEL }] };
 }
 function parseTaskChoicePollChoice(event: Event): { token: string; index: number } | null {
   const choice = event.choice;
   if (!choice || !choice.questionId.startsWith("TDQ")) return null;
   const token = choice.questionId.slice(3);
   if (!/^[0-9A-F]{6}$/.test(token)) return null;
+  if (choice.optionId === `TDQ${token}_X`) return { token, index: -1 };
   const match = new RegExp(`^TDQ${token}_(\\d+)$`).exec(choice.optionId);
   return match ? { token, index: Number(match[1]) } : null;
 }
@@ -1683,7 +1714,8 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
       db.prepare("INSERT INTO secretary_task_choice VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(conversation_key) DO UPDATE SET token=excluded.token,kind=excluded.kind,candidate_ids=excluded.candidate_ids,fields_json=excluded.fields_json,original_text=excluded.original_text,source_message_id=excluded.source_message_id,expires_at=excluded.expires_at")
         .run(key, token, kind, JSON.stringify(candidates.map(t => t.id)), JSON.stringify({}), event.text, event.messageId, now + CONFIRM_MS);
       log(db, fresh, event, "secretary_task_choice", { summary: "عرض اختيار المهمة قبل التنفيذ", kind, candidateIds: candidates.map(t => t.id) }, now);
-      return save(db, event, fresh, { status: "clarify", reply: `${LEGEND_MANY_TASK}\n${candidates.map(t => `• ${clean(t.title, 150)}`).join("\n")}`, choices: taskChoicePoll(token, candidates, now) }, candidates.map(t => "t:" + t.id), now);
+      const question = manyTaskQuestion(kind);
+      return save(db, event, fresh, { status: "clarify", reply: `${question}\n${candidates.slice(0, MAX_CHOICE_CANDIDATES).map(t => `• ${clean(t.title, 150)}`).join("\n")}`, choices: taskChoicePoll(token, candidates, now, question) }, candidates.map(t => "t:" + t.id), now);
     });
   }
   // A tap on taskChoicePoll (see the close_request/task_transfer_request/
@@ -1706,6 +1738,12 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
       // same conversation.
       if (!row || row.token !== taskChoicePick.token || row.expires_at <= now) return save(db, event, fresh, { status: "clarify", reply: "هذا الاختيار ما عاد صالحًا؛ أعد كتابة طلبك." }, [], now);
       db.prepare("DELETE FROM secretary_task_choice WHERE conversation_key=?").run(key);
+      // The way out (CHOICE_CANCEL): nothing has happened yet at this point
+      // -- the row is only a question -- so dropping it IS the whole action.
+      if (taskChoicePick.index === -1) {
+        log(db, fresh, event, "secretary_cancel", { summary: "ألغى الطلب قبل اختيار المهمة" }, now);
+        return save(db, event, fresh, { status: "cancelled", reply: "تمام، ألغيت الطلب. ما صار إشي على أي مهمة." }, [], now);
+      }
       const candidateIds = JSON.parse(row.candidate_ids) as string[];
       const state = stateFor(db, fresh);
       // task_transfer_request's own employee-picker poll (see its case in
@@ -2009,6 +2047,19 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
   if (isSecretaryIdentityQuery(event.text)) return earlyRead({ status: "summary", reply: SECRETARY_IDENTITY });
   if (reviewRequest?.kind === "clarify") return earlyRead({ status: "clarify", reply: reviewRequest.reply });
   const review = reviewRequest?.kind === "review" ? reviewRequest : null;
+  // The same way out, typed instead of tapped: a live task picker (or the
+  // "which duration" / note followup it leads to) is only ever a question,
+  // so "لا"/"إلغاء" ends it and nothing is touched. Without this, the words
+  // fell through to the model while the row stayed open behind them.
+  if (isCancellation(event.text) && !storedIntake
+    && db.prepare("SELECT 1 FROM secretary_task_choice WHERE conversation_key=? AND expires_at>?").get(key, now)) return transaction(db, () => {
+    const freshActor = actorFor(db, event, config); if (!freshActor || JSON.stringify(freshActor) !== JSON.stringify(actor)) return { status: "denied", reply: "" };
+    const duplicate = lookup(db, event, freshActor, stateFor(db, freshActor)); if (duplicate) return duplicate;
+    db.prepare("DELETE FROM secretary_task_choice WHERE conversation_key=?").run(key);
+    db.prepare("DELETE FROM secretary_note_followup WHERE conversation_key=?").run(key);
+    log(db, freshActor, event, "secretary_cancel", { summary: "ألغى الطلب قبل اختيار المهمة" }, now);
+    return save(db, event, freshActor, { status: "cancelled", reply: "تمام، ألغيت الطلب. ما صار إشي على أي مهمة." }, [], now);
+  });
   if (storedIntake && isCancellation(event.text)) return transaction(db, () => {
     const freshActor = actorFor(db, event, config); if (!freshActor || JSON.stringify(freshActor) !== JSON.stringify(actor)) return { status: "denied", reply: "" };
     const duplicate = lookup(db, event, freshActor, stateFor(db, freshActor)); if (duplicate) return duplicate;
@@ -2313,7 +2364,8 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
         db.prepare("INSERT INTO secretary_task_choice VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(conversation_key) DO UPDATE SET token=excluded.token,kind=excluded.kind,candidate_ids=excluded.candidate_ids,fields_json=excluded.fields_json,original_text=excluded.original_text,source_message_id=excluded.source_message_id,expires_at=excluded.expires_at")
           .run(key, token, plan.kind, JSON.stringify(candidates.map(t => t.id)), JSON.stringify(fields), event.text, event.messageId, now + CONFIRM_MS);
         log(db, freshActor, event, "secretary_task_choice", { summary: "عرض اختيار المهمة قبل التنفيذ", kind: plan.kind, candidateIds: candidates.map(t => t.id) }, now);
-        return save(db, event, freshActor, { status: "clarify", reply: `${LEGEND_MANY_TASK}\n${candidates.map(t => `• ${clean(t.title, 150)}`).join("\n")}`, choices: taskChoicePoll(token, candidates, now) }, candidates.map(t => "t:" + t.id), now);
+        const question = manyTaskQuestion(plan.kind);
+          return save(db, event, freshActor, { status: "clarify", reply: `${question}\n${candidates.slice(0, MAX_CHOICE_CANDIDATES).map(t => `• ${clean(t.title, 150)}`).join("\n")}`, choices: taskChoicePoll(token, candidates, now, question) }, candidates.map(t => "t:" + t.id), now);
       }
     }
     if (AGENT_KINDS.has(plan.kind)) {
@@ -2359,7 +2411,8 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
           db.prepare("INSERT INTO secretary_task_choice VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(conversation_key) DO UPDATE SET token=excluded.token,kind=excluded.kind,candidate_ids=excluded.candidate_ids,fields_json=excluded.fields_json,original_text=excluded.original_text,source_message_id=excluded.source_message_id,expires_at=excluded.expires_at")
             .run(key, token, command.action, JSON.stringify(candidates.map(t => t.id)), JSON.stringify(command.action === "comment" ? { comment: command.comment } : {}), event.text, event.messageId, now + CONFIRM_MS);
           log(db, freshActor, event, "secretary_task_choice", { summary: "عرض اختيار المهمة قبل التنفيذ", kind: command.action, candidateIds: candidates.map(t => t.id) }, now);
-          return save(db, event, freshActor, { status: "clarify", reply: `${LEGEND_MANY_TASK}\n${candidates.map(t => `• ${clean(t.title, 150)}`).join("\n")}`, choices: taskChoicePoll(token, candidates, now) }, candidates.map(t => "t:" + t.id), now);
+          const question = manyTaskQuestion(command.action);
+          return save(db, event, freshActor, { status: "clarify", reply: `${question}\n${candidates.slice(0, MAX_CHOICE_CANDIDATES).map(t => `• ${clean(t.title, 150)}`).join("\n")}`, choices: taskChoicePoll(token, candidates, now, question) }, candidates.map(t => "t:" + t.id), now);
         } else if (typeof command.taskId !== "string") {
           return save(db, event, freshActor, { status: "clarify", reply: LEGEND_NO_TASK[command.action === "comment" ? "LGDNOTE" : "LGDFINISH"] }, [], now);
         }
@@ -2426,7 +2479,8 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
         db.prepare("INSERT INTO secretary_task_choice VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(conversation_key) DO UPDATE SET token=excluded.token,kind=excluded.kind,candidate_ids=excluded.candidate_ids,fields_json=excluded.fields_json,original_text=excluded.original_text,source_message_id=excluded.source_message_id,expires_at=excluded.expires_at")
           .run(key, token, kind, JSON.stringify(candidates.map(t => t.id)), JSON.stringify({}), event.text, event.messageId, now + CONFIRM_MS);
         log(db, freshActor, event, "secretary_task_choice", { summary: "عرض اختيار المهمة قبل التنفيذ (تخمين احتياطي)", kind, candidateIds: candidates.map(t => t.id) }, now);
-        return save(db, event, freshActor, { status: "clarify", reply: `${LEGEND_MANY_TASK}\n${candidates.map(t => `• ${clean(t.title, 150)}`).join("\n")}`, choices: taskChoicePoll(token, candidates, now) }, candidates.map(t => "t:" + t.id), now);
+        const question = manyTaskQuestion(kind);
+          return save(db, event, freshActor, { status: "clarify", reply: `${question}\n${candidates.slice(0, MAX_CHOICE_CANDIDATES).map(t => `• ${clean(t.title, 150)}`).join("\n")}`, choices: taskChoicePoll(token, candidates, now, question) }, candidates.map(t => "t:" + t.id), now);
       }
     }
     if (plan.kind === "chat" || plan.kind === "clarify" || plan.kind === "search") {

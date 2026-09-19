@@ -91,7 +91,7 @@ test('tapping LGDEXTEND with two eligible tasks offers the same real numbered po
   assert.match(r.reply, /أكثر من مهمة/);
   assert.ok(r.choices, 'must offer a real tappable poll, not a free-text bullet list');
   assert.equal(r.choices.id.slice(0, 3), 'TDQ');
-  assert.deepEqual(r.choices.options.map(o => o.label), ['لوحة', 'تصميم']);
+  assert.deepEqual(r.choices.options.map(o => o.label), ['لوحة', 'تصميم', '✖️ ولا إشي — ألغِ الطلب']);
 });
 
 test('tapping the LGDEXTEND disambiguation poll names the tapped task and asks for the new date, carrying its id as taskId for the next plain message', async t => {
@@ -206,7 +206,9 @@ test('Basim: a digit with two or more of his own eligible tasks opens a real tap
   const result = await handleSecretaryEvent(f.db, f.event({ text: '2', senderNumber: '12025550103' }), f.config, { infer: async () => { throw Error('must not invoke the model -- a real poll must be offered instead'); }, now: () => f.now });
   assert.equal(result.status, 'clarify');
   assert.ok(result.choices, 'a real tappable poll must be attached, not just text');
-  assert.equal(result.choices.options.length, 2, 'both of his own eligible tasks must be offered as tappable options');
+  assert.deepEqual(result.choices.options.map(o => o.label).slice(0, 2), ['لوحة باسم', 'تصميم باسم'],
+    'both of his own eligible tasks must be offered as tappable options');
+  assert.equal(result.choices.options.length, 3, 'plus the way out, for a digit pressed by mistake');
 });
 
 test('the ordinal task-picker still never fires for Basim -- exempting him from the digit-menu gate reintroduces no old ambiguity', async t => {
