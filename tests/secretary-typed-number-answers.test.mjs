@@ -1,0 +1,107 @@
+// Basim, 2026-09-20, reporting for خالد: "ليش خالد ما عنده نظام الارقام
+// فعال ممكن تتاكد انه موجود للكل؟". It was active -- that was the problem.
+// The assistant printed six numbered tasks and asked which one he wanted to
+// finish; he answered "2", and the number was resolved against a DIFFERENT
+// list (every task of his, in the standard order) and read as "assign that
+// one to me", so he got "المهمة معيّنة لك؛ قل «استلم المهمة»" back, twice,
+// and nothing closed. A number typed under a question answers THAT question,
+// from THAT list.
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { DatabaseSync } from 'node:sqlite';
+import { handleSecretaryEvent, migrateSecretary } from '../lib/secretary-service.ts';
+import { emptySecretaryIntent } from '../lib/secretary-intent.ts';
+
+const A = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+const B = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+
+function fixture(t) {
+  const db = new DatabaseSync(':memory:'); t.after(() => db.close());
+  db.exec(`PRAGMA foreign_keys=ON;
+    CREATE TABLE users(id TEXT PRIMARY KEY,name TEXT UNIQUE,role TEXT,active INTEGER,pin_hash TEXT,created_at INTEGER,updated_at INTEGER);
+    CREATE TABLE tasks(id TEXT PRIMARY KEY,title TEXT,details TEXT,priority TEXT,status TEXT,owner TEXT,suggested_owner TEXT,started_at INTEGER,due_date TEXT,completed_at INTEGER,rejection_reason TEXT,created_at INTEGER,updated_at INTEGER,archived_at INTEGER,archived_by TEXT);
+    CREATE TABLE comments(id INTEGER PRIMARY KEY,task_id TEXT REFERENCES tasks(id),author TEXT,body TEXT,created_at INTEGER);
+    CREATE TABLE attachments(id TEXT PRIMARY KEY,task_id TEXT REFERENCES tasks(id),file_name TEXT,content_type TEXT,size INTEGER,object_key TEXT,uploaded_by TEXT,created_at INTEGER);
+    CREATE TABLE audit_logs(id INTEGER PRIMARY KEY,actor_user_id TEXT,actor_name TEXT,action TEXT,entity_type TEXT,entity_id TEXT,details TEXT,created_at INTEGER);
+    INSERT INTO users VALUES('basem','باسم','admin',1,NULL,1,1),('khaled','خالد','member',1,NULL,1,1);
+    INSERT INTO tasks (id,title,details,priority,status,owner,suggested_owner,started_at,created_at,updated_at) VALUES
+      ('${A}','معالجة فتحات غرف المنامة','','red','progress','خالد','خالد',1,1,1),
+      ('${B}','الديكور واللوحة وتعديل كونتر الاستقبال','','yellow','progress','خالد','خالد',1,2,2);`);
+  migrateSecretary(db);
+  const config = { enabled: true, sharedKey: 'ab'.repeat(32), contacts: [{ userId: 'basem', number: '12025550103' }, { userId: 'khaled', number: '12025550101' }], allowedGroupIds: ['12345@g.us'] };
+  let count = 0; const now = 1788580000000;
+  const say = (text, infer, sender = '12025550101') => handleSecretaryEvent(db,
+    { messageId: `E-${++count}`, senderNumber: sender, groupId: null, text, receivedAt: now, responseMessageId: `R-${count}` },
+    config, { infer: infer || (async () => { assert.fail('this turn must resolve in code, not by asking the model'); }), now: () => now });
+  const tap = (questionId, optionId, sender = '12025550101') => handleSecretaryEvent(db,
+    { messageId: `E-${++count}`, senderNumber: sender, groupId: null, text: '', receivedAt: now, responseMessageId: `R-${count}`, choice: { questionId, optionId } },
+    config, { infer: async () => { assert.fail('a tap resolves in code'); }, now: () => now });
+  return { db, say, tap };
+}
+const status = (db, id) => db.prepare('SELECT status FROM tasks WHERE id=?').get(id).status;
+const rows = db => db.prepare('SELECT COUNT(*) AS n FROM secretary_task_choice').get().n;
+
+// The picker arrives by typing the close command with two tasks in progress.
+async function askWhichOne(f) {
+  const asked = await f.say('انهاء المهمة');
+  assert.equal(asked.status, 'clarify');
+  assert.ok(asked.choices, 'a numbered picker is offered');
+  assert.equal(rows(f.db), 1, 'and it is recorded as the live question');
+  return asked;
+}
+
+test('a number typed under the picker answers the picker, not the ownership list', async t => {
+  const f = fixture(t);
+  const asked = await askWhichOne(f);
+  const second = asked.choices.options[1].label;
+  const reply = await f.say('2');
+  // The old behaviour: an ownership request on some other task.
+  assert.doesNotMatch(reply.reply, /معيّنة لك/, 'never the ownership answer to a question about finishing');
+  assert.match(reply.reply, new RegExp(second.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').slice(0, 20)),
+    'it acts on the second task OF THAT LIST');
+  assert.equal(rows(f.db), 0, 'the question is answered and gone');
+});
+
+test('a number outside the list says so and leaves the question standing', async t => {
+  const f = fixture(t);
+  await askWhichOne(f);
+  const reply = await f.say('7');
+  assert.match(reply.reply, /الرقم مش من القائمة/);
+  assert.match(reply.reply, /1/);
+  assert.equal(rows(f.db), 1, 'nothing is consumed, so he can still answer');
+  assert.equal(status(f.db, A), 'progress');
+  assert.equal(status(f.db, B), 'progress');
+});
+
+test('typing the number and tapping the option do the same thing', async t => {
+  const typed = fixture(t);
+  const askedTyped = await askWhichOne(typed);
+  const byTyping = await typed.say('1');
+  const tapped = fixture(t);
+  const askedTapped = await askWhichOne(tapped);
+  const byTapping = await tapped.tap(askedTapped.choices.id, askedTapped.choices.options[0].id);
+  assert.equal(byTyping.reply, byTapping.reply);
+  assert.equal(askedTyped.choices.options[0].label, askedTapped.choices.options[0].label);
+});
+
+test('with no picker waiting, a number keeps its old meaning', async t => {
+  const f = fixture(t);
+  assert.equal(rows(f.db), 0);
+  // No live question: the bare ordinal picker answers, as it always has --
+  // both of these tasks are already his, so it says exactly that.
+  const reply = await f.say('1', async () => emptySecretaryIntent('clarify', 'أي مهمة؟'));
+  assert.doesNotMatch(reply.reply, /الرقم مش من القائمة/);
+});
+
+test('the picker also wins over Basim\'s five-command menu', async t => {
+  const f = fixture(t);
+  f.db.exec(`INSERT INTO tasks (id,title,details,priority,status,owner,suggested_owner,started_at,created_at,updated_at) VALUES
+    ('c1','ترخيص دابوق','','red','progress','باسم','باسم',1,3,3),
+    ('c2','عقد النفايات','','red','progress','باسم','باسم',1,4,4)`);
+  const asked = await f.say('انهاء المهمة', undefined, '12025550103');
+  assert.ok(asked.choices, 'Basim gets the same picker');
+  // "2" would otherwise be rewritten to the menu's second command (a note).
+  const reply = await f.say('2', undefined, '12025550103');
+  assert.doesNotMatch(reply.reply, /شو الملاحظة|أضيف ملاحظة/, 'the menu must not hijack the answer');
+  assert.equal(rows(f.db), 0);
+});

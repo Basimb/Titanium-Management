@@ -230,6 +230,16 @@ function taskChoicePoll(token: string, candidates: Task[], now: number, title: s
     options: [...candidates.slice(0, MAX_CHOICE_CANDIDATES).map((task, index) => ({ id: `TDQ${token}_${index}`, label: clean(task.title, 90) })),
       { id: `TDQ${token}_X`, label: CHOICE_CANCEL }] };
 }
+// A message that is nothing but a number, in any of the three digit sets a
+// phone keyboard produces. Deliberately strict: "2" is an answer, "2 tasks"
+// is not.
+function bareDigit(text: string): number | null {
+  const value = String(text ?? "").normalize("NFKC")
+    .replace(/[\u0660-\u0669]/g, d => String(d.charCodeAt(0) - 0x660))
+    .replace(/[\u06f0-\u06f9]/g, d => String(d.charCodeAt(0) - 0x6f0))
+    .replace(/[\s.!\u061f?\u060c,]+$/u, "").trim();
+  return /^[0-9]{1,3}$/.test(value) ? Number(value) : null;
+}
 function parseTaskChoicePollChoice(event: Event): { token: string; index: number } | null {
   const choice = event.choice;
   if (!choice || !choice.questionId.startsWith("TDQ")) return null;
@@ -370,7 +380,14 @@ function resolveTaskCommandsLegendChoice(db: DatabaseSync, event: Event, config:
   const pendingExtensionAnswer = digitOptionId !== null && digitActor !== null
     ? db.prepare("SELECT 1 FROM secretary_note_followup WHERE conversation_key=? AND action='extension' AND expires_at>?").get(conversation(event, digitActor), now)
     : null;
-  const digitIsSafe = digitOptionId !== null && digitActor !== null && !pendingExtensionAnswer
+  // Basim, 2026-09-20, about Khalid: the assistant had just printed a numbered
+  // list and asked which one, and his "2" was read against another list -- see the branch below
+  // for the whole story. Same shape as pendingExtensionAnswer just above: while
+  // a picker is waiting, a digit belongs to IT.
+  const pendingTaskChoice = digitOptionId !== null && digitActor !== null
+    ? db.prepare("SELECT 1 FROM secretary_task_choice WHERE conversation_key=? AND expires_at>?").get(conversation(event, digitActor), now)
+    : null;
+  const digitIsSafe = digitOptionId !== null && digitActor !== null && !pendingExtensionAnswer && !pendingTaskChoice
     && (digitActor.id === "basem" || digitActor.role === "admin"
       ? true
       : ownershipCandidates(stateFor(db, digitActor), now).length === 0);
@@ -1740,6 +1757,34 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
   // already typed (a note's text, a transfer's target owner, ...), exactly
   // as if that one task had been the only candidate all along -- same trust
   // level as every other direct poll resolution above.
+  // Basim, 2026-09-20: "\u0644\u064a\u0634 \u062e\u0627\u0644\u062f \u0645\u0627 \u0639\u0646\u062f\u0647 \u0646\u0638\u0627\u0645 \u0627\u0644\u0627\u0631\u0642\u0627\u0645 \u0641\u0639\u0627\u0644". It was: that was the
+  // problem. The assistant printed six numbered tasks and asked which one he
+  // meant; he answered "2", and the number was resolved against a DIFFERENT
+  // list -- every task of his, in the standard order -- and read as "assign
+  // that one to me", so he got "\u0627\u0644\u0645\u0647\u0645\u0629 \u0645\u0639\u064a\u0651\u0646\u0629 \u0644\u0643" instead of the task being
+  // closed. A number typed under a question answers THAT question, from THAT
+  // list: it is turned into the identical tap here, so everything below --
+  // the token check, the expiry, the way out, the per-kind handling -- is the
+  // same code path either way. With no picker waiting, a digit keeps its old
+  // meaning (the ordinal task picker, or Basim's five-command menu).
+  const pickerRow = !event.choice && event.groupId === null && !event.replyToMessageId && event.inputKind !== "voice"
+    ? db.prepare("SELECT token,candidate_ids FROM secretary_task_choice WHERE conversation_key=? AND expires_at>?").get(key, now) as { token: string; candidate_ids: string } | undefined
+    : undefined;
+  const typedNumber = pickerRow ? bareDigit(event.text) : null;
+  if (pickerRow && typedNumber !== null) {
+    const offered = (JSON.parse(pickerRow.candidate_ids) as string[]).length;
+    // Out of range: say so and leave the question standing, rather than
+    // silently acting on some other task.
+    if (typedNumber < 1 || typedNumber > offered) {
+      return transaction(db, () => {
+        const fresh = actorFor(db, event, config);
+        if (!config.enabled || !fresh || JSON.stringify(fresh) !== JSON.stringify(actor)) return { status: "denied", reply: "" };
+        const duplicate = lookup(db, event, fresh, stateFor(db, fresh)); if (duplicate) return duplicate;
+        return save(db, event, fresh, { status: "clarify", reply: `\u0627\u0644\u0631\u0642\u0645 \u0645\u0634 \u0645\u0646 \u0627\u0644\u0642\u0627\u0626\u0645\u0629. \u0627\u062e\u062a\u0627\u0631 \u0645\u0646 1 \u0644\u0640${offered}\u060c \u0623\u0648 \u0627\u0643\u062a\u0628 \u00ab\u0644\u0627\u00bb \u0644\u0625\u0644\u063a\u0627\u0621 \u0627\u0644\u0637\u0644\u0628.` }, [], now);
+      });
+    }
+    event = { ...event, choice: { questionId: `TDQ${pickerRow.token}`, optionId: `TDQ${pickerRow.token}_${typedNumber - 1}` } };
+  }
   const taskChoicePick = parseTaskChoicePollChoice(event);
   if (taskChoicePick && actor.active === 1 && event.groupId === null && !event.replyToMessageId) {
     return transaction(db, () => {
