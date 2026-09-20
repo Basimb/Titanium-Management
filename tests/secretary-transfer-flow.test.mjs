@@ -123,7 +123,7 @@ test('tapping the deterministic transfer poll (two eligible tasks) asks for the 
   const first = await handleSecretaryEvent(f.db, f.event({ text: 'تحويل المهمة' }), f.config, { infer: async () => { throw new Error('a bare typed legend phrase must resolve deterministically, never ask the model'); }, now: () => f.now });
   assert.equal(first.status, 'clarify');
   assert.ok(first.choices, 'must offer a real tappable poll of the two eligible tasks');
-  const reportOption = first.choices.options.find(o => o.label === 'تسليم التقرير');
+  const reportOption = first.choices.options.find(o => o.label.endsWith('تسليم التقرير'));
   const tapped = await f.tap(first.choices.id, reportOption.id);
   assert.equal(tapped.status, 'clarify');
   assert.match(tapped.reply, /سبب تحويل/);
@@ -135,7 +135,7 @@ test('tapping the deterministic transfer poll (two eligible tasks) asks for the 
 test('the very next plain message after that completes the transfer deterministically -- it never reopens the "which task?" poll, and the reason reaches the colleague poll and the approval', async t => {
   const f = fixture(t, { secondTask: true });
   const first = await handleSecretaryEvent(f.db, f.event({ text: 'تحويل المهمة' }), f.config, { infer: async () => { throw new Error('must not ask the model'); }, now: () => f.now });
-  const reportOption = first.choices.options.find(o => o.label === 'تسليم التقرير');
+  const reportOption = first.choices.options.find(o => o.label.endsWith('تسليم التقرير'));
   await f.tap(first.choices.id, reportOption.id);
   const answered = await handleSecretaryEvent(f.db, f.event({ text: 'مشغول بمهمة ثانية' }), f.config, { infer: async () => { throw new Error('the follow-up reason must be captured deterministically, never sent back through the model'); }, now: () => f.now });
   assert.equal(answered.status, 'clarify');
@@ -153,7 +153,7 @@ test('the very next plain message after that completes the transfer deterministi
 test('explicitly cancelling instead of supplying the transfer reason drops the pending follow-up cleanly', async t => {
   const f = fixture(t, { secondTask: true });
   const first = await handleSecretaryEvent(f.db, f.event({ text: 'تحويل المهمة' }), f.config, { infer: async () => { throw new Error('must not ask the model'); }, now: () => f.now });
-  const reportOption = first.choices.options.find(o => o.label === 'تسليم التقرير');
+  const reportOption = first.choices.options.find(o => o.label.endsWith('تسليم التقرير'));
   await f.tap(first.choices.id, reportOption.id);
   const cancelled = await handleSecretaryEvent(f.db, f.event({ text: 'الغاء' }), f.config, { infer: async () => { throw new Error('a cancellation must resolve directly, never ask the model'); }, now: () => f.now });
   assert.equal(cancelled.status, 'cancelled');

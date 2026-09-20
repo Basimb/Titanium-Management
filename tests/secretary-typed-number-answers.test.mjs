@@ -53,7 +53,9 @@ async function askWhichOne(f) {
 test('a number typed under the picker answers the picker, not the ownership list', async t => {
   const f = fixture(t);
   const asked = await askWhichOne(f);
-  const second = asked.choices.options[1].label;
+  // The label carries its number in front (it is what makes every option
+  // unique, whatever the titles are); the reply names the task itself.
+  const second = asked.choices.options[1].label.replace(/^\d+\.\s*/, '');
   const reply = await f.say('2');
   // The old behaviour: an ownership request on some other task.
   assert.doesNotMatch(reply.reply, /معيّنة لك/, 'never the ownership answer to a question about finishing');
@@ -123,4 +125,27 @@ test('5 finishes, for an employee, without the model and without an ownership re
   assert.match(asked.reply, /إنهاء مهمة/, 'the digit reaches the finish command, not the ordinal picker');
   assert.doesNotMatch(asked.reply, /معيّنة لك/);
   assert.equal(rows(f.db), 1, 'and it leaves the picker waiting for his number');
+});
+
+// Basim, 2026-09-20: Khalid asked to finish a task, and the question came
+// back as plain text with nothing to tap -- while the same question gave
+// Basim a real poll. Two of Khalid's tasks were named exactly the same
+// ("برمجة كاميرات دابوق", the duplicate), and the bridge refuses a poll whose
+// labels are not unique: a vote is matched by hashing the label, so it
+// dropped the whole poll on the way out. The number in front makes every
+// label unique whatever the titles are.
+test('two tasks with the identical title still produce a valid, tappable poll', async t => {
+  const f = fixture(t);
+  f.db.exec(`INSERT INTO tasks (id,title,details,priority,status,owner,suggested_owner,started_at,created_at,updated_at) VALUES
+    ('d1','برمجة كاميرات دابوق','','red','progress','خالد','خالد',1,3,3),
+    ('d2','برمجة كاميرات دابوق','','red','progress','خالد','خالد',1,4,4)`);
+  const asked = await f.say('انهاء المهمة');
+  const labels = asked.choices.options.map(o => o.label);
+  assert.equal(new Set(labels).size, labels.length, 'every label unique, or WhatsApp drops the poll');
+  assert.equal(labels.filter(l => l.endsWith('برمجة كاميرات دابوق')).length, 2, 'both duplicates are still offered');
+  // And the numbers in the poll match the numbers in the text above it.
+  labels.slice(0, -1).forEach((label, index) => {
+    assert.ok(label.startsWith(`${index + 1}. `), label);
+    assert.match(asked.reply, new RegExp(`${index + 1}\\. `));
+  });
 });

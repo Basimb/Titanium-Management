@@ -227,7 +227,14 @@ function parseExtensionDurationChoice(event: Event): { taskId: string; days: num
 const MAX_CHOICE_CANDIDATES = 11;
 function taskChoicePoll(token: string, candidates: Task[], now: number, title: string): SecretaryChoices {
   return { id: `TDQ${token}`, title, expiresAt: now + CONFIRM_MS,
-    options: [...candidates.slice(0, MAX_CHOICE_CANDIDATES).map((task, index) => ({ id: `TDQ${token}_${index}`, label: clean(task.title, 90) })),
+    // Basim, 2026-09-20: Khalid asked to finish a task and got the question
+    // as plain text with nothing to tap, while the same question gave Basim a
+    // poll. The bridge refuses a poll whose labels are not unique (a vote is
+    // matched by hashing the label -- see normalizePollChoices/acceptVote) and
+    // two of Khalid's tasks were named exactly the same, so the whole poll was
+    // dropped on the way out. The leading number makes every label unique
+    // whatever the titles are, and it is the number he types to answer.
+    options: [...candidates.slice(0, MAX_CHOICE_CANDIDATES).map((task, index) => ({ id: `TDQ${token}_${index}`, label: `${index + 1}. ${clean(task.title, 86)}` })),
       { id: `TDQ${token}_X`, label: CHOICE_CANCEL }] };
 }
 // A message that is nothing but a number, in any of the three digit sets a
@@ -1745,7 +1752,7 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
         .run(key, token, kind, JSON.stringify(candidates.map(t => t.id)), JSON.stringify({}), event.text, event.messageId, now + CONFIRM_MS);
       log(db, fresh, event, "secretary_task_choice", { summary: "عرض اختيار المهمة قبل التنفيذ", kind, candidateIds: candidates.map(t => t.id) }, now);
       const question = manyTaskQuestion(kind);
-      return save(db, event, fresh, { status: "clarify", reply: `${question}\n${candidates.slice(0, MAX_CHOICE_CANDIDATES).map(t => `• ${clean(t.title, 150)}`).join("\n")}`, choices: taskChoicePoll(token, candidates, now, question) }, candidates.map(t => "t:" + t.id), now);
+      return save(db, event, fresh, { status: "clarify", reply: `${question}\n${candidates.slice(0, MAX_CHOICE_CANDIDATES).map((t, index) => `${index + 1}. ${clean(t.title, 150)}`).join("\n")}`, choices: taskChoicePoll(token, candidates, now, question) }, candidates.map(t => "t:" + t.id), now);
     });
   }
   // A tap on taskChoicePoll (see the close_request/task_transfer_request/
@@ -2415,7 +2422,7 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
           .run(key, token, plan.kind, JSON.stringify(candidates.map(t => t.id)), JSON.stringify(fields), event.text, event.messageId, now + CONFIRM_MS);
         log(db, freshActor, event, "secretary_task_choice", { summary: "عرض اختيار المهمة قبل التنفيذ", kind: plan.kind, candidateIds: candidates.map(t => t.id) }, now);
         const question = manyTaskQuestion(plan.kind);
-          return save(db, event, freshActor, { status: "clarify", reply: `${question}\n${candidates.slice(0, MAX_CHOICE_CANDIDATES).map(t => `• ${clean(t.title, 150)}`).join("\n")}`, choices: taskChoicePoll(token, candidates, now, question) }, candidates.map(t => "t:" + t.id), now);
+          return save(db, event, freshActor, { status: "clarify", reply: `${question}\n${candidates.slice(0, MAX_CHOICE_CANDIDATES).map((t, index) => `${index + 1}. ${clean(t.title, 150)}`).join("\n")}`, choices: taskChoicePoll(token, candidates, now, question) }, candidates.map(t => "t:" + t.id), now);
       }
     }
     if (AGENT_KINDS.has(plan.kind)) {
@@ -2462,7 +2469,7 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
             .run(key, token, command.action, JSON.stringify(candidates.map(t => t.id)), JSON.stringify(command.action === "comment" ? { comment: command.comment } : {}), event.text, event.messageId, now + CONFIRM_MS);
           log(db, freshActor, event, "secretary_task_choice", { summary: "عرض اختيار المهمة قبل التنفيذ", kind: command.action, candidateIds: candidates.map(t => t.id) }, now);
           const question = manyTaskQuestion(command.action);
-          return save(db, event, freshActor, { status: "clarify", reply: `${question}\n${candidates.slice(0, MAX_CHOICE_CANDIDATES).map(t => `• ${clean(t.title, 150)}`).join("\n")}`, choices: taskChoicePoll(token, candidates, now, question) }, candidates.map(t => "t:" + t.id), now);
+          return save(db, event, freshActor, { status: "clarify", reply: `${question}\n${candidates.slice(0, MAX_CHOICE_CANDIDATES).map((t, index) => `${index + 1}. ${clean(t.title, 150)}`).join("\n")}`, choices: taskChoicePoll(token, candidates, now, question) }, candidates.map(t => "t:" + t.id), now);
         } else if (typeof command.taskId !== "string") {
           return save(db, event, freshActor, { status: "clarify", reply: LEGEND_NO_TASK[command.action === "comment" ? "LGDNOTE" : "LGDFINISH"] }, [], now);
         }
@@ -2530,7 +2537,7 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
           .run(key, token, kind, JSON.stringify(candidates.map(t => t.id)), JSON.stringify({}), event.text, event.messageId, now + CONFIRM_MS);
         log(db, freshActor, event, "secretary_task_choice", { summary: "عرض اختيار المهمة قبل التنفيذ (تخمين احتياطي)", kind, candidateIds: candidates.map(t => t.id) }, now);
         const question = manyTaskQuestion(kind);
-          return save(db, event, freshActor, { status: "clarify", reply: `${question}\n${candidates.slice(0, MAX_CHOICE_CANDIDATES).map(t => `• ${clean(t.title, 150)}`).join("\n")}`, choices: taskChoicePoll(token, candidates, now, question) }, candidates.map(t => "t:" + t.id), now);
+          return save(db, event, freshActor, { status: "clarify", reply: `${question}\n${candidates.slice(0, MAX_CHOICE_CANDIDATES).map((t, index) => `${index + 1}. ${clean(t.title, 150)}`).join("\n")}`, choices: taskChoicePoll(token, candidates, now, question) }, candidates.map(t => "t:" + t.id), now);
       }
     }
     if (plan.kind === "chat" || plan.kind === "clarify" || plan.kind === "search") {

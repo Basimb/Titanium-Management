@@ -58,7 +58,7 @@ test('a bare "انهاء المهمة" with two eligible tasks stops for a real 
   assert.match(r.reply, /أكثر من مهمة/);
   assert.ok(r.choices, 'must offer a real tappable poll, not a plain-text list');
   assert.equal(r.choices.id.slice(0, 3), 'TDQ');
-  assert.deepEqual(r.choices.options.map(o => o.label), ['لوحة', 'تسليم التقرير', '✖️ ولا إشي — ألغِ الطلب']);
+  assert.deepEqual(r.choices.options.map(o => o.label), ['1. لوحة', '2. تسليم التقرير', '✖️ ولا إشي — ألغِ الطلب']);
   assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM approvals').get().n, 0);
 });
 test('natural variants of "finish" ("خلصت المهمة"/"خلصتها") resolve exactly the same way', async t => {
@@ -132,8 +132,8 @@ test('a bare transfer phrase ("تحويل المهمة"/"مش مسؤوليتي")
   // "open" task merely SUGGESTED to him (OPEN, suggested_owner=خالد), not
   // just his in-progress ones -- same eligibility taskActionPoll already
   // used for a task-bound transfer tap.
-  assert.deepEqual(first.choices.options.map(o => o.label), ['مهمة مقترحة', 'لوحة', 'تسليم التقرير', '✖️ ولا إشي — ألغِ الطلب']);
-  const reportOption = first.choices.options.find(o => o.label === 'تسليم التقرير');
+  assert.deepEqual(first.choices.options.map(o => o.label), ['1. مهمة مقترحة', '2. لوحة', '3. تسليم التقرير', '✖️ ولا إشي — ألغِ الطلب']);
+  const reportOption = first.choices.options.find(o => o.label.endsWith('تسليم التقرير'));
   const tapped = await f.run(tap(first.choices.id, reportOption.id), neverAsk);
   // Basim: a transfer must always carry a reason ("نعرف سبب التحويل"), so a
   // bare tap that never said why is not enough to file anything -- exactly
@@ -164,7 +164,7 @@ test('a bare comment phrase ("اضافة ملاحظة"/"عندي تحديث") wi
   // note directly instead of ever reaching the model again.
   assert.equal(tapped.status, 'clarify');
   assert.match(tapped.reply, /اكتب نص الملاحظة/);
-  const pickedTaskId = picked.label === 'لوحة' ? A : B;
+  const pickedTaskId = picked.label.endsWith('لوحة') ? A : B;
   assert.equal(tapped.taskId, pickedTaskId);
   const done = await f.run({ text: 'تم التواصل مع العميل وبانتظار رده' }, neverAsk);
   assert.equal(done.status, 'applied');

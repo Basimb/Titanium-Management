@@ -91,13 +91,13 @@ test('tapping LGDEXTEND with two eligible tasks offers the same real numbered po
   assert.match(r.reply, /أكثر من مهمة/);
   assert.ok(r.choices, 'must offer a real tappable poll, not a free-text bullet list');
   assert.equal(r.choices.id.slice(0, 3), 'TDQ');
-  assert.deepEqual(r.choices.options.map(o => o.label), ['لوحة', 'تصميم', '✖️ ولا إشي — ألغِ الطلب']);
+  assert.deepEqual(r.choices.options.map(o => o.label), ['1. لوحة', '2. تصميم', '✖️ ولا إشي — ألغِ الطلب']);
 });
 
 test('tapping the LGDEXTEND disambiguation poll names the tapped task and asks for the new date, carrying its id as taskId for the next plain message', async t => {
   const f = fixture(t, { withTasks: true });
   const first = await f.run(undefined, undefined, tap('LGDQ', 'LGDEXTEND'));
-  const designOption = first.choices.options.find(o => o.label === 'تصميم');
+  const designOption = first.choices.options.find(o => o.label.endsWith('تصميم'));
   const tapped = await f.run(undefined, undefined, tap(first.choices.id, designOption.id));
   assert.equal(tapped.status, 'clarify');
   assert.match(tapped.reply, /تصميم/);
@@ -115,7 +115,7 @@ test('tapping the LGDEXTEND disambiguation poll names the tapped task and asks f
 test('a bare digit reply to "how many days" is never hijacked as a main-menu shortcut -- it reaches the model unchanged, focused on the just-picked task', async t => {
   const f = fixture(t, { withTasks: true });
   const first = await f.run(undefined, undefined, tap('LGDQ', 'LGDEXTEND'));
-  const designOption = first.choices.options.find(o => o.label === 'تصميم');
+  const designOption = first.choices.options.find(o => o.label.endsWith('تصميم'));
   const tapped = await f.run(undefined, undefined, tap(first.choices.id, designOption.id));
   assert.equal(tapped.taskId, PROGRESS2);
   let seenText, seenFocus;
@@ -209,7 +209,7 @@ test('Basim: a digit with two or more of his own eligible tasks opens a real tap
   const result = await handleSecretaryEvent(f.db, f.event({ text: '2', senderNumber: '12025550103' }), f.config, { infer: async () => { throw Error('must not invoke the model -- a real poll must be offered instead'); }, now: () => f.now });
   assert.equal(result.status, 'clarify');
   assert.ok(result.choices, 'a real tappable poll must be attached, not just text');
-  assert.deepEqual(result.choices.options.map(o => o.label).slice(0, 2), ['لوحة باسم', 'تصميم باسم'],
+  assert.deepEqual(result.choices.options.map(o => o.label).slice(0, 2), ['1. لوحة باسم', '2. تصميم باسم'],
     'both of his own eligible tasks must be offered as tappable options');
   assert.equal(result.choices.options.length, 3, 'plus the way out, for a digit pressed by mistake');
 });

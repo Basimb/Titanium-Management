@@ -44,13 +44,13 @@ test('a bare-keyword "clarify" the model gave up on ("ضيف ملاحظه", Basi
   const r = await f.run('ضيف ملاحظه', genericClarify('أين تود إضافة الملاحظة بالضبط؟ يمكنني إضافة تعليق على إحدى المهام المدرجة، أي واحد منها تحديداً؟'));
   assert.equal(r.status, 'clarify');
   assert.ok(r.choices, 'must offer a real tappable poll, not the model\'s own plain question');
-  assert.deepEqual(r.choices.options.map(o => o.label), ['لوحة', 'تسليم التقرير', '✖️ ولا إشي — ألغِ الطلب']);
+  assert.deepEqual(r.choices.options.map(o => o.label), ['1. لوحة', '2. تسليم التقرير', '✖️ ولا إشي — ألغِ الطلب']);
 });
 
 test('tapping that fallback poll adds the note to the tapped task once the text is supplied', async t => {
   const f = fixture(t);
   const first = await f.run('ضيف ملاحظه', genericClarify('أي مهمة تقصد؟'));
-  const reportOption = first.choices.options.find(o => o.label === 'تسليم التقرير');
+  const reportOption = first.choices.options.find(o => o.label.endsWith('تسليم التقرير'));
   const tapped = await handleSecretaryEvent(f.db, f.event({ choice: { questionId: first.choices.id, optionId: reportOption.id } }), f.config,
     { infer: async () => { throw new Error('a poll tap must resolve directly, never ask the model'); }, now: () => f.now });
   // No note text was ever typed. This used to hand back executeManagementAction's
@@ -77,7 +77,7 @@ test('tapping that fallback poll adds the note to the tapped task once the text 
 test('explicitly cancelling instead of supplying the note text drops the pending follow-up cleanly', async t => {
   const f = fixture(t);
   const first = await f.run('ضيف ملاحظه', genericClarify('أي مهمة تقصد؟'));
-  const reportOption = first.choices.options.find(o => o.label === 'تسليم التقرير');
+  const reportOption = first.choices.options.find(o => o.label.endsWith('تسليم التقرير'));
   await handleSecretaryEvent(f.db, f.event({ choice: { questionId: first.choices.id, optionId: reportOption.id } }), f.config,
     { infer: async () => { throw new Error('a poll tap must resolve directly, never ask the model'); }, now: () => f.now });
   const cancelled = await handleSecretaryEvent(f.db, f.event({ text: 'الغاء' }), f.config,
@@ -135,5 +135,5 @@ test('a "command" comment with no taskId at all (never even a guess) also gets t
   const r = await f.run('اضافة تعليق ان العميل وافق على العرض', plan);
   assert.equal(r.status, 'clarify');
   assert.ok(r.choices, 'must offer a real poll instead of failing downstream on a missing taskId');
-  assert.deepEqual(r.choices.options.map(o => o.label), ['لوحة', 'تسليم التقرير', '✖️ ولا إشي — ألغِ الطلب']);
+  assert.deepEqual(r.choices.options.map(o => o.label), ['1. لوحة', '2. تسليم التقرير', '✖️ ولا إشي — ألغِ الطلب']);
 });

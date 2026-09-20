@@ -62,7 +62,7 @@ test('close_request ("انهاء المهمة") with two eligible in-progress ta
   assert.match(r.reply, /أكثر من مهمة/);
   assert.ok(r.choices, 'must offer a real tappable poll, not just a plain-text list');
   assert.equal(r.choices.id.slice(0, 3), 'TDQ');
-  assert.deepEqual(r.choices.options.map(o => o.label), ['لوحة', 'تسليم التقرير', '✖️ ولا إشي — ألغِ الطلب']);
+  assert.deepEqual(r.choices.options.map(o => o.label), ['1. لوحة', '2. تسليم التقرير', '✖️ ولا إشي — ألغِ الطلب']);
   // Nothing must have happened yet -- no approval filed, no task touched.
   assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM approvals').get().n, 0);
 });
@@ -117,12 +117,12 @@ test('task_transfer_request ("تحويل المهمة") with several eligible ta
   const r = await f.run(transferRequest(A, 'other'), { text: 'بدي احول المهمة لشادي' });
   assert.equal(r.status, 'clarify');
   assert.ok(r.choices);
-  assert.deepEqual(r.choices.options.map(o => o.label), ['مهمة مقترحة', 'لوحة', 'تسليم التقرير', '✖️ ولا إشي — ألغِ الطلب']);
+  assert.deepEqual(r.choices.options.map(o => o.label), ['1. مهمة مقترحة', '2. لوحة', '3. تسليم التقرير', '✖️ ولا إشي — ألغِ الطلب']);
 });
 test('tapping the transfer disambiguation poll files the transfer request against the tapped task, carrying the suggested new owner through', async t => {
   const f = fixture(t);
   const first = await f.run(transferRequest(A, 'other'), { text: 'بدي احول المهمة لشادي' });
-  const boardOption = first.choices.options.find(o => o.label === 'لوحة');
+  const boardOption = first.choices.options.find(o => o.label.endsWith('لوحة'));
   const tapped = await f.run(undefined, tap(first.choices.id, boardOption.id),
     async () => { throw Error('a disambiguation tap must resolve directly, never ask the model'); });
   assert.equal(tapped.status, 'applied');
@@ -135,7 +135,7 @@ test('a typed "comment"/"اضافة ملاحظة" with two eligible tasks stops 
   const first = await f.run(commentCommand(A, 'التقرير جاهز للمراجعة'), { text: 'اضافة ملاحظة: التقرير جاهز للمراجعة' });
   assert.equal(first.status, 'clarify');
   assert.ok(first.choices);
-  const reportOption = first.choices.options.find(o => o.label === 'تسليم التقرير');
+  const reportOption = first.choices.options.find(o => o.label.endsWith('تسليم التقرير'));
   const tapped = await f.run(undefined, tap(first.choices.id, reportOption.id),
     async () => { throw Error('a disambiguation tap must resolve directly, never ask the model'); });
   assert.equal(tapped.status, 'applied');
@@ -205,7 +205,7 @@ test('with two eligible tasks Basim personally owns, close_request stops for the
   assert.equal(r.status, 'clarify');
   assert.ok(r.choices, 'must offer a real tappable poll for Basim too, not trust the guessed taskId');
   assert.equal(r.choices.id.slice(0, 3), 'TDQ');
-  assert.deepEqual(r.choices.options.map(o => o.label), ['لوحة', 'تسليم التقرير', '✖️ ولا إشي — ألغِ الطلب']);
+  assert.deepEqual(r.choices.options.map(o => o.label), ['1. لوحة', '2. تسليم التقرير', '✖️ ولا إشي — ألغِ الطلب']);
 });
 test('tapping that poll as Basim resolves through close_request\'s own "owner" branch (a confirmation to close_direct/approve), never crashing or misrouting to the employee approval flow', async t => {
   const f = fixture(t, { owner: 'باسم' }); const admin = { senderNumber: '12025550103' };
@@ -241,13 +241,13 @@ test('task_transfer_request from Basim now reaches the same disambiguation poll 
   assert.equal(r.status, 'clarify');
   assert.ok(r.choices, 'must offer a real tappable poll for Basim too, not the old flat refusal');
   assert.equal(r.choices.id.slice(0, 3), 'TDQ');
-  assert.deepEqual(r.choices.options.map(o => o.label), ['لوحة', 'تسليم التقرير', '✖️ ولا إشي — ألغِ الطلب']);
+  assert.deepEqual(r.choices.options.map(o => o.label), ['1. لوحة', '2. تسليم التقرير', '✖️ ولا إشي — ألغِ الطلب']);
   assert.doesNotMatch(r.reply, /تعيد تعيين المهمة مباشرة/);
 });
 test('tapping that poll as Basim carries the transfer through to his own approval poll directly (ownerMessage/choices as the reply), since the usual notify-basem side channel never fires when the actor notifying is basem himself', async t => {
   const f = fixture(t, { owner: 'باسم' }); const admin = { senderNumber: '12025550103' };
   const first = await f.run(transferRequest(A, 'other'), { ...admin, text: 'بدي احول المهمة لشادي' });
-  const reportOption = first.choices.options.find(o => o.label === 'تسليم التقرير');
+  const reportOption = first.choices.options.find(o => o.label.endsWith('تسليم التقرير'));
   const tapped = await f.run(undefined, { ...admin, ...tap(first.choices.id, reportOption.id) },
     async () => { throw Error('a disambiguation tap must resolve directly, never ask the model'); });
   assert.equal(tapped.status, 'applied');

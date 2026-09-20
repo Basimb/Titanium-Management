@@ -44,7 +44,7 @@ test("Basim's note poll offers the team's in-progress tasks, not only his own", 
   f.task("a", "مزاولات الصيادلة", "خالد");
   f.task("b", "السجل التجاري", "شادي");
   const asked = await f.say("اضافة ملاحظة");
-  assert.deepEqual(labels(asked).sort(), ["السجل التجاري", "مزاولات الصيادلة"]);
+  assert.deepEqual(labels(asked), ["1. مزاولات الصيادلة", "2. السجل التجاري"]);
 });
 
 test("a task Basim already commented on TODAY drops out of his note poll, but not an older comment of his", async t => {
@@ -58,7 +58,7 @@ test("a task Basim already commented on TODAY drops out of his note poll, but no
   // Someone ELSE commenting today is not Basim having had his say.
   f.db.prepare("INSERT INTO comments (task_id,author,body,created_at) VALUES(?,?,?,?)").run("a", "خالد", "حكيت مع النقابة", NOW - 3600_000);
   const asked = await f.say("اضافة ملاحظة");
-  assert.deepEqual(labels(asked).sort(), ["ترخيص دابوق", "مزاولات الصيادلة"]);
+  assert.deepEqual(labels(asked), ["1. مزاولات الصيادلة", "2. ترخيص دابوق"]);
 });
 
 test("the same-day rule is for notes only -- an extension still offers every in-progress task", async t => {
@@ -67,7 +67,7 @@ test("the same-day rule is for notes only -- an extension still offers every in-
   f.task("b", "السجل التجاري", "شادي");
   f.db.prepare("INSERT INTO comments (task_id,author,body,created_at) VALUES(?,?,?,?)").run("b", "باسم", "تابعت", NOW - 3600_000);
   const asked = await f.say("تمديد التاريخ");
-  assert.deepEqual(labels(asked).sort(), ["السجل التجاري", "مزاولات الصيادلة"]);
+  assert.deepEqual(labels(asked), ["1. مزاولات الصيادلة", "2. السجل التجاري"]);
 });
 
 test("at most ten, overdue first -- a WhatsApp poll cannot show more", async t => {
@@ -77,7 +77,7 @@ test("at most ten, overdue first -- a WhatsApp poll cannot show more", async t =
   const asked = await f.say("اضافة ملاحظة");
   const shown = labels(asked);
   assert.equal(shown.length, 10);
-  assert.equal(shown[0], "مهمة متأخرة", "the overdue one leads");
+  assert.equal(shown[0], "1. مهمة متأخرة", "the overdue one leads");
 });
 
 test("closing and transferring keep the employee rule even for him", async t => {
