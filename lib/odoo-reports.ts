@@ -145,12 +145,14 @@ function weeklyText(sales: SalesSummary, invoiced: InvoiceSales, shortages: Shor
   lines.push(`متوسط الفاتورة: ${money(average, currencyLabel)}`, `إجمالي عدد الأصناف النشطة: ${activeProducts}`);
   if (shortages.length) {
     lines.push("رح تخلص خلال أسبوع:");
-    for (const item of shortages) {
-      // See the same line in odoo-questions.ts: a combined pack+split item has
-      // no meaningful piece count, so it shows the days and nothing else.
-      lines.push(item.combined
-        ? `• ${clean(item.name)} — باقي ${Math.round(item.daysLeft * 10) / 10} يوم (علب + تجزئة)`
-        : `• ${clean(item.name)} — باقي ${Math.round(item.daysLeft * 10) / 10} يوم (${item.qty} قطعة، ${item.perDay.toFixed(1)}/يوم)`);
+    for (const [index, item] of shortages.entries()) {
+      // Name and measurement on separate lines, for the reason set out beside
+      // shortageLines in odoo-questions.ts: an English name and an Arabic
+      // measurement on one line are laid out by WhatsApp's own bidi rules and
+      // come out unreadable.
+      const days = Math.round(item.daysLeft * 10) / 10;
+      lines.push(`${index + 1}. ${clean(item.name)}`,
+        `باقي ${days} يوم — ${item.combined ? "علب + تجزئة" : `${item.qty} قطعة، ${item.perDay.toFixed(1)}/يوم`}`, "");
     }
   } else lines.push("ما في صنف متحرّك رح يخلص خلال أسبوع.");
   return clean(lines.join("\n"));

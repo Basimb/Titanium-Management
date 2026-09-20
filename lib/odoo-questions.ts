@@ -11,7 +11,7 @@
  * set matches nothing and falls through to the ordinary secretary, which is
  * the honest answer -- never an invented figure.
  */
-import { openOdooSession, formatAmount, type OdooConfig } from "./odoo-client.ts";
+import { openOdooSession, formatAmount, type OdooConfig, type ShortageItem } from "./odoo-client.ts";
 
 export type OdooQuestionKind =
   | "sales_today" | "sales_yesterday" | "sales_week" | "sales_month"
@@ -250,6 +250,22 @@ export async function answerOdooQuestion(match: OdooQuestionMatch, config: OdooA
   return text;
 }
 
+// Basim, 2026-09-21, reading the report on his phone: "هيو انا عربي كيف
+// اقرا هذا". Every product name here is English and every measurement is
+// Arabic, and WhatsApp lays a mixed line out by its own bidi rules -- the
+// dash lands in the middle, the numbers jump, and a long name wraps with the
+// Arabic stranded on the far side. One line each fixes it: the name alone
+// reads left-to-right, the measurement alone reads right-to-left, and the
+// number in front gives him something to point at.
+//
+// A combined item's piece count mixes packs with loose pieces, so it says so
+// instead of printing a count nobody can act on.
+function shortageLines(item: ShortageItem, index: number): string[] {
+  const days = Math.round(item.daysLeft * 10) / 10;
+  const detail = item.combined ? "علب + تجزئة"
+    : `${item.qty} قطعة، ${item.perDay.toFixed(1)}/يوم`;
+  return [`${index + 1}. ${item.name}`, `باقي *${days}* يوم — ${detail}`, ""];
+}
 async function freshAnswer(match: OdooQuestionMatch, config: OdooAnswerConfig, at: number): Promise<string> {
   if (match.kind === "help") return HELP_REPLY;
   const session = await openOdooSession(config.odoo, config.fetcher);
@@ -398,10 +414,6 @@ async function freshAnswer(match: OdooQuestionMatch, config: OdooAnswerConfig, a
   return [
     "📦 *رح تخلص خلال أسبوع*",
     "",
-    // A combined item's piece count mixes packs with loose pieces, so it is
-    // left out rather than printed as a number nobody can act on.
-    ...items.map(item => item.combined
-      ? `• ${item.name} — باقي *${Math.round(item.daysLeft * 10) / 10}* يوم (علب + تجزئة)`
-      : `• ${item.name} — باقي *${Math.round(item.daysLeft * 10) / 10}* يوم (${item.qty} قطعة، ${item.perDay.toFixed(1)}/يوم)`),
+    ...items.flatMap((item, index) => shortageLines(item, index)),
   ].join("\n");
 }

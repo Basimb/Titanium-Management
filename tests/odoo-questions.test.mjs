@@ -141,7 +141,7 @@ test("what is running out is what the shelf runs out of, not what sits under a u
     ],
   });
   const text = await answerOdooQuestion(matchOdooQuestion("شو ناقص من المخزون"), { odoo, fetcher }, AT);
-  assert.match(text, /بانادول — باقي \*0\.2\* يوم \(2 قطعة، 10\.0\/يوم\)/);
+  assert.match(text, /1\. بانادول\nباقي \*0\.2\* يوم — 2 قطعة، 10\.0\/يوم/);
   assert.doesNotMatch(text, /كريم نادر/, "two units that last forty days is not a shortage");
   assert.doesNotMatch(text, /ما بيتحرك/, "stock that never moves is never running out");
   // Only stock that exists is considered; the catalogue is not the shelf.

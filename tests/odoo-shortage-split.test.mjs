@@ -85,3 +85,27 @@ test("a net-refunded product cannot produce negative days", async () => {
   const items = await shortagesOf([[1, "RETURNED", "600555", 11, 2]], { 1: -30 });
   assert.deepEqual(items, [], "negative movement is not consumption");
 });
+
+// Basim, 2026-09-21, reading the alert on his phone: "هيو انا عربي كيف اقرا
+// هذا خليه اوضح". Every product name is English and every measurement is
+// Arabic; on one line WhatsApp's bidi rules put the dash in the middle and
+// throw the numbers around. One line each, numbered so he can point at one.
+test("the name and the measurement never share a line", async () => {
+  const { matchOdooQuestion, answerOdooQuestion, forgetOdooAnswers } = await import("../lib/odoo-questions.ts");
+  forgetOdooAnswers();
+  const reply = await answerOdooQuestion(matchOdooQuestion("شو ناقص من المخزون"),
+    { odoo: config, currencyLabel: "دينار",
+      fetcher: pharmacy([[1, "PANTENE PRO-V OIL REPLACEMENT 275 ML", "600321", 1, 2],
+        [2, "SYRINGE (Pack)", "500111", 1, 1], [3, "SYRINGE (تجزئة)", "500111", 5, 0.1]],
+        { 1: 300, 3: 600 }) }, Date.now());
+  const lines = reply.split("\n");
+  const named = lines.findIndex(line => line.includes("PANTENE"));
+  assert.ok(named > 0, reply);
+  assert.match(lines[named], /^1\. PANTENE/, "the English name stands alone on its line");
+  assert.doesNotMatch(lines[named], /باقي|يوم|قطعة/, "no Arabic beside it");
+  assert.match(lines[named + 1], /^باقي \*[\d.]+\* يوم — 1 قطعة، 5\.0\/يوم$/, "the Arabic measurement stands alone too");
+  // And the merged pack+split says what it is instead of a meaningless count.
+  const split = lines.findIndex(line => line.includes("SYRINGE"));
+  assert.match(lines[split + 1], /علب \+ تجزئة/);
+  assert.doesNotMatch(lines[split + 1], /قطعة/);
+});
