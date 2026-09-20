@@ -49,7 +49,7 @@ test('tapping a task in the picker answers with that task\'s card and its own ac
   assert.match(r.reply, /لوحة/);
   assert.equal(r.choices.id, `TSKQ${PROGRESS}`);
   assert.deepEqual(r.choices.options.map(o => o.id),
-    [`TSK${PROGRESS}FINISH`, `TSK${PROGRESS}NOTE`, `TSK${PROGRESS}TRANSFER`, `TSK${PROGRESS}EDIT`, `TSK${PROGRESS}EXTEND`]);
+    [`TSK${PROGRESS}FINISH`, `TSK${PROGRESS}NOTE`, `TSK${PROGRESS}TRANSFER`, `TSK${PROGRESS}EDIT`, `TSK${PROGRESS}EXTEND`, `TSK${PROGRESS}NONE`]);
   assert.equal(f.modelCalls(), 0, 'a tap must resolve in code, never by asking the model');
 });
 
@@ -57,7 +57,7 @@ test('a picked task that is still unclaimed offers the claim poll', async t => {
   const f = fixture(t);
   const r = await f.run(tap('TPKQ', `TPK${OPEN}`));
   assert.equal(r.taskId, OPEN);
-  assert.deepEqual(r.choices.options.map(o => o.id), [`TSK${OPEN}CLAIM`, `TSK${OPEN}TRANSFER`, `TSK${OPEN}EDIT`]);
+  assert.deepEqual(r.choices.options.map(o => o.id), [`TSK${OPEN}CLAIM`, `TSK${OPEN}TRANSFER`, `TSK${OPEN}EDIT`, `TSK${OPEN}NONE`]);
 });
 
 test('a legacy short task id resolves too -- a stricter id pattern once dropped these silently', async t => {

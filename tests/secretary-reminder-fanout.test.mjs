@@ -43,7 +43,7 @@ test('five unclaimed tasks for one person produce ONE message and ONE poll, not 
   assert.equal(plans[0].entityId, null, 'the dedup key is the person now, never a single task');
   for (const n of [1, 2, 3, 4, 5]) assert.match(plans[0].text, new RegExp(`مهمة ${n}`), `task ${n} still named in the one message`);
   assert.equal(plans[0].choices.id, 'TPKQ');
-  assert.deepEqual(plans[0].choices.options.map(o => o.id), ['TPKt1', 'TPKt2', 'TPKt3', 'TPKt4', 'TPKt5']);
+  assert.deepEqual(plans[0].choices.options.map(o => o.id), ['TPKt1', 'TPKt2', 'TPKt3', 'TPKt4', 'TPKt5', 'TPKX']);
 });
 
 test('the picker poll numbers its labels so two tasks sharing a title stay distinguishable', t => {
@@ -51,7 +51,7 @@ test('the picker poll numbers its labels so two tasks sharing a title stay disti
   db.exec(open('t1', 'تجديد رخصة') + open('t2', 'تجديد رخصة'));
   const plan = planFollowups(db, config, NIGHT).find(p => p.kind === 'unclaimed_task');
   const labels = plan.choices.options.map(o => o.label);
-  assert.deepEqual(labels, ['1. تجديد رخصة', '2. تجديد رخصة']);
+  assert.deepEqual(labels.slice(0, 2), ['1. تجديد رخصة', '2. تجديد رخصة']);
   // The bridge rejects a poll whose labels are not unique (a vote is matched
   // by hashing the label, see normalizePollChoices/acceptVote) -- without the
   // numbering these two would have collided and the whole poll been dropped.
@@ -62,7 +62,7 @@ test('the picker is capped at ten options -- the bridge refuses more than twelve
   const { db, config } = fixture(t);
   db.exec(Array.from({ length: 14 }, (_, i) => open(`t${i}`, `مهمة ${i}`)).join(''));
   const plan = planFollowups(db, config, NIGHT).find(p => p.kind === 'unclaimed_task');
-  assert.equal(plan.choices.options.length, 10);
+  assert.equal(plan.choices.options.length, 11, 'ten tasks plus the way out -- still under the twelve the bridge allows');
 });
 
 test('a single unclaimed task keeps its own task-action poll, not a one-option picker', t => {
@@ -70,7 +70,7 @@ test('a single unclaimed task keeps its own task-action poll, not a one-option p
   db.exec(open('t1', 'مهمة وحيدة'));
   const plan = planFollowups(db, config, NIGHT).find(p => p.kind === 'unclaimed_task');
   assert.equal(plan.choices.id, 'TSKQt1', 'one task needs no picker -- go straight to its actions');
-  assert.deepEqual(plan.choices.options.map(o => o.id), ['TSKt1CLAIM', 'TSKt1TRANSFER', 'TSKt1EDIT']);
+  assert.deepEqual(plan.choices.options.map(o => o.id), ['TSKt1CLAIM', 'TSKt1TRANSFER', 'TSKt1EDIT', 'TSKt1NONE']);
 });
 
 test('reminder polls live a full 24h -- the ceiling the bridge enforces, not the old hour', t => {
@@ -91,7 +91,7 @@ test('several overdue tasks for one person collapse into one nudge with one pick
   const plans = planFollowups(db, config, DAY).filter(plan => plan.kind === 'overdue_task');
   assert.equal(plans.length, 1);
   assert.equal(plans[0].entityId, null);
-  assert.deepEqual(plans[0].choices.options.map(o => o.id), ['TPKo1', 'TPKo2', 'TPKo3']);
+  assert.deepEqual(plans[0].choices.options.map(o => o.id), ['TPKo1', 'TPKo2', 'TPKo3', 'TPKX']);
   for (const title of ['متأخرة أولى', 'متأخرة ثانية', 'متأخرة ثالثة']) assert.match(plans[0].text, new RegExp(title));
 });
 

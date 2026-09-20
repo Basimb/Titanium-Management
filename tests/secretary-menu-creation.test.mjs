@@ -119,3 +119,23 @@ test('a digit pressed by mistake can be taken back, tapped or typed', async t =>
     assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM secretary_task_choice').get().n, 0, back);
   }
 });
+
+// The same way out on the polls that arrive unasked: the reminder's "which
+// task do you want to work on?" picker, and the action poll a tap on it
+// leads to. Basim, seeing the reminder picker without one: "انا طلبت انه
+// يكون فيه خيار ولا ايشي".
+test('the reminder picker and the action poll both carry the way out, and it does nothing', async t => {
+  const f = fixture(t);
+  f.db.exec(`INSERT INTO tasks (id,title,details,priority,status,owner,suggested_owner,created_at,updated_at) VALUES
+    ('t-a','اضافة فرع دابوق على جوجل','','red','progress','باسم','باسم',1,1)`);
+  const out = await f.tap('TPKQ', 'TPKX');
+  assert.equal(out.status, 'cancelled');
+  assert.match(out.reply, /ما عملت إشي/);
+
+  const picked = await f.tap('TPKQ', 'TPKt-a');
+  assert.match(picked.choices.options.at(-1).label, /ولا إشي/, 'the card it opens offers the way out too');
+  const outAgain = await f.tap(picked.choices.id, picked.choices.options.at(-1).id);
+  assert.equal(outAgain.status, 'cancelled');
+  // Nothing moved on the task either time.
+  assert.equal(f.db.prepare("SELECT status FROM tasks WHERE id='t-a'").get().status, 'progress');
+});

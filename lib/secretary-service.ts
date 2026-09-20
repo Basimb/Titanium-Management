@@ -16,7 +16,7 @@ import { enqueueAgentMessage } from "./agent-followups.ts";
 import { safeConversationalReply } from "./secretary-conversation-policy.ts";
 import { secretaryReviewRequest, isSecretaryIdentityQuery, isAddressedToSecretary, SECRETARY_IDENTITY } from "./secretary-review.ts";
 import { migrateSecretaryOutbox, getSecretaryOutboxRecipients, createSecretaryOutboxPreview, confirmSecretaryOutboxPreview, getSecretaryOutboxStatus, secretaryOutboxDeliveryLabel, SecretaryOutboxError } from "./secretary-outbox.ts";
-import { migrateSecretaryChoices, createSecretaryChoices, consumeSecretaryChoice, clearSecretaryChoices, secretaryChoiceOptions, peekSecretaryChoiceField, SecretaryChoiceError, type SecretaryChoices, type SecretaryChoiceField } from "./secretary-choices.ts";
+import { CHOICE_CANCEL, migrateSecretaryChoices, createSecretaryChoices, consumeSecretaryChoice, clearSecretaryChoices, secretaryChoiceOptions, peekSecretaryChoiceField, SecretaryChoiceError, type SecretaryChoices, type SecretaryChoiceField } from "./secretary-choices.ts";
 
 type Task = { id: string; title: string; details: string; status: string; priority: string; owner: string | null; suggestedOwner: string | null; dueDate: string | null; updatedAt: number | null; archivedAt: number | null };
 export type Snapshot = { tasks: Task[]; users: Array<ChatUser>; comments: Array<{ taskId: string; author: string; body: string; createdAt: number }> };
@@ -225,7 +225,6 @@ function parseExtensionDurationChoice(event: Event): { taskId: string; days: num
 // (services/whatsapp-bridge/src/polls.mjs), so the way out costs one slot:
 // eleven tasks offered, never twelve.
 const MAX_CHOICE_CANDIDATES = 11;
-const CHOICE_CANCEL = "✖️ ولا إشي — ألغِ الطلب";
 function taskChoicePoll(token: string, candidates: Task[], now: number, title: string): SecretaryChoices {
   return { id: `TDQ${token}`, title, expiresAt: now + CONFIRM_MS,
     options: [...candidates.slice(0, MAX_CHOICE_CANDIDATES).map((task, index) => ({ id: `TDQ${token}_${index}`, label: clean(task.title, 90) })),
@@ -945,7 +944,7 @@ function resolveTaskCloseDecisionRejectChoice(db: DatabaseSync, event: Event): E
 // dedicated branch in handleSecretaryEvent). NOTE/TRANSFER/EXTEND need
 // content a tap can't carry (a note's body, a colleague's name, a new date),
 // so those are handled below by their own deterministic tap branches instead.
-function parseTaskActionPollChoice(event: Event): { taskId: string; action: "claim" | "submit" | "note" | "transfer" | "extend" | "edit" } | null {
+function parseTaskActionPollChoice(event: Event): { taskId: string; action: "claim" | "submit" | "note" | "transfer" | "extend" | "edit" | "none" } | null {
   const choice = event.choice;
   if (!choice || !choice.questionId.startsWith("TSKQ")) return null;
   const taskId = choice.questionId.slice(4);
@@ -964,7 +963,7 @@ function parseTaskActionPollChoice(event: Event): { taskId: string; action: "cla
   if (!/^[a-zA-Z0-9_-]{1,200}$/.test(taskId)) return null;
   const prefix = `TSK${taskId}`;
   if (!choice.optionId.startsWith(prefix)) return null;
-  const ACTIONS: Record<string, "claim" | "submit" | "note" | "transfer" | "extend" | "edit"> = { CLAIM: "claim", FINISH: "submit", NOTE: "note", TRANSFER: "transfer", EXTEND: "extend", EDIT: "edit" };
+  const ACTIONS: Record<string, "claim" | "submit" | "note" | "transfer" | "extend" | "edit" | "none"> = { CLAIM: "claim", FINISH: "submit", NOTE: "note", TRANSFER: "transfer", EXTEND: "extend", EDIT: "edit", NONE: "none" };
   const action = ACTIONS[choice.optionId.slice(prefix.length)];
   return action ? { taskId, action } : null;
 }
@@ -1036,7 +1035,10 @@ function taskActionPoll(task: { id: string; title: string; status: string; owner
   if (task.status === "progress" && task.owner === actorName) options.push({ id: `${base}FINISH`, label: "✅ خلصت المهمة" }, { id: `${base}NOTE`, label: "📝 أضيف ملاحظة" });
   if (task.status === "open" || task.status === "progress") options.push({ id: `${base}TRANSFER`, label: "🔄 حوّلها لحدا غيري" }, { id: `${base}EDIT`, label: "🔧 غيّر الأولوية" });
   if (task.status === "progress" && task.owner === actorName) options.push({ id: `${base}EXTEND`, label: "🕐 بدي تمديد" });
-  return options.length >= 2 ? { id: `TSKQ${task.id}`, title: "شو بدك تعمل بهالمهمة؟", expiresAt: now + TASK_CLOSE_POLL_LIFETIME_MS, options } : undefined;
+  // The >= 2 gate counts REAL actions only: one applicable action stays a
+  // plain-text nudge, as before, rather than becoming a poll of it and a way out.
+  return options.length >= 2 ? { id: `TSKQ${task.id}`, title: "شو بدك تعمل بهالمهمة؟", expiresAt: now + TASK_CLOSE_POLL_LIFETIME_MS,
+    options: [...options, { id: `${base}NONE`, label: CHOICE_CANCEL }] } : undefined;
 }
 // Same poll, built from a fresh DB row rather than a pre-action snapshot --
 // dispatchManagementNotice's private notice fires right after a
@@ -1568,6 +1570,19 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
   // their own private chat, same as the task-action poll below, and the reply's
   // poll is a TSKQ one, which is the single kind lookup() already lets a
   // non-admin replay.
+  // Tapping the way out on either poll: both only ever OFFER something -- the
+  // reminder picker opens a task card, the action poll acts on one -- so
+  // there is nothing to undo, and saying so plainly ends it.
+  if (event.choice && actor.active === 1 && event.groupId === null && !event.replyToMessageId
+    && (event.choice.questionId === "TPKQ" ? event.choice.optionId === "TPKX"
+      : event.choice.questionId.startsWith("TSKQ") && event.choice.optionId.endsWith("NONE"))) {
+    return transaction(db, () => {
+      const fresh = actorFor(db, event, config);
+      if (!config.enabled || !fresh || JSON.stringify(fresh) !== JSON.stringify(actor)) return { status: "denied", reply: "" };
+      const duplicate = lookup(db, event, fresh, stateFor(db, fresh)); if (duplicate) return duplicate;
+      return save(db, event, fresh, { status: "cancelled", reply: "تمام، ما عملت إشي." }, [], now);
+    });
+  }
   const taskPickerChoice = parseTaskPickerChoice(event);
   if (taskPickerChoice && actor.active === 1 && event.groupId === null && !event.replyToMessageId) {
     return transaction(db, () => {

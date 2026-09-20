@@ -60,13 +60,13 @@ test('an unclaimed task suggested to an employee offers a CLAIM/TRANSFER poll, n
   assert.equal(r.status, 'summary');
   assert.ok(r.choices, 'an unclaimed suggested task must offer a poll');
   assert.equal(r.choices.id, `TSKQ${OPEN}`);
-  assert.deepEqual(r.choices.options.map(o => o.id), [`TSK${OPEN}CLAIM`, `TSK${OPEN}TRANSFER`, `TSK${OPEN}EDIT`]);
+  assert.deepEqual(r.choices.options.map(o => o.id), [`TSK${OPEN}CLAIM`, `TSK${OPEN}TRANSFER`, `TSK${OPEN}EDIT`, `TSK${OPEN}NONE`]);
   assert.equal(r.choices.expiresAt - f.now, 24 * 60 * 60_000, '24h is the ceiling the bridge enforces (MAX_POLL_LIFETIME_MS); a shorter one silently drops late taps');
 });
 test('a task already in progress offers the full FINISH/NOTE/TRANSFER/EDIT/EXTEND poll', async t => {
   const f = fixture(t);
   const r = await f.run(details(PROGRESS), { text: 'شو تفاصيل اللوحة؟' });
-  assert.deepEqual(r.choices.options.map(o => o.id), [`TSK${PROGRESS}FINISH`, `TSK${PROGRESS}NOTE`, `TSK${PROGRESS}TRANSFER`, `TSK${PROGRESS}EDIT`, `TSK${PROGRESS}EXTEND`]);
+  assert.deepEqual(r.choices.options.map(o => o.id), [`TSK${PROGRESS}FINISH`, `TSK${PROGRESS}NOTE`, `TSK${PROGRESS}TRANSFER`, `TSK${PROGRESS}EDIT`, `TSK${PROGRESS}EXTEND`, `TSK${PROGRESS}NONE`]);
 });
 test('a task view from the group, or of someone else\'s task, never carries a poll', async t => {
   const f = fixture(t);
@@ -393,7 +393,7 @@ test('a task newly reassigned through chat privately notifies the new owner with
   assert.ok(toNewOwner, 'the newly assigned owner must get a tappable poll, not just plain text');
   const choices = JSON.parse(toNewOwner.choicesJson);
   assert.equal(choices.id, `TSKQ${PROGRESS}`);
-  assert.deepEqual(choices.options.map(o => o.id), [`TSK${PROGRESS}CLAIM`, `TSK${PROGRESS}TRANSFER`, `TSK${PROGRESS}EDIT`], 'the task is open again after reassignment, so CLAIM/TRANSFER/EDIT apply, not FINISH/NOTE/EXTEND');
+  assert.deepEqual(choices.options.map(o => o.id), [`TSK${PROGRESS}CLAIM`, `TSK${PROGRESS}TRANSFER`, `TSK${PROGRESS}EDIT`, `TSK${PROGRESS}NONE`], 'the task is open again after reassignment, so CLAIM/TRANSFER/EDIT apply, not FINISH/NOTE/EXTEND');
   // Basim hit this for real: the standalone command legend used to follow
   // this task poll as a SECOND poll to the same person a millisecond later,
   // which silently superseded (broke the tap-ability of) the CLAIM poll
@@ -423,7 +423,7 @@ test('nudge resends the current owner/suggested-owner their exact claim poll, ri
   assert.ok(poll, 'خالد must get a real tappable poll, not just a plain-text nudge');
   const choices = JSON.parse(poll.choicesJson);
   assert.equal(choices.id, `TSKQ${OPEN}`);
-  assert.deepEqual(choices.options.map(o => o.id), [`TSK${OPEN}CLAIM`, `TSK${OPEN}TRANSFER`, `TSK${OPEN}EDIT`], 'the exact same poll the task is already offering, not a new/different one');
+  assert.deepEqual(choices.options.map(o => o.id), [`TSK${OPEN}CLAIM`, `TSK${OPEN}TRANSFER`, `TSK${OPEN}EDIT`, `TSK${OPEN}NONE`], 'the exact same poll the task is already offering, not a new/different one');
   const legend = toMemberRows.find(row => /أوامر المهام السريعة/.test(row.text));
   assert.ok(legend, 'خالد still gets the plain-text command legend');
   assert.equal(legend.choicesJson, null, 'the legend must never carry its own poll here -- it would silently invalidate the CLAIM/TRANSFER/EDIT poll just sent to the same person');
@@ -433,7 +433,7 @@ test('nudge on a task already in progress resends the FINISH/NOTE/TRANSFER/EDIT/
   const r = await f.run(nudge(PROGRESS), { ...admin, text: 'ذكّر خالد باللوحة' });
   assert.equal(r.status, 'applied');
   const poll = f.db.prepare("SELECT choices_json AS choicesJson FROM agent_outbox WHERE to_user='member' AND choices_json IS NOT NULL ORDER BY id DESC LIMIT 1").get();
-  assert.deepEqual(JSON.parse(poll.choicesJson).options.map(o => o.id), [`TSK${PROGRESS}FINISH`, `TSK${PROGRESS}NOTE`, `TSK${PROGRESS}TRANSFER`, `TSK${PROGRESS}EDIT`, `TSK${PROGRESS}EXTEND`]);
+  assert.deepEqual(JSON.parse(poll.choicesJson).options.map(o => o.id), [`TSK${PROGRESS}FINISH`, `TSK${PROGRESS}NOTE`, `TSK${PROGRESS}TRANSFER`, `TSK${PROGRESS}EDIT`, `TSK${PROGRESS}EXTEND`, `TSK${PROGRESS}NONE`]);
 });
 // Basim's report: "تجربة نسخة سكرتير مطور بانتظار اعتماد باسم مع اني اقفلتها"
 // -- a task pending HIS OWN close decision has no "current owner" to nudge;

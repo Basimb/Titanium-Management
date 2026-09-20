@@ -10,7 +10,7 @@ import type { DatabaseSync } from "node:sqlite";
 import { formatPendingList, pendingApprovalsPoll, staleApprovals, markNudged } from "./approvals.ts";
 import { getManagementSnapshot, migrateManagementActions, type ManagementActor, type ManagementTask } from "./management-actions.ts";
 import { GROUP_EVENT_ALLOWLIST, groupBudgetRemaining } from "./team-chat-policy.ts";
-import type { SecretaryChoices } from "./secretary-choices.ts";
+import { CHOICE_CANCEL, type SecretaryChoices } from "./secretary-choices.ts";
 
 export type FollowupConfig = { enabled: boolean; contacts: Array<{ userId: string; number: string }>; groupId?: string | null; workStartHour?: number; workEndHour?: number; timezoneOffsetMinutes?: number; publicUrl?: string };
 type Planned = { id: string; kind: "overdue_task" | "silent_task" | "stale_approval" | "daily_digest" | "auto_reminder_morning" | "auto_reminder_evening" | "unclaimed_task" | "stale_unclaimed" | "unowned_task"; targetUser: string; entityId: string | null; to: string; text: string; choices?: SecretaryChoices };
@@ -109,7 +109,11 @@ function autoReminderPoll(tasks: ManagementTask[], actorName: string, now: numbe
   if (task.status === "progress" && task.owner === actorName) options.push({ id: `${base}FINISH`, label: "\u2705 \u062e\u0644\u0635\u062a \u0627\u0644\u0645\u0647\u0645\u0629" }, { id: `${base}NOTE`, label: "\ud83d\udcdd \u0623\u0636\u064a\u0641 \u0645\u0644\u0627\u062d\u0638\u0629" });
   if (task.status === "open" || task.status === "progress") options.push({ id: `${base}TRANSFER`, label: "\ud83d\udd04 \u062d\u0648\u0651\u0644\u0647\u0627 \u0644\u062d\u062f\u0627 \u063a\u064a\u0631\u064a" }, { id: `${base}EDIT`, label: "\ud83d\udd27 \u063a\u064a\u0651\u0631 \u0627\u0644\u0623\u0648\u0644\u0648\u064a\u0629" });
   if (task.status === "progress" && task.owner === actorName) options.push({ id: `${base}EXTEND`, label: "\ud83d\udd50 \u0628\u062f\u064a \u062a\u0645\u062f\u064a\u062f" });
-  return options.length >= 2 ? { id: `TSKQ${task.id}`, title: "\u0634\u0648 \u0628\u062f\u0643 \u062a\u0639\u0645\u0644 \u0628\u0647\u0627\u0644\u0645\u0647\u0645\u0629\u061f", expiresAt: now + REMINDER_POLL_LIFETIME_MS, options } : undefined;
+  // Same way out as its twin in secretary-service.ts, and for the same
+  // reason -- this one arrives unasked. The >= 2 gate still counts real
+  // actions only, so a lone action stays plain text.
+  return options.length >= 2 ? { id: `TSKQ${task.id}`, title: "\u0634\u0648 \u0628\u062f\u0643 \u062a\u0639\u0645\u0644 \u0628\u0647\u0627\u0644\u0645\u0647\u0645\u0629\u061f", expiresAt: now + REMINDER_POLL_LIFETIME_MS,
+    options: [...options, { id: `${base}NONE`, label: CHOICE_CANCEL }] } : undefined;
 }
 
 // Basim (2026-09-12): "قلتلك تيجي تصويت مش هيك نصوص" -- an unowned task (no
@@ -149,7 +153,12 @@ function taskPickerPoll(tasks: ManagementTask[], now: number): SecretaryChoices 
   // and matches the numbering in the message text above the poll.
   const options = tasks.slice(0, TASK_PICKER_LIMIT)
     .map((task, index) => ({ id: `TPK${task.id}`, label: `${index + 1}. ${clean(task.title).slice(0, 86)}` }));
-  return { id: "TPKQ", title: "أي مهمة بدك تشتغل عليها؟", expiresAt: now + REMINDER_POLL_LIFETIME_MS, options };
+  // This nudge arrives unasked, so the way out matters more here than
+  // anywhere: opening a task card is not what someone glancing at a
+  // reminder always wants. Ten tasks plus it stays inside WhatsApp's
+  // twelve-option limit.
+  return { id: "TPKQ", title: "أي مهمة بدك تشتغل عليها؟", expiresAt: now + REMINDER_POLL_LIFETIME_MS,
+    options: [...options, { id: "TPKX", label: CHOICE_CANCEL }] };
 }
 // The numbered list that sits above taskPickerPoll -- same numbering, so "3"
 // in the text and the third poll option are the same task.

@@ -1,5 +1,11 @@
 import { randomBytes } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
+// Basim, 2026-09-19: "بدي كمان اضيف انه ما بدي اعمل ايشي كتبت
+// الرقم بالغلط مثلا مشان ينهي الامر". Every poll that acts on a real task carries
+// this as its LAST option, so a mistyped digit or a mis-tapped bubble has a
+// way out, and no thumb lands on it by accident. One constant, because a
+// WhatsApp vote is matched by its label text (see acceptVote in the bridge).
+export const CHOICE_CANCEL = "✖️ ولا إشي — ألغِ الطلب";
 
 export type SecretaryChoices = { id: string; title: string; options: Array<{ id: string; label: string }>; expiresAt: number };
 export type SecretaryChoiceField = "ownerId" | "priority" | "dueDate" | "approvalDecision";

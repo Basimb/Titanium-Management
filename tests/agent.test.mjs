@@ -521,7 +521,7 @@ test("follow-ups: overdue owner nudge once per day, stale approval to owner, dig
   assert.equal(overdueNudge.to, "962770000000@s.whatsapp.net");
   assert.doesNotMatch(overdueNudge.text, /https?:\/\//, "Basim: never put the dashboard link in an employee-facing task message");
   assert.ok(overdueNudge.choices, "an overdue nudge must offer tappable options too");
-  assert.deepEqual(overdueNudge.choices.options.map(o => o.id), ["TSKt1FINISH", "TSKt1NOTE", "TSKt1TRANSFER", "TSKt1EDIT", "TSKt1EXTEND"]);
+  assert.deepEqual(overdueNudge.choices.options.map(o => o.id), ["TSKt1FINISH", "TSKt1NOTE", "TSKt1TRANSFER", "TSKt1EDIT", "TSKt1EXTEND", "TSKt1NONE"]);
   // unowned_task escalates to Basim around the clock (Basim's own request),
   // unlike overdue_task/daily_digest which still stop outside working hours.
   const outsideHours = planFollowups(db, { ...config }, Date.UTC(2026, 8, 10, 20, 0));
@@ -565,7 +565,7 @@ test("unclaimed task: hourly nudge to its suggested owner during work hours, sto
   // nudge must offer a tappable claim/transfer poll instead of asking the
   // employee to type anything.
   assert.ok(plans[0].choices, "an unclaimed task's nudge must offer tappable options, not ask the employee to type");
-  assert.deepEqual(plans[0].choices.options.map(o => o.id), ["TSKt6CLAIM", "TSKt6TRANSFER", "TSKt6EDIT"]);
+  assert.deepEqual(plans[0].choices.options.map(o => o.id), ["TSKt6CLAIM", "TSKt6TRANSFER", "TSKt6EDIT", "TSKt6NONE"]);
 
   // Basim's later follow-up request: this nag must keep repeating even
   // outside working hours, unlike the reactive overdue_task/daily_digest kinds.
