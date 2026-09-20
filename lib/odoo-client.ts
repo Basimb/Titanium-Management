@@ -133,6 +133,14 @@ export type PurchaseSummary = { purchaseCount: number; purchaseAmount: number; r
 // and a positive quantity, so the number is what is actually on a shelf.
 export type ExpirySummary = { expiredLines: number; expiredQty: number; soonLines: number; soonQty: number; withinDays: number };
 export type PayablesSummary = { billCount: number; billTotal: number; creditCount: number; creditTotal: number };
+// What the catalogue is missing, counted rather than guessed. Every figure
+// here is the reason some OTHER answer is wrong: a product with no cost price
+// cannot be in a profit number, one with no barcode is rung up by hand, and
+// two products sharing a name are two different stock levels for one medicine.
+export type DataQuality = { total: number; noBarcode: number; noReference: number; noCost: number;
+  noPrice: number; zeroStock: number; negativeStock: number;
+  duplicateNames: number; duplicateNameProducts: number; duplicateBarcodes: number; duplicateBarcodeProducts: number;
+  worstNames: Array<{ name: string; count: number }> };
 
 export type OdooSession = {
   // The composed-query escape hatch. It takes only a SafeOdooQuery, which
@@ -151,6 +159,8 @@ export type OdooSession = {
   activeProductCount(): Promise<number>;
   expirySummary(withinDays: number, at?: number): Promise<ExpirySummary>;
   openPayables(): Promise<PayablesSummary>;
+  /** Catalogue hygiene: what is missing, what is duplicated. See DataQuality. */
+  dataQuality(): Promise<DataQuality>;
 };
 
 /** Authenticates once, then reuses that session for every read below. */
@@ -316,6 +326,41 @@ export async function openOdooSession(config: OdooConfig, fetcher: Fetcher = fet
       };
       const [bills, credits] = await Promise.all([read("in_invoice"), read("in_refund")]);
       return { billCount: bills.count, billTotal: bills.total, creditCount: credits.count, creditTotal: Math.abs(credits.total) };
+    },
+    async dataQuality() {
+      // Saleable and active only: the archived half of the catalogue is not a
+      // problem anybody has to fix, and counting it turns a real number into a
+      // scary one. (Basim, 2026-09-17, on an earlier shortage count that
+      // included 46,912 zero-stock catalogue rows: "هاي غلط".)
+      const live: unknown[] = [["sale_ok", "=", true], ["active", "=", true]];
+      const count = (extra: unknown[]) => execute("product.product", "search_count", [[...live, ...extra]]).then(value => Number(value) || 0);
+      // Grouping is the only way to see a duplicate; the limit is above the
+      // catalogue size on purpose, because a truncated group list silently
+      // reports fewer duplicates than exist.
+      const duplicates = async (field: string) => {
+        const groups = (await execute("product.product", "read_group",
+          [[...live, [field, "!=", false]], ["id"], [field]], { lazy: false, limit: 80_000 })) as Array<Record<string, unknown>> | undefined;
+        const repeated = (Array.isArray(groups) ? groups : [])
+          .map(row => ({ name: typeof row[field] === "string" ? row[field] as string : String(row[field] ?? "?"), count: groupCount(row, field) }))
+          .filter(row => row.count > 1)
+          .sort((a, b) => b.count - a.count);
+        return { groups: repeated.length, products: repeated.reduce((sum, row) => sum + row.count, 0), worst: repeated.slice(0, 5) };
+      };
+      const [total, noBarcode, noReference, noCost, noPrice, zeroStock, negativeStock, names, barcodes] = await Promise.all([
+        count([]),
+        count([["barcode", "=", false]]),
+        count([["default_code", "=", false]]),
+        count([["standard_price", "=", 0]]),
+        count([["list_price", "=", 0]]),
+        count([["qty_available", "=", 0]]),
+        count([["qty_available", "<", 0]]),
+        duplicates("name"),
+        duplicates("barcode"),
+      ]);
+      return { total, noBarcode, noReference, noCost, noPrice, zeroStock, negativeStock,
+        duplicateNames: names.groups, duplicateNameProducts: names.products,
+        duplicateBarcodes: barcodes.groups, duplicateBarcodeProducts: barcodes.products,
+        worstNames: names.worst };
     },
     async shortages({ windowDays = 60, maxDaysLeft = 7, limit = 20, at = Date.now() } = {}) {
       const since = new Date(at - windowDays * 86_400_000).toISOString().slice(0, 19).replace("T", " ");

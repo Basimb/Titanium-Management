@@ -17,7 +17,7 @@ import type { OdooQuestionKind, OdooQuestionMatch } from "./odoo-questions.ts";
 
 const KINDS: readonly OdooQuestionKind[] = ["sales_today", "sales_yesterday", "sales_week", "sales_month",
   "shifts_today", "shifts_yesterday", "shifts_week", "shifts_month",
-  "low_stock", "expiring", "unpaid_bills", "purchases_month", "help"];
+  "low_stock", "expiring", "unpaid_bills", "purchases_month", "data_quality", "help"];
 const BRANCHES = ["NAOOR", "SAFOT", "DABOQ", "JUMRK"] as const;
 
 const PROMPT = [
@@ -34,6 +34,7 @@ const PROMPT = [
   "  shifts_week      - the same over the last week",
   "  shifts_month     - the same since the start of the month",
   "  low_stock        - which items are running out / nearly out of stock",
+  "  data_quality     - what the product catalogue is missing or duplicating (no barcode, no cost, repeated names)",
   "  expiring         - stock that has expired or expires soon",
   "  unpaid_bills     - unpaid or outstanding VENDOR bills, what the company owes suppliers",
   "  purchases_month  - what was purchased from vendors this month, net of vendor returns",

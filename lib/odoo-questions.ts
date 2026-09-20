@@ -16,7 +16,7 @@ import { openOdooSession, formatAmount, type OdooConfig } from "./odoo-client.ts
 export type OdooQuestionKind =
   | "sales_today" | "sales_yesterday" | "sales_week" | "sales_month"
   | "shifts_today" | "shifts_yesterday" | "shifts_week" | "shifts_month"
-  | "low_stock" | "expiring" | "unpaid_bills" | "purchases_month" | "help";
+  | "low_stock" | "expiring" | "unpaid_bills" | "purchases_month" | "data_quality" | "help";
 // `shift` is set when the question names ONE of them -- "الشفت الصباحي", or the
 // hours written out as "من ٨ الصباح لـ٤ العصر". Null means all three.
 export type OdooQuestionMatch = { kind: OdooQuestionKind; branch: string | null; shift?: "morning" | "evening" | "night" | null };
@@ -120,6 +120,14 @@ const PATTERNS: Pattern[] = [
   { kind: "purchases_month", any: ["مشتريات", "المشتريات", "اشترينا", "شرينا", "مرتجعات للمورد",
     "مرتجعات الموردين", "purchases"] },
 
+  // Basim (2026-09-20), starting an audit of the pharmacy's Odoo: "بدنا نحلل
+  // منصه اودو تبعت الصيدليه ونشوف وين الاخطاء"، then "وخلي هذا الملف كمان نربطو
+  // بالسكرتير يستفيد منو". Asked BEFORE low_stock: "ناقص بيانات" is about the
+  // catalogue, not about stock, and the more specific reading has to win.
+  { kind: "data_quality", any: ["نظافه البيانات", "نظافه الداتا", "جوده البيانات", "اخطاء البيانات",
+    "بيانات ناقصه", "ناقص بيانات", "ناقصه بيانات", "بدون باركود", "بلا باركود", "باركود",
+    "اصناف مكرره", "منتجات مكرره", "مكرره", "مكرر", "بدون سعر", "بدون تكلفه", "سعر التكلفه",
+    "مخزون سالب", "كميه سالبه", "فحص الاصناف", "تدقيق الاصناف"] },
   { kind: "low_stock", any: ["نواقص", "النواقص", "ناقصه", "قارب على النفاد", "قربت تخلص", "قرب يخلص",
     "قربت تنفد", "تحت الحد", "المخزون", "مخزون", "ستوك", "كميات قليله", "شحيح", "stock"],
     words: ["ناقص", "خلص", "خالص", "نفد", "نفذ"] },
@@ -190,6 +198,7 @@ const HELP_REPLY = [
   "🏪 *لفرع لحاله* — زيد اسم الفرع: «مبيعات الناعور اليوم»",
   "   (الناعور · صافوط · دابوق · الجمرك)",
   "📦 *النواقص* — «شو ناقص من المخزون»",
+  "🧹 *نظافة البيانات* — «فحص الأصناف» · «مين بدون باركود» · «أصناف مكررة»",
   "⏳ *الصلاحيات* — «شو بينتهي قريب» · «في إشي منتهي؟»",
   "🕐 *الشفتات* — «شفتات امبارح» · «شفت المسا بالناعور»",
   "🧾 *فواتير الموردين* — «كم علينا مش مدفوع»",
@@ -322,6 +331,37 @@ async function freshAnswer(match: OdooQuestionMatch, config: OdooAnswerConfig, a
       `🔴 منتهية وموجودة بالمخزن: *${summary.expiredQty}* قطعة (${summary.expiredLines} سطر)`,
       `🟡 بتنتهي خلال ${days} يوم: *${summary.soonQty}* قطعة (${summary.soonLines} سطر)`,
     ].join("\n");
+  }
+  if (match.kind === "data_quality") {
+    const q = await session.dataQuality();
+    if (!q.total) return "🧹 ما لقيت أصناف فعّالة للبيع بالنظام.";
+    // Percent of the live catalogue, because 3,000 sounds like a disaster at
+    // 4,000 products and like housekeeping at 60,000. Only what is actually
+    // broken is listed: a clean line is left out rather than printed as zero.
+    const share = (value: number) => `${Math.round(value * 100 / q.total)}%`;
+    const line = (icon: string, label: string, value: number, note: string) =>
+      value ? `${icon} ${label}: *${value.toLocaleString("en-US")}* (${share(value)}) — ${note}` : null;
+    const rows = [
+      line("🏷️", "بدون باركود", q.noBarcode, "بتتباع بالإيد، وبتغلط بالكاشير"),
+      line("🔢", "بدون رقم داخلي", q.noReference, "صعب تلاقيها بالجرد"),
+      line("💸", "بدون سعر تكلفة", q.noCost, "ما بتقدر تحسب ربح عليها"),
+      line("🏷️", "بدون سعر بيع", q.noPrice, "بتوقف عند الكاشير"),
+      line("⚠️", "مخزون بالسالب", q.negativeStock, "جرد غلط أو بيع بدون إدخال"),
+      q.duplicateNames ? `👥 أسماء مكررة: *${q.duplicateNames}* اسم على ${q.duplicateNameProducts} صنف — نفس الدواء بكذا رصيد` : null,
+      q.duplicateBarcodes ? `🔁 باركود مكرر: *${q.duplicateBarcodes}* باركود على ${q.duplicateBarcodeProducts} صنف — الكاشير بيلخبط بينهم` : null,
+    ].filter(Boolean) as string[];
+    const head = `🧹 *فحص الأصناف* — ${q.total.toLocaleString("en-US")} صنف فعّال للبيع`;
+    if (!rows.length) return `${head}
+
+✅ ما لقيت نواقص بالبيانات.`;
+    const worst = q.worstNames.length
+      ? ["", "*أكثر الأسماء تكرارًا:*", ...q.worstNames.map(row => `• ${row.name.slice(0, 40)} ×${row.count}`)]
+      : [];
+    // Stock at zero is not a fault on its own -- a catalogue keeps items it no
+    // longer carries -- so it sits at the end as context, never in the list of
+    // things to fix. (Basim, 2026-09-17: counting those as shortages was wrong.)
+    return [head, "", ...rows, ...worst, "",
+      `ℹ️ ${q.zeroStock.toLocaleString("en-US")} صنف رصيدها صفر (${share(q.zeroStock)}) — مش بالضرورة خطأ.`].join("\n");
   }
   if (match.kind === "unpaid_bills") {
     const summary = await session.openPayables();
