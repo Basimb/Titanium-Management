@@ -290,20 +290,13 @@ function legendTypedPhraseOption(text: string): string | null {
 // "كل ما يضغط رقم يطلعلو التصويت المناسب") -- a bare typed digit "1".."5"
 // mirrors the same five options taskCommandsLegendPoll offers, so someone
 // who types the digit instead of tapping the poll option still lands on the
-// exact same result. Deliberately narrower than legendTypedPhraseOption's
-// word phrases above: a bare 1-3 digit number is ALREADY a heavily-tested,
-// deterministic shortcut for picking a task straight off a just-shown "شو
-// مهامي؟" list by its position (bareOwnershipOrdinal, further down this
-// file, keyed on ownershipCandidates) -- rewriting "1" here unconditionally
-// would silently hijack that picker (typing "1" to open task #1 would
-// instead start "اضافة مهمة" every time). resolveTaskCommandsLegendChoice
-// below only ever treats a bare digit this way once it has confirmed
-// ownershipCandidates is empty for that actor -- i.e. only when there is no
-// task at all for the ordinal picker to compete over. Everyone else still
-// has two fully collision-free ways to reach the same five actions: tapping
-// the real poll option (a WhatsApp vote, never confused with typed text) or
-// typing the full phrase above (LEGEND_TYPED_PHRASES) -- neither of which
-// bareOwnershipOrdinal's purely-numeric regex ever matches.
+// exact same result. This used to be his alone: for an employee with tasks,
+// a bare digit meant "open task #N off the list I just saw" instead. Two
+// meanings for one number is what broke for Khalid on 2026-09-20 -- he
+// answered a numbered question with "2" and got an ownership request on
+// another task -- so the second meaning is gone and this one is everyone's
+// (see digitIsSafe below). A digit under a live question still answers that
+// question first; only a digit with nothing pending reaches the menu.
 const LEGEND_DIGIT_OPTIONS: Record<string, string> = { "1": "LGDADD", "2": "LGDNOTE", "3": "LGDTRANSFER", "4": "LGDEXTEND", "5": "LGDFINISH" };
 function legendDigitOptionId(text: string): string | null {
   const normalized = text.normalize("NFKC").replace(/[٠-٩]/g, digit => String(digit.charCodeAt(0) - 0x660)).replace(/[۰-۹]/g, digit => String(digit.charCodeAt(0) - 0x6f0)).replace(/[\s.!؟?]+$/u, "").trim();
@@ -387,10 +380,15 @@ function resolveTaskCommandsLegendChoice(db: DatabaseSync, event: Event, config:
   const pendingTaskChoice = digitOptionId !== null && digitActor !== null
     ? db.prepare("SELECT 1 FROM secretary_task_choice WHERE conversation_key=? AND expires_at>?").get(conversation(event, digitActor), now)
     : null;
-  const digitIsSafe = digitOptionId !== null && digitActor !== null && !pendingExtensionAnswer && !pendingTaskChoice
-    && (digitActor.id === "basem" || digitActor.role === "admin"
-      ? true
-      : ownershipCandidates(stateFor(db, digitActor), now).length === 0);
+  // Basim, 2026-09-20: "\u0628\u062f\u064a \u062e\u0627\u0644\u062f \u064a\u0643\u062a\u0628 1 \u062a\u0637\u0644\u0639\u0644\u0648 \u0627\u0644\u062e\u064a\u0627\u0631\u0627\u062a \u0645\u062b\u0644\u064a". The gate that
+  // used to sit here -- only when the employee had no tasks at all -- existed
+  // to protect the ordinal task picker (type "2" to open task #2 off a "\u0634\u0648
+  // \u0645\u0647\u0627\u0645\u064a\u061f" list). That picker is exactly what confused Khalid today:
+  // his "2", meant for the numbered list on his screen, opened an ownership
+  // request on an unrelated task. So the picker is gone (see its removal
+  // further down) and a digit now means one thing for everyone: 1-5 are the
+  // five commands, unless a question is waiting -- and then it answers that.
+  const digitIsSafe = digitOptionId !== null && digitActor !== null && !pendingExtensionAnswer && !pendingTaskChoice;
   const choice = event.choice ?? (typedOptionId ? { questionId: "LGDQ", optionId: typedOptionId }
     : digitIsSafe ? { questionId: "LGDQ", optionId: digitOptionId as string } : undefined);
   if (!choice || choice.questionId !== "LGDQ") return event;
@@ -2277,13 +2275,6 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
     : !event.replyToMessageId && (!taskDraft || /مهام|اعط|أعط|وريني|اعرض|اسرد/u.test(event.text)) ? priorityTaskQuery(event.text, input) : null;
   let plan: SecretaryIntent;
   const listText = event.text.normalize("NFKC").replace(/[أإآ]/g, "ا").replace(/[\u064B-\u065F\u0670ـ؟?!.،,]/g, "").replace(/\s+/g, " ").trim();
-  // A numbered list follow-up is often sent as just "12". Resolve it locally
-  // for employees so it never waits on the language model or loses the RTL
-  // context from the preceding list.
-  const bareOwnershipOrdinal = !review && event.groupId === null && actor.id !== "basem" && actor.role !== "admin"
-    && /^[0-9٠-٩۰-۹]{1,3}$/u.test(listText) && input.ownershipCandidates?.length
-    ? Number(listText.replace(/[٠-٩]/g, digit => String(digit.charCodeAt(0) - 0x660)).replace(/[۰-۹]/g, digit => String(digit.charCodeAt(0) - 0x6f0))) : null;
-  const bareOwnershipCandidate = bareOwnershipOrdinal && bareOwnershipOrdinal >= 1 ? input.ownershipCandidates?.[bareOwnershipOrdinal - 1] : undefined;
   const directTaskList = !review && !taskDraft && !event.replyToMessageId
     && /^(?:(?:وريني|اعرض|اعرضلي|اعطيني|اعطني|شو|ارسل|ارسللي|ابعث|ابعثلي|ابعت|ابعتلي|بدي اشوف|بدي شوف|خليني اشوف|خليني شوف) )?المهام(?: المطلوبة| المطلوبه| المتاحة| المتاحه| الموجودة| الموجوده)?(?: كلها| جميعها)?(?: اشوف| بشوف| لاشوف| لأشوف)?(?: كمان مره| كمان مرة| مرة ثانية| مره ثانيه)?$/.test(listText);
   // "مين أكثر موظف عنده مهام؟" -- counting must never be left to the model
@@ -2299,7 +2290,6 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
       : workloadQuery ? emptySecretaryIntent("report", "WORKLOAD_LEADERBOARD")
       : priorityQuery ? emptySecretaryIntent(priorityQuery.kind === "clarify" ? "clarify" : "summary", priorityQuery.kind === "clarify" ? priorityQuery.reply : null)
       : directTaskList ? emptySecretaryIntent("summary")
-        : bareOwnershipCandidate ? { ...emptySecretaryIntent("ownership_request"), taskId: bareOwnershipCandidate.id }
         : menuCreation ?? directCreation ?? validateSecretaryIntent(await dependencies.infer(input), input);
   } catch (error) {
     // Only standalone, unqualified read questions may recover from provider failure.

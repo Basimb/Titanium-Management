@@ -162,20 +162,23 @@ test('a bare digit "1".."5" resolves to the matching quick command when the empl
 // مهامي؟" listing (bareOwnershipOrdinal) -- the new digit-menu shortcut must
 // never fire for them, precisely because it can't tell that "1" apart from
 // an ordinal pick.
-test('a bare digit never hijacks the ordinal task-picker for an employee who has any task at all', async t => {
+// Basim, 2026-09-20: "\u0628\u062f\u064a \u062e\u0627\u0644\u062f \u064a\u0643\u062a\u0628 1 \u062a\u0637\u0644\u0639\u0644\u0648 \u0627\u0644\u062e\u064a\u0627\u0631\u0627\u062a \u0645\u062b\u0644\u064a". This test used to
+// assert the opposite: that an employee with any task at all had his digits
+// taken by the ordinal task-picker instead. That second meaning is what
+// misfired on Khalid the same day -- he answered a numbered question with
+// "2" and got an ownership request on an unrelated task -- so the picker is
+// gone and the digits are the menu, for everyone.
+test('an employee with tasks gets the same digit menu as Basim -- the ordinal picker no longer competes', async t => {
   const f = fixture(t, { withTasks: false });
-  // A task خالد only WATCHES (not owner, not suggested_owner) is exactly the
-  // one visible-but-unassigned case where "ownership_request" (bareOwnershipOrdinal's
-  // own deterministic resolution, see secretary-service.ts) can actually
-  // succeed -- requestTaskOwnership itself refuses when the actor is already
-  // that task's owner or suggested owner ("already_assigned").
-  f.db.exec(`INSERT INTO tasks (id,title,details,priority,status,owner,suggested_owner,watcher,created_at,updated_at) VALUES('${PROGRESS}','مهمة مرصودة','تفاصيل','yellow','open',NULL,NULL,'خالد',1,1)`);
-  const result = await f.run('1'); // must resolve via bareOwnershipOrdinal, deterministically, no model call
-  assert.notEqual(result.reply, 'اضافة مهمة');
-  assert.equal(result.status, 'applied', 'ownership_request files a request to Basim without ever needing the model');
-  assert.match(result.reply, /رفعت طلبك لباسم/);
-  const toBasim = outbox(f.db).find(r => r.toUser === 'basem');
-  assert.ok(toBasim, 'Basim must be notified of the ownership request');
+  // The one case the old ordinal picker could actually resolve: a task خالد
+  // only WATCHES, so requestTaskOwnership would not refuse it. It must not
+  // be reached by a bare digit any more.
+  f.db.exec(`INSERT INTO tasks (id,title,details,priority,status,owner,suggested_owner,watcher,created_at,updated_at) VALUES('${PROGRESS}','\u0645\u0647\u0645\u0629 \u0645\u0631\u0635\u0648\u062f\u0629','\u062a\u0641\u0627\u0635\u064a\u0644','yellow','open',NULL,NULL,'\u062e\u0627\u0644\u062f',1,1)`);
+  const result = await f.run('1', async () => { throw Error('a menu tap must open a task without asking the model'); });
+  assert.equal(result.status, 'clarify');
+  assert.match(result.reply, /\u0627\u0644\u0634\u063a\u0644 \u0627\u0644\u0645\u0637\u0644\u0648\u0628/, 'digit 1 opens a new task for him, exactly as it does for Basim');
+  assert.doesNotMatch(result.reply, /\u0631\u0641\u0639\u062a \u0637\u0644\u0628\u0643 \u0644\u0628\u0627\u0633\u0645/, 'never an ownership request he did not ask for');
+  assert.equal(outbox(f.db).find(r => r.toUser === 'basem'), undefined, 'and Basim is not pulled in');
 });
 
 // 2026-09-12 follow-up, per Basim's own explicit live-test complaint: he

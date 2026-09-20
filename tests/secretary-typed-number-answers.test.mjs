@@ -105,3 +105,22 @@ test('the picker also wins over Basim\'s five-command menu', async t => {
   assert.doesNotMatch(reply.reply, /شو الملاحظة|أضيف ملاحظة/, 'the menu must not hijack the answer');
   assert.equal(rows(f.db), 0);
 });
+
+// Basim, 2026-09-20: "بدي خالد يكتب 1 تطلعلو الخيارات مثلي". A digit means
+// one thing now, for everyone: the question above it when one is waiting,
+// the five-command menu when none is.
+test('an employee typing 1 with nothing pending gets the same menu Basim gets', async t => {
+  const f = fixture(t);
+  const forKhaled = await f.say('1');
+  const forBasim = await f.say('1', undefined, '12025550103');
+  assert.match(forKhaled.reply, /الشغل المطلوب/, 'خالد: digit 1 opens a new task');
+  assert.equal(forKhaled.reply, forBasim.reply, 'the same answer for both, word for word');
+});
+
+test('5 finishes, for an employee, without the model and without an ownership request', async t => {
+  const f = fixture(t);
+  const asked = await f.say('5');
+  assert.match(asked.reply, /إنهاء مهمة/, 'the digit reaches the finish command, not the ordinal picker');
+  assert.doesNotMatch(asked.reply, /معيّنة لك/);
+  assert.equal(rows(f.db), 1, 'and it leaves the picker waiting for his number');
+});
