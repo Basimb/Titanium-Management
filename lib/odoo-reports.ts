@@ -12,7 +12,7 @@
 import { randomBytes } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 import { migrateManagementActions } from "./management-actions.ts";
-import { openOdooSession, formatAmount, type OdooConfig, type SalesSummary, type InvoiceSales, type ShortageItem, type LocationSales, type PurchaseSummary } from "./odoo-client.ts";
+import { openOdooSession, formatAmount, DEFAULT_BRANCH_NAMES, type OdooConfig, type SalesSummary, type InvoiceSales, type ShortageItem, type BranchShortages, type LocationSales, type PurchaseSummary } from "./odoo-client.ts";
 
 // 2026-09-12, Basim: "بدي هذا التقرير كل يوم الساعه 12:01 صباحا يروح للجروب
 // بدون موافقتي ويكون تاريخ اليوم اللي قبله" -- the daily report is this exact
@@ -21,10 +21,6 @@ import { openOdooSession, formatAmount, type OdooConfig, type SalesSummary, type
 // group with no confirmation step -- same no-approval delivery this job
 // already used for the old total-only daily text, just a different body.
 const BRANCH_COLORS = ["🟢", "🔵", "🟡", "🔴", "🟣", "🟠"];
-// Friendly Arabic names for the Odoo warehouse location codes (the part of
-// "CODE/Stock" before the slash); config.branchNames can add to or override
-// this. An unmapped code falls back to its raw Odoo location name.
-const DEFAULT_BRANCH_NAMES: Record<string, string> = { NAOOR: "الناعور", SAFOT: "صافوط", DABOQ: "دابوق", JUMRK: "الجمرك" };
 
 export type OdooReportConfig = {
   enabled: boolean;
@@ -42,6 +38,10 @@ export type OdooReportConfig = {
   // so it never collides with the sales weekly report above; group only, no
   // owner DM (he asked only for the group).
   purchasesWeeklyHour?: number; // local hour the weekly purchases report goes out; default 19
+  // Basim, 2026-09-20: "تقرير النواقص مره باليوم الساعه 9 الصبح" -- and, once
+  // he saw it, "كل رساله لحال" per branch. One message per branch, every
+  // morning, group only.
+  shortagesHour?: number; // local hour the daily shortages report goes out; default 9
   timezoneOffsetMinutes?: number; // default 180 (Amman/Riyadh, UTC+3)
   // Basim (2026-09-17): "مبيعات يومي بالفرع كل يوم ١٢ منتصف الليل الجروب بس
   // والغي الثاني لغاية ما اقولك" -- who each report goes to, and whether it
@@ -53,7 +53,7 @@ export type OdooReportConfig = {
   fetcher?: typeof fetch; // injected in tests; defaults to the global fetch
 };
 
-type Kind = "odoo_daily" | "odoo_weekly" | "odoo_purchases_weekly";
+type Kind = "odoo_daily" | "odoo_weekly" | "odoo_purchases_weekly" | "odoo_shortages";
 export type ReportRouting = { enabled: boolean; group: boolean; owner: boolean };
 // Basim, 2026-09-17: "مبيعات يومي بالفرع كل يوم ١٢ منتصف الليل الجروب بس
 // والغي الثاني لغاية ما اقولك" -- daily sales per branch, midnight, group only;
@@ -65,8 +65,9 @@ const DEFAULT_ROUTING: Record<Kind, ReportRouting> = {
   odoo_daily: { enabled: true, group: true, owner: false },
   odoo_weekly: { enabled: false, group: false, owner: false },
   odoo_purchases_weekly: { enabled: false, group: false, owner: false },
+  odoo_shortages: { enabled: true, group: true, owner: false },
 };
-type Planned = { id: string; kind: Kind; targetUser: string; to: string; text: string };
+type Planned = { id: string; kind: Kind; targetUser: string; entityId: string | null; to: string; text: string };
 
 const DAY = 24 * 60 * 60_000;
 const newMessageId = () => "3EB0" + randomBytes(18).toString("hex").toUpperCase();
@@ -104,8 +105,13 @@ function startOfLocalMonth(at: number, offsetMinutes: number): number {
 function localDateLabel(at: number, offsetMinutes: number): string {
   return new Date(at + offsetMinutes * 60_000).toISOString().slice(0, 10);
 }
-function alreadySent(db: DatabaseSync, kind: Kind, targetUser: string, since: number): boolean {
-  return !!db.prepare("SELECT id FROM agent_followups WHERE kind=? AND target_user=? AND sent_at>=? LIMIT 1").get(kind, targetUser, since);
+// entityId is the branch a message covers, so four branch messages in one
+// morning are four separate rows and none of them dedups the other three;
+// NULL for the reports that are one message.
+function alreadySent(db: DatabaseSync, kind: Kind, targetUser: string, entityId: string | null, since: number): boolean {
+  return !!(entityId === null
+    ? db.prepare("SELECT id FROM agent_followups WHERE kind=? AND target_user=? AND entity_id IS NULL AND sent_at>=? LIMIT 1").get(kind, targetUser, since)
+    : db.prepare("SELECT id FROM agent_followups WHERE kind=? AND target_user=? AND entity_id=? AND sent_at>=? LIMIT 1").get(kind, targetUser, entityId, since));
 }
 function money(value: number, label?: string): string { return label ? `${formatAmount(value)} ${label}` : formatAmount(value); }
 
@@ -150,12 +156,39 @@ function weeklyText(sales: SalesSummary, invoiced: InvoiceSales, shortages: Shor
       // shortageLines in odoo-questions.ts: an English name and an Arabic
       // measurement on one line are laid out by WhatsApp's own bidi rules and
       // come out unreadable.
-      const days = Math.round(item.daysLeft * 10) / 10;
-      lines.push(`${index + 1}. ${clean(item.name)}`,
-        `باقي ${days} يوم — ${item.combined ? "علب + تجزئة" : `${item.qty} قطعة، ${item.perDay.toFixed(1)}/يوم`}`, "");
+      lines.push(`${index + 1}. ${clean(item.name)}`, `المتوفر: ${packLabel(item.packs)} علبة`, "");
     }
   } else lines.push("ما في صنف متحرّك رح يخلص خلال أسبوع.");
   return clean(lines.join("\n"));
+}
+
+// Basim, 2026-09-20, on the packs-with-decimals view: "اكتب فوق الصنف الصنف
+// وفوق الاعداد المتوفر الان". Two lines per item -- an English product name
+// and an Arabic quantity on ONE line are laid out by WhatsApp's own bidi
+// rules and come out scrambled -- and the quantity in packs, never pieces.
+const packLabel = (packs: number): string => {
+  if (!Number.isFinite(packs) || packs <= 0) return "صفر";
+  const rounded = Math.round(packs * 100) / 100;
+  return Number.isInteger(rounded) ? String(rounded) : String(rounded).replace(/0+$/, "");
+};
+
+// WhatsApp swallows anything past a few thousand characters, and a silently
+// cut list is the exact failure this whole change is undoing -- so a branch
+// with more items than one message holds becomes two messages, not a stump.
+const ITEMS_PER_MESSAGE = 40;
+
+function shortagesText(branchName: string, items: ShortageItem[], part: number, parts: number): string {
+  const header = parts > 1 ? `📦 *نواقص ${branchName}* (${part}/${parts})` : `📦 *نواقص ${branchName}*`;
+  const lines = [header, "_رح تخلص خلال أسبوع — العدد بالعلبة_", ""];
+  const offset = (part - 1) * ITEMS_PER_MESSAGE;
+  items.forEach((item, index) => {
+    lines.push(`*${offset + index + 1}.* ${clean(item.name)}`, `المتوفر: *${packLabel(item.packs)}*`, "");
+  });
+  return clean(lines.join("\n"));
+}
+
+function shortagesFooter(total: number, out: number): string {
+  return ["━━━━━━━━━━━━━", `📋 المجموع: ${total} صنف${out ? ` — منهم ${out} نافد` : ""}`].join("\n");
 }
 
 function purchasesText(summary: PurchaseSummary, sinceDate: string, untilDate: string, currencyLabel?: string): string {
@@ -172,8 +205,65 @@ function purchasesText(summary: PurchaseSummary, sinceDate: string, untilDate: s
   return clean(lines.join("\n"));
 }
 
-async function buildReportText(config: OdooReportConfig, kind: Kind, at: number): Promise<string> {
+// One report can be several messages: the shortages report sends one per
+// branch (and splits a long branch), every other kind sends exactly one.
+// entityId is what keeps them apart in the dedup table.
+type ReportMessage = { entityId: string | null; text: string };
+
+// The bridge drains its queues once a SECOND. A one-message report is asked
+// for once and then skipped by the cheap dedup check above, but the per-branch
+// one has no single id to check, so without this it would rescan the
+// pharmacy's whole catalogue every second for the length of its hour. Built
+// once per local day per kind and reused until the day turns over -- held
+// against the database this job writes to, so two jobs never read each other's
+// report.
+const messageCache = new WeakMap<DatabaseSync, { key: string; messages: ReportMessage[] }>();
+
+async function buildReportMessages(db: DatabaseSync, config: OdooReportConfig, kind: Kind, at: number): Promise<ReportMessage[]> {
+  const key = `${kind}|${localDateLabel(at, config.timezoneOffsetMinutes ?? 180)}`;
+  const cached = messageCache.get(db);
+  if (cached && cached.key === key) return cached.messages;
+  let messages: ReportMessage[];
+  try { messages = await buildReportMessagesFresh(config, kind, at); }
+  catch {
+    // The failure is cached with everything else: the message below is about
+    // to be sent and deduped for the day, so retrying the scan every second
+    // for the rest of the hour would only hammer the pharmacy's system.
+    messages = [{ entityId: null, text: kind === "odoo_daily" ? "📊 تعذر جلب تقرير المبيعات اليومي من نظام الصيدلية الآن."
+      : kind === "odoo_purchases_weekly" ? "🧾 تعذر جلب تقرير المشتريات من نظام الصيدلية الآن."
+      : kind === "odoo_shortages" ? "📦 تعذر جلب تقرير النواقص من نظام الصيدلية الآن."
+      : "📈 تعذر جلب التقرير الأسبوعي من نظام الصيدلية الآن." }];
+  }
+  messageCache.set(db, { key, messages });
+  return messages;
+}
+
+async function buildReportMessagesFresh(config: OdooReportConfig, kind: Kind, at: number): Promise<ReportMessage[]> {
   const session = await openOdooSession(config.odoo, config.fetcher);
+  if (kind === "odoo_shortages") {
+    const names = { ...DEFAULT_BRANCH_NAMES, ...config.branchNames };
+    const branches = await session.branchShortages({ maxDaysLeft: 7, at });
+    if (!branches.length) return [{ entityId: null, text: "📦 ما في صنف متحرّك رح يخلص خلال أسبوع بأي فرع." }];
+    const messages: ReportMessage[] = [];
+    for (const branch of branches) {
+      const label = names[branch.code] ? `فرع ${names[branch.code]}` : branch.location;
+      const out = branch.items.filter(item => item.packs <= 0).length;
+      const parts = Math.max(1, Math.ceil(branch.items.length / ITEMS_PER_MESSAGE));
+      for (let part = 1; part <= parts; part += 1) {
+        const slice = branch.items.slice((part - 1) * ITEMS_PER_MESSAGE, part * ITEMS_PER_MESSAGE);
+        const body = shortagesText(label, slice, part, parts);
+        messages.push({
+          entityId: parts > 1 ? `${branch.code}#${part}` : branch.code,
+          text: part === parts ? `${body}${shortagesFooter(branch.items.length, out)}` : body,
+        });
+      }
+    }
+    return messages;
+  }
+  return [{ entityId: null, text: await buildReportBody(config, session, kind, at) }];
+}
+
+async function buildReportBody(config: OdooReportConfig, session: Awaited<ReturnType<typeof openOdooSession>>, kind: Kind, at: number): Promise<string> {
   if (kind === "odoo_daily") {
     const offset = config.timezoneOffsetMinutes ?? 180;
     const dayStart = startOfLocalDay(at, offset) - DAY;
@@ -214,7 +304,10 @@ async function planOdooReports(db: DatabaseSync, config: OdooReportConfig, at: n
   let kind: Kind | null = null;
   if (day === (config.weeklyDay ?? 6) && hour === (config.purchasesWeeklyHour ?? 19)) kind = "odoo_purchases_weekly";
   else if (day === (config.weeklyDay ?? 6) && hour === (config.weeklyHour ?? 20)) kind = "odoo_weekly";
+  // Daily sales first: if the two are configured to the same hour, the one
+  // that was asked for by name wins the slot rather than the newer default.
   else if (hour === (config.dailyHour ?? 0)) kind = "odoo_daily";
+  else if (hour === (config.shortagesHour ?? 9)) kind = "odoo_shortages";
   if (!kind) return [];
   const routing = routingFor(kind);
   // A switched-off report costs nothing: no targets, and -- just as important
@@ -224,21 +317,27 @@ async function planOdooReports(db: DatabaseSync, config: OdooReportConfig, at: n
   // Keyed to the report's own local day, not to a rolling window. A rolling
   // ~24h meant a manual test send swallowed the next scheduled report --
   // which is exactly what happened to Basim on 2026-09-16.
-  const dedupSince = kind === "odoo_daily" ? startOfLocalDay(at, offset) : at - (7 * DAY - 5 * 60_000);
+  const daily = kind === "odoo_daily" || kind === "odoo_shortages";
+  const dedupSince = daily ? startOfLocalDay(at, offset) : at - (7 * DAY - 5 * 60_000);
   const targets: Array<{ targetUser: string; to: string }> = [];
   if (routing.group && config.groupId) targets.push({ targetUser: "group", to: config.groupId });
   if (routing.owner && config.ownerNumber) targets.push({ targetUser: "owner", to: `${config.ownerNumber}@s.whatsapp.net` });
   if (!targets.length) return [];
-  const pending = targets.filter(target => !alreadySent(db, kind as Kind, target.targetUser, dedupSince));
-  if (!pending.length) return [];
-  let text: string;
-  try { text = await buildReportText(config, kind, at); }
-  catch {
-    text = kind === "odoo_daily" ? "📊 تعذر جلب تقرير المبيعات اليومي من نظام الصيدلية الآن."
-      : kind === "odoo_purchases_weekly" ? "🧾 تعذر جلب تقرير المشتريات من نظام الصيدلية الآن."
-      : "📈 تعذر جلب التقرير الأسبوعي من نظام الصيدلية الآن.";
+  // Cheap check first, for the one-message kinds: if every target already has
+  // today's report, the pharmacy's system is never touched at all. The
+  // shortages report has no single id to check here, so it goes on to the
+  // per-message check below.
+  if (kind !== "odoo_shortages" && targets.every(target => alreadySent(db, kind as Kind, target.targetUser, null, dedupSince))) return [];
+  const messages = await buildReportMessages(db, config, kind, at);
+  const planned: Planned[] = [];
+  for (const target of targets) {
+    for (const message of messages) {
+      if (alreadySent(db, kind as Kind, target.targetUser, message.entityId, dedupSince)) continue;
+      planned.push({ id: randomBytes(8).toString("hex"), kind: kind as Kind, targetUser: target.targetUser,
+        entityId: message.entityId, to: target.to, text: message.text });
+    }
   }
-  return pending.map(target => ({ id: randomBytes(8).toString("hex"), kind: kind as Kind, targetUser: target.targetUser, to: target.to, text }));
+  return planned;
 }
 
 export function createOdooReportJobs({ db, config, now = Date.now }: { db: DatabaseSync; config: OdooReportConfig | (() => OdooReportConfig); now?: () => number }) {
@@ -253,7 +352,7 @@ export function createOdooReportJobs({ db, config, now = Date.now }: { db: Datab
         const plan = (await planOdooReports(db, current(), at))[0];
         if (!plan) return { status: "idle" as const };
         // Record first so a crash mid-send never causes a duplicate report.
-        db.prepare("INSERT OR REPLACE INTO agent_followups (id,kind,target_user,entity_id,sent_at,response) VALUES (?,?,?,NULL,?,'sending')").run(plan.id, plan.kind, plan.targetUser, at);
+        db.prepare("INSERT OR REPLACE INTO agent_followups (id,kind,target_user,entity_id,sent_at,response) VALUES (?,?,?,?,?,'sending')").run(plan.id, plan.kind, plan.targetUser, plan.entityId, at);
         const controller = new AbortController(); let timeout: ReturnType<typeof setTimeout> | undefined;
         try {
           await Promise.race([send({ to: plan.to, text: plan.text, messageId: newMessageId(), signal: controller.signal }),

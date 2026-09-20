@@ -11,7 +11,7 @@
  * set matches nothing and falls through to the ordinary secretary, which is
  * the honest answer -- never an invented figure.
  */
-import { openOdooSession, formatAmount, type OdooConfig, type ShortageItem } from "./odoo-client.ts";
+import { openOdooSession, formatAmount, DEFAULT_BRANCH_NAMES, type OdooConfig, type ShortageItem } from "./odoo-client.ts";
 
 export type OdooQuestionKind =
   | "sales_today" | "sales_yesterday" | "sales_week" | "sales_month"
@@ -222,7 +222,8 @@ const COLORS = ["🟢", "🔵", "🟡", "🔴", "🟣", "🟠"];
 const branchLabel = (location: string) => BRANCH_NAMES[location.split("/")[0]?.trim().toUpperCase() ?? ""] || location;
 const money = (value: number, label?: string) => label ? `${formatAmount(value)} ${label}` : formatAmount(value);
 
-export type OdooAnswerConfig = { odoo: OdooConfig; currencyLabel?: string; expiryWindowDays?: number; fetcher?: typeof fetch };
+export type OdooAnswerConfig = { odoo: OdooConfig; currencyLabel?: string; expiryWindowDays?: number;
+  branchNames?: Record<string, string>; fetcher?: typeof fetch };
 
 // Basim (2026-09-17): "بدي يصير جاوبني بسرعه فائقه". The same question asked
 // twice in a row -- which is what happens when he checks, then shows someone,
@@ -260,11 +261,19 @@ export async function answerOdooQuestion(match: OdooQuestionMatch, config: OdooA
 //
 // A combined item's piece count mixes packs with loose pieces, so it says so
 // instead of printing a count nobody can act on.
+//
+// Basim, 2026-09-20: "شيل قصة التجزئه اعرض علبه حتى لو بالاعشار" -- and then
+// "اكتب فوق الصنف الصنف وفوق الاعداد المتوفر الان". So the measurement line is
+// the quantity in PACKS, decimals and all, under a fixed Arabic label: a pack
+// and a bit is 1.09, and an item the branch no longer has is صفر, which is the
+// most urgent line on the list rather than a missing one.
+function packLabel(packs: number): string {
+  if (!Number.isFinite(packs) || packs <= 0) return "صفر";
+  const rounded = Math.round(packs * 100) / 100;
+  return Number.isInteger(rounded) ? String(rounded) : String(rounded).replace(/0+$/, "");
+}
 function shortageLines(item: ShortageItem, index: number): string[] {
-  const days = Math.round(item.daysLeft * 10) / 10;
-  const detail = item.combined ? "علب + تجزئة"
-    : `${item.qty} قطعة، ${item.perDay.toFixed(1)}/يوم`;
-  return [`${index + 1}. ${item.name}`, `باقي *${days}* يوم — ${detail}`, ""];
+  return [`*${index + 1}.* ${item.name}`, `المتوفر: *${packLabel(item.packs)}*`, ""];
 }
 async function freshAnswer(match: OdooQuestionMatch, config: OdooAnswerConfig, at: number): Promise<string> {
   if (match.kind === "help") return HELP_REPLY;
@@ -409,11 +418,21 @@ async function freshAnswer(match: OdooQuestionMatch, config: OdooAnswerConfig, a
   // Not "under ten units" -- on the live catalogue that is 80% of everything
   // with stock, because a pharmacy carries one or two of most things. What is
   // running out is what will be gone within the week at the rate it sells.
-  const items = await session.shortages({ maxDaysLeft: 7, limit: 15, at });
-  if (!items.length) return "📦 ما في صنف متحرّك رح يخلص خلال أسبوع.";
-  return [
-    "📦 *رح تخلص خلال أسبوع*",
-    "",
-    ...items.flatMap((item, index) => shortageLines(item, index)),
-  ].join("\n");
+  //
+  // Per branch, and with no cap. Both were hiding shortages: the company-wide
+  // reckoning called an item "in stock" when another branch held it, and a
+  // hard `limit: 15` cut whatever was left without saying so. Basim,
+  // 2026-09-20: "شيل حد ال 15 وارسل كل النواقص لكل فرع".
+  const branches = await session.branchShortages({ maxDaysLeft: 7, at });
+  const total = branches.reduce((sum, branch) => sum + branch.items.length, 0);
+  if (!total) return "📦 ما في صنف متحرّك رح يخلص خلال أسبوع.";
+  const names = { ...DEFAULT_BRANCH_NAMES, ...config.branchNames };
+  const lines = ["📦 *رح تخلص خلال أسبوع*", "_العدد بالعلبة_", ""];
+  for (const branch of branches) {
+    const label = names[branch.code] ? `فرع ${names[branch.code]}` : branch.location;
+    lines.push(`*${label} — ${branch.items.length} صنف*`, "");
+    lines.push(...branch.items.flatMap((item, index) => shortageLines(item, index)));
+  }
+  lines.push("━━━━━━━━━━━━━", `📋 المجموع: ${total} صنف`);
+  return lines.join("\n");
 }

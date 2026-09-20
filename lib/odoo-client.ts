@@ -114,7 +114,17 @@ export type InvoiceSales = { invoiceCount: number; totalAmount: number };
 // product record -- the pack and its تجزئة split. For those, `qty` and
 // `perDay` mix packs with loose pieces and mean nothing on their own, so the
 // message prints the days and leaves the piece count out.
-export type ShortageItem = { name: string; qty: number; perDay: number; daysLeft: number; combined: boolean };
+// `packs` is the same stock expressed in PACKS of the parent record -- the
+// unit the shelf, the order sheet and the supplier all speak in. Basim,
+// 2026-09-20: "شيل قصة التجزئه اعرض علبه حتى لو بالاعشار". It is a fraction
+// when loose pieces are left over (1.09 packs = a pack and a bit), and it is
+// the only quantity the messages print.
+export type ShortageItem = { name: string; qty: number; packs: number; perDay: number; daysLeft: number; combined: boolean };
+// One branch's list. `code` is the Odoo location code (NAOOR, SAFOT, JUMRK,
+// DABOQ); `location` is its full Odoo name. A company-wide list hides exactly
+// the shortages that matter: an item at zero in Dabouq while Naoor holds a
+// shelf of it reads as "in stock" and is never ordered for Dabouq.
+export type BranchShortages = { code: string; location: string; items: ShortageItem[] };
 export type LocationSales = { location: string; orderCount: number; totalAmount: number };
 // Basim (2026-09-17): the three shifts the branches run -- 08:00-16:00,
 // 16:00-24:00, and 00:00-08:00, all Amman time. Each belongs to the calendar
@@ -146,6 +156,68 @@ export type DataQuality = { total: number; noBarcode: number; noReference: numbe
   duplicateNames: number; duplicateNameProducts: number; duplicateBarcodes: number; duplicateBarcodeProducts: number;
   worstNames: Array<{ name: string; count: number }> };
 
+// ---------------------------------------------------------------------------
+// Turning a shelf into a shortage list.
+//
+// A medicine is kept as more than one product record: the pack, and the تجزئة
+// split that sells loose pieces out of it. Measured apart, the split is always
+// "13 pieces left, 252 a day" while a shelf of packs sits behind it, so the
+// alert fires on a shortage that does not exist. Records sharing a barcode are
+// one medicine and are added up -- in MONEY, not pieces, because the
+// pack-to-piece factor is nowhere in the data and money needs no factor. For a
+// single record the cost cancels out of stock/(sold per day), so this changes
+// nothing for the 99% that are not split; it only makes merging possible. A
+// group where any cost is missing falls back to counting pieces, because a
+// crude number beats a wrong one.
+type ShortageRow = { id: number; name: string; barcode: string | null; cost: number; qty: number };
+
+function rankShortages(rows: ShortageRow[], sold: Map<number, number>, windowDays: number, maxDaysLeft: number): ShortageItem[] {
+  type Bucket = { name: string; qty: number; value: number; sold: number; soldValue: number; records: number; costed: boolean; pack: number };
+  const buckets = new Map<string, Bucket>();
+  for (const row of rows) {
+    if (!Number.isFinite(row.qty)) continue;
+    // Negative stock is a counting error, not a debt the shelf owes: it says
+    // the item is gone, which is what zero says too.
+    const qty = Math.max(0, row.qty);
+    const key = row.barcode ? "b:" + row.barcode : "i:" + String(row.id);
+    const bucket = buckets.get(key) ?? { name: row.name, qty: 0, value: 0, sold: 0, soldValue: 0, records: 0, costed: true, pack: 0 };
+    // The shortest name is the medicine; the longer twin usually just adds
+    // "(تجزئة)" or "(Pack)" to it.
+    if (row.name.length < bucket.name.length) bucket.name = row.name;
+    // The pack is the record with the highest unit cost -- a loose piece costs
+    // a fraction of the box it came out of. Its cost is what converts the
+    // group's money back into packs.
+    if (Number.isFinite(row.cost) && row.cost > bucket.pack) bucket.pack = row.cost;
+    bucket.qty += qty;
+    bucket.sold += sold.get(row.id) ?? 0;
+    bucket.records += 1;
+    if (Number.isFinite(row.cost) && row.cost > 0) { bucket.value += qty * row.cost; bucket.soldValue += (sold.get(row.id) ?? 0) * row.cost; }
+    else bucket.costed = false;
+    buckets.set(key, bucket);
+  }
+
+  const running: ShortageItem[] = [];
+  for (const bucket of buckets.values()) {
+    // Stock that never moves is not running out, however little of it there
+    // is -- that is most of the long tail, and putting it on this list is
+    // what made the old one unusable.
+    if (bucket.sold <= 0) continue;
+    const useValue = bucket.costed && bucket.soldValue > 0 && bucket.value > 0;
+    const perDay = (useValue ? bucket.soldValue : bucket.sold) / windowDays;
+    if (!Number.isFinite(perDay) || perDay <= 0) continue;
+    const daysLeft = (useValue ? bucket.value : bucket.qty) / perDay;
+    if (!Number.isFinite(daysLeft) || daysLeft > maxDaysLeft) continue;
+    const packs = useValue && bucket.pack > 0 ? bucket.value / bucket.pack : bucket.qty;
+    running.push({ name: bucket.name, qty: bucket.qty, packs, perDay: bucket.sold / windowDays, daysLeft, combined: bucket.records > 1 });
+  }
+  return running.sort((a, b) => a.daysLeft - b.daysLeft);
+}
+
+// Friendly Arabic names for the Odoo warehouse location codes (the part of
+// "CODE/Stock" before the slash). A config's branchNames can add to or
+// override this; an unmapped code falls back to its raw Odoo location name.
+export const DEFAULT_BRANCH_NAMES: Record<string, string> = { NAOOR: "الناعور", SAFOT: "صافوط", DABOQ: "دابوق", JUMRK: "الجمرك" };
+
 export type OdooSession = {
   // The composed-query escape hatch. It takes only a SafeOdooQuery, which
   // nothing but validateOdooQuery can produce, so the widening below cannot be
@@ -160,6 +232,8 @@ export type OdooSession = {
   purchaseSummary(sinceIso: string, untilIso: string): Promise<PurchaseSummary>;
   /** Items that run out soonest, by days of cover. See ShortageItem. */
   shortages(options?: { windowDays?: number; maxDaysLeft?: number; limit?: number; at?: number }): Promise<ShortageItem[]>;
+  /** The same reckoning, run separately against each branch's own shelf. */
+  branchShortages(options?: { windowDays?: number; maxDaysLeft?: number; at?: number }): Promise<BranchShortages[]>;
   activeProductCount(): Promise<number>;
   expirySummary(withinDays: number, at?: number): Promise<ExpirySummary>;
   openPayables(): Promise<PayablesSummary>;
@@ -184,6 +258,20 @@ export async function openOdooSession(config: OdooConfig, fetcher: Fetcher = fet
       ({ uid } = await cachedUid(config, fetcher, now()));
       return call(config, "object", "execute_kw", [config.db, uid, config.apiKey, model, method, args, kwargs], fetcher);
     }
+  };
+  // Every catalogue-wide read below is paged: there are more distinct products
+  // sold in two months, and more products holding stock, than one page can
+  // carry, and a truncated page silently drops exactly the items nobody
+  // happened to see.
+  const page = async (model: string, method: string, args: unknown[], extra: Record<string, unknown> = {}): Promise<Array<Record<string, unknown>>> => {
+    const all: Array<Record<string, unknown>> = [];
+    for (let offset = 0; offset < 80_000; offset += 2000) {
+      const rows = (await execute(model, method, args, { ...extra, limit: 2000, offset })) as Array<Record<string, unknown>> | undefined;
+      if (!Array.isArray(rows) || !rows.length) break;
+      all.push(...rows);
+      if (rows.length < 2000) break;
+    }
+    return all;
   };
   const locationSales = async (sinceIso: string, untilIso: string): Promise<LocationSales[]> => {
     const domain = [["date_order", ">=", sinceIso], ["date_order", "<", untilIso], ["state", "in", ["paid", "done", "invoiced"]]];
@@ -368,19 +456,6 @@ export async function openOdooSession(config: OdooConfig, fetcher: Fetcher = fet
     },
     async shortages({ windowDays = 60, maxDaysLeft = 7, limit = 20, at = Date.now() } = {}) {
       const since = new Date(at - windowDays * 86_400_000).toISOString().slice(0, 19).replace("T", " ");
-      // Both reads are paged: there are more distinct products sold in two
-      // months, and more products holding stock, than one page can carry, and a
-      // truncated page silently drops exactly the items nobody happened to see.
-      const page = async (model: string, method: string, args: unknown[], extra: Record<string, unknown>): Promise<Array<Record<string, unknown>>> => {
-        const all: Array<Record<string, unknown>> = [];
-        for (let offset = 0; offset < 40_000; offset += 2000) {
-          const rows = (await execute(model, method, args, { ...extra, limit: 2000, offset })) as Array<Record<string, unknown>> | undefined;
-          if (!Array.isArray(rows) || !rows.length) break;
-          all.push(...rows);
-          if (rows.length < 2000) break;
-        }
-        return all;
-      };
 
       const soldRows = await page("pos.order.line", "read_group",
         [[["order_id.date_order", ">=", since], ["order_id.state", "in", ["paid", "done", "invoiced"]]], ["qty"], ["product_id"]],
@@ -397,56 +472,107 @@ export async function openOdooSession(config: OdooConfig, fetcher: Fetcher = fet
         [[["sale_ok", "=", true], ["active", "=", true], ["qty_available", ">", 0]], ["name", "qty_available", "barcode", "standard_price"]],
         { order: "id asc" });
 
-      // Basim and Shadi, 2026-09-20, reading a shortage alert together: "\u0628\u0642\u0631\u0627
-      // \u0635\u062d \u0628\u0633 \u0639\u0633\u062a\u0648\u0643 \u0627\u0644\u062a\u062c\u0632\u0626\u0647". A medicine is kept as two product records --
-      // the pack and the تجزئة split that sells loose pieces from it. Measured
-      // apart, the split is always "13 pieces left, 252 a day" while a shelf of
-      // packs sits behind it, so the alert fires on a shortage that does not
-      // exist. Records that share a barcode are one medicine and are added up.
-      //
-      // Added up in MONEY, not pieces: the pack-to-piece factor is nowhere in
-      // the data, and money needs no factor. For a single record the cost
-      // cancels out of stock/(sold per day), so this changes nothing at all
-      // for the 99% that are not split -- it only makes merging possible.
-      // A group where any cost is missing falls back to counting pieces,
-      // because a wrong number is worse than a crude one.
-      type Bucket = { name: string; qty: number; value: number; sold: number; soldValue: number; records: number; costed: boolean };
-      const buckets = new Map<string, Bucket>();
-      for (const row of stockRows) {
-        const qty = Number(row.qty_available);
-        if (!Number.isFinite(qty) || qty <= 0) continue;
-        const cost = Number(row.standard_price);
-        const barcode = typeof row.barcode === "string" && row.barcode.trim() ? row.barcode.trim() : null;
-        const key = barcode ? "b:" + barcode : "i:" + String(row.id);
-        const name = String(row.name ?? "?");
-        const movement = sold.get(Number(row.id)) ?? 0;
-        const bucket = buckets.get(key) ?? { name, qty: 0, value: 0, sold: 0, soldValue: 0, records: 0, costed: true };
-        // The shortest name is the medicine; the longer twin usually just adds
-        // "(تجزئة)" or "(Pack)" to it.
-        if (name.length < bucket.name.length) bucket.name = name;
-        bucket.qty += qty;
-        bucket.sold += movement;
-        bucket.records += 1;
-        if (Number.isFinite(cost) && cost > 0) { bucket.value += qty * cost; bucket.soldValue += movement * cost; }
-        else bucket.costed = false;
-        buckets.set(key, bucket);
+      const rows: ShortageRow[] = stockRows.map(row => ({
+        id: Number(row.id), name: String(row.name ?? "?"),
+        barcode: typeof row.barcode === "string" && row.barcode.trim() ? row.barcode.trim() : null,
+        cost: Number(row.standard_price), qty: Number(row.qty_available),
+      })).filter(row => row.qty > 0);
+      return rankShortages(rows, sold, windowDays, maxDaysLeft).slice(0, limit);
+    },
+    // Basim, 2026-09-20, after seeing the company-wide list: "بدي كل النواقص
+    // تروح لكل الفروع كل رساله لحال". A branch orders for its own shelf, so
+    // the reckoning has to be per shelf: this branch's stock against this
+    // branch's own sales. Company-wide, 16 items were running out; branch by
+    // branch it was 46, and the 30 it hid were all real.
+    async branchShortages({ windowDays = 60, maxDaysLeft = 7, at = Date.now() } = {}) {
+      const since = new Date(at - windowDays * 86_400_000).toISOString().slice(0, 19).replace("T", " ");
+      // A branch is a till (pos.config) pointing, through its operation type,
+      // at the stock location it sells out of. Two tills can share one shelf
+      // -- Naoor runs two -- so the location, not the till, is the branch.
+      const configs = await page("pos.config", "search_read", [[], ["name", "picking_type_id"]]);
+      const typeIds = [...new Set(configs.map(row => Array.isArray(row.picking_type_id) ? Number(row.picking_type_id[0]) : null)
+        .filter((id): id is number => typeof id === "number" && Number.isFinite(id)))];
+      if (!typeIds.length) return [];
+      const types = await page("stock.picking.type", "search_read", [[["id", "in", typeIds]], ["default_location_src_id"]]);
+      const sourceByType = new Map<number, [number, string]>();
+      for (const row of types) {
+        const source = row.default_location_src_id;
+        if (Array.isArray(source) && typeof source[0] === "number") sourceByType.set(Number(row.id), [source[0], String(source[1] ?? "?")]);
+      }
+      const branches = new Map<number, { location: string; configIds: number[] }>();
+      for (const row of configs) {
+        const typeId = Array.isArray(row.picking_type_id) ? Number(row.picking_type_id[0]) : null;
+        const source = typeId === null ? undefined : sourceByType.get(typeId);
+        if (!source) continue;
+        const entry = branches.get(source[0]) ?? { location: source[1], configIds: [] };
+        entry.configIds.push(Number(row.id));
+        branches.set(source[0], entry);
+      }
+      if (!branches.size) return [];
+
+      // Stock comes from the quants at that location, not from qty_available,
+      // which is the whole company added up. A quant sitting at zero is kept:
+      // an item the branch sells and no longer has is the most urgent line on
+      // the list, and the company-wide read filtered exactly those out.
+      const stockByBranch = new Map<number, Map<number, number>>();
+      const soldByBranch = new Map<number, Map<number, number>>();
+      const productIds = new Set<number>();
+      for (const [locationId, branch] of branches) {
+        const quants = await page("stock.quant", "read_group", [[["location_id", "=", locationId]], ["quantity"], ["product_id"]], { lazy: false });
+        const stock = new Map<number, number>();
+        for (const row of quants) {
+          const product = row.product_id;
+          if (!Array.isArray(product) || typeof product[0] !== "number") continue;
+          stock.set(product[0], (stock.get(product[0]) ?? 0) + Number(row.quantity ?? 0));
+          productIds.add(product[0]);
+        }
+        stockByBranch.set(locationId, stock);
+
+        const soldRows = await page("pos.order.line", "read_group",
+          [[["order_id.config_id", "in", branch.configIds], ["order_id.date_order", ">=", since],
+            ["order_id.state", "in", ["paid", "done", "invoiced"]]], ["qty"], ["product_id"]], { lazy: false });
+        const sold = new Map<number, number>();
+        for (const row of soldRows) {
+          const product = row.product_id;
+          if (!Array.isArray(product) || typeof product[0] !== "number") continue;
+          const qty = Number(row.qty);
+          if (Number.isFinite(qty) && qty > 0) sold.set(product[0], (sold.get(product[0]) ?? 0) + qty);
+        }
+        soldByBranch.set(locationId, sold);
       }
 
-      const running: ShortageItem[] = [];
-      for (const bucket of buckets.values()) {
-        // Stock that never moves is not running out, however little of it there
-        // is -- that is most of the long tail, and putting it on this list is
-        // what made the old one unusable.
-        if (bucket.sold <= 0) continue;
-        const useValue = bucket.costed && bucket.soldValue > 0 && bucket.value > 0;
-        const perDay = (useValue ? bucket.soldValue : bucket.sold) / windowDays;
-        if (!Number.isFinite(perDay) || perDay <= 0) continue;
-        const daysLeft = (useValue ? bucket.value : bucket.qty) / perDay;
-        if (!Number.isFinite(daysLeft) || daysLeft > maxDaysLeft) continue;
-        running.push({ name: bucket.name, qty: bucket.qty, perDay: bucket.sold / windowDays, daysLeft, combined: bucket.records > 1 });
+      const meta = new Map<number, { name: string; barcode: string | null; cost: number }>();
+      const ids = [...productIds];
+      for (let start = 0; start < ids.length; start += 1000) {
+        const chunk = ids.slice(start, start + 1000);
+        const rows = await page("product.product", "search_read",
+          [[["id", "in", chunk], ["sale_ok", "=", true], ["active", "=", true]], ["name", "barcode", "standard_price"]], { order: "id asc" });
+        for (const row of rows) {
+          meta.set(Number(row.id), {
+            name: String(row.name ?? "?"),
+            barcode: typeof row.barcode === "string" && row.barcode.trim() ? row.barcode.trim() : null,
+            cost: Number(row.standard_price),
+          });
+        }
       }
-      return running.sort((a, b) => a.daysLeft - b.daysLeft).slice(0, limit);
+
+      const out: BranchShortages[] = [];
+      for (const [locationId, branch] of branches) {
+        const stock = stockByBranch.get(locationId) ?? new Map();
+        const sold = soldByBranch.get(locationId) ?? new Map();
+        const rows: ShortageRow[] = [];
+        for (const [productId, qty] of stock) {
+          const info = meta.get(productId);
+          if (!info) continue;
+          rows.push({ id: productId, name: info.name, barcode: info.barcode, cost: info.cost, qty });
+        }
+        const items = rankShortages(rows, sold, windowDays, maxDaysLeft);
+        if (items.length) out.push({ code: branch.location.split("/")[0]?.trim().toUpperCase() || branch.location, location: branch.location, items });
+      }
+      // Worst branch first: the one with most to order is the one to read.
+      return out.sort((a, b) => b.items.length - a.items.length);
     },
+
     async activeProductCount() {
       const count = await execute("product.product", "search_count", [[["sale_ok", "=", true], ["active", "=", true]]]);
       return Number(count ?? 0);

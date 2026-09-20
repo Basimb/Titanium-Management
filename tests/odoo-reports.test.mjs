@@ -142,7 +142,7 @@ test("at the weekly slot, the report names what will run out and how soon", asyn
   assert.equal(result.status, "sent");
   assert.match(text, /📈 التقرير الأسبوعي/);
   assert.match(text, /314/);
-  assert.match(text, /1\. بنادول\nباقي 0\.2 يوم — 2 قطعة، 10\.0\/يوم/);
+  assert.match(text, /1\. بنادول\nالمتوفر: 2 علبة/);
   assert.doesNotMatch(text, /كريم نادر/, "two units that last forty days is not a shortage");
 });
 

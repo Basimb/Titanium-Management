@@ -26,6 +26,14 @@ function pharmacy(products, sales) {
     } else if (model === "product.product" && method === "search_read") {
       result = offset ? [] : products.map(([id, name, barcode, onHand, cost]) =>
         ({ id, name, barcode, qty_available: onHand, standard_price: cost }));
+    // One branch, so the per-branch reckoning sees exactly the same shelf the
+    // company-wide one does and these cases stay comparable.
+    } else if (model === "pos.config" && method === "search_read") {
+      result = offset ? [] : [{ id: 1, name: "Naoor POS", picking_type_id: [10, "Naoor: PoS Orders"] }];
+    } else if (model === "stock.picking.type" && method === "search_read") {
+      result = offset ? [] : [{ id: 10, default_location_src_id: [8, "NAOOR/Stock"] }];
+    } else if (model === "stock.quant" && method === "read_group") {
+      result = offset ? [] : products.map(([id, name, , onHand]) => ({ product_id: [id, name], quantity: onHand, __count: 1 }));
     }
     return { ok: true, json: async () => ({ result }) };
   };
@@ -101,11 +109,13 @@ test("the name and the measurement never share a line", async () => {
   const lines = reply.split("\n");
   const named = lines.findIndex(line => line.includes("PANTENE"));
   assert.ok(named > 0, reply);
-  assert.match(lines[named], /^1\. PANTENE/, "the English name stands alone on its line");
-  assert.doesNotMatch(lines[named], /باقي|يوم|قطعة/, "no Arabic beside it");
-  assert.match(lines[named + 1], /^باقي \*[\d.]+\* يوم — 1 قطعة، 5\.0\/يوم$/, "the Arabic measurement stands alone too");
-  // And the merged pack+split says what it is instead of a meaningless count.
+  assert.match(lines[named], /^\*\d+\.\* PANTENE/, "the English name stands alone on its line");
+  assert.doesNotMatch(lines[named], /المتوفر|علبة/, "no Arabic beside it");
+  assert.match(lines[named + 1], /^المتوفر: \*1\*$/, "the Arabic measurement stands alone too");
+  // Basim, 2026-09-20: "شيل قصة التجزئه اعرض علبه حتى لو بالاعشار". The merged
+  // pack+split is one and a half packs -- five loose pieces at a tenth of the
+  // pack's cost is half a pack -- not "1 pack and 5 pieces".
   const split = lines.findIndex(line => line.includes("SYRINGE"));
-  assert.match(lines[split + 1], /علب \+ تجزئة/);
-  assert.doesNotMatch(lines[split + 1], /قطعة/);
+  assert.match(lines[split + 1], /^المتوفر: \*1\.5\*$/);
+  assert.doesNotMatch(lines[split + 1], /قطعة|تجزئة/);
 });

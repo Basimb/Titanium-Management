@@ -128,25 +128,36 @@ test("no unpaid bills reads as a sentence, not as a zero", async () => {
 
 test("what is running out is what the shelf runs out of, not what sits under a unit count", async () => {
   const { fetcher, calls } = fetcherFor({
+    "pos.config": () => [{ id: 1, name: "Naoor POS", picking_type_id: [10, "Naoor: PoS Orders"] }],
+    "stock.picking.type": () => [{ id: 10, default_location_src_id: [8, "NAOOR/Stock"] }],
     // Sold over the 60-day window: fast mover, slow mover.
     "pos.order.line": () => [
       { product_id: [1, "بانادول"], qty: 600 },
       { product_id: [2, "كريم نادر"], qty: 3 },
     ],
     // Both hold two units. One is half a day of stock; the other is forty days.
+    "stock.quant": () => [
+      { product_id: [1, "بانادول"], quantity: 2 },
+      { product_id: [2, "كريم نادر"], quantity: 2 },
+      { product_id: [3, "صنف ما بيتحرك"], quantity: 1 },
+    ],
     "product.product": () => [
-      { id: 1, name: "بانادول", qty_available: 2 },
-      { id: 2, name: "كريم نادر", qty_available: 2 },
-      { id: 3, name: "صنف ما بيتحرك", qty_available: 1 },
+      { id: 1, name: "بانادول", barcode: "b1", standard_price: 1 },
+      { id: 2, name: "كريم نادر", barcode: "b2", standard_price: 1 },
+      { id: 3, name: "صنف ما بيتحرك", barcode: "b3", standard_price: 1 },
     ],
   });
   const text = await answerOdooQuestion(matchOdooQuestion("شو ناقص من المخزون"), { odoo, fetcher }, AT);
-  assert.match(text, /1\. بانادول\nباقي \*0\.2\* يوم — 2 قطعة، 10\.0\/يوم/);
+  assert.match(text, /فرع الناعور — 1 صنف/, "the branch owns its own list");
+  assert.match(text, /\*1\.\* بانادول\nالمتوفر: \*2\*/);
   assert.doesNotMatch(text, /كريم نادر/, "two units that last forty days is not a shortage");
   assert.doesNotMatch(text, /ما بيتحرك/, "stock that never moves is never running out");
-  // Only stock that exists is considered; the catalogue is not the shelf.
-  const stockCall = calls.find(entry => entry.model === "product.product");
-  assert.ok(stockCall.domain.some(leaf => leaf[0] === "qty_available" && leaf[1] === ">" && leaf[2] === 0));
+  // Stock is read off the branch's own shelf, not off the company-wide total.
+  const quantCall = calls.find(entry => entry.model === "stock.quant");
+  assert.ok(quantCall.domain.some(leaf => leaf[0] === "location_id" && leaf[2] === 8));
+  // And the branch's own till, not every till in the company.
+  const soldCall = calls.find(entry => entry.model === "pos.order.line");
+  assert.ok(soldCall.domain.some(leaf => leaf[0] === "order_id.config_id" && leaf[1] === "in"));
 });
 
 test("when nothing on the shelf is about to run out, it says so plainly", async () => {
