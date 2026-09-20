@@ -398,6 +398,10 @@ async function freshAnswer(match: OdooQuestionMatch, config: OdooAnswerConfig, a
   return [
     "📦 *رح تخلص خلال أسبوع*",
     "",
-    ...items.map(item => `• ${item.name} — باقي *${Math.round(item.daysLeft * 10) / 10}* يوم (${item.qty} قطعة، ${item.perDay.toFixed(1)}/يوم)`),
+    // A combined item's piece count mixes packs with loose pieces, so it is
+    // left out rather than printed as a number nobody can act on.
+    ...items.map(item => item.combined
+      ? `• ${item.name} — باقي *${Math.round(item.daysLeft * 10) / 10}* يوم (علب + تجزئة)`
+      : `• ${item.name} — باقي *${Math.round(item.daysLeft * 10) / 10}* يوم (${item.qty} قطعة، ${item.perDay.toFixed(1)}/يوم)`),
   ].join("\n");
 }

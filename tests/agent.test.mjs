@@ -571,10 +571,12 @@ test("unclaimed task: hourly nudge to its suggested owner during work hours, sto
   // outside working hours, unlike the reactive overdue_task/daily_digest kinds.
   assert.equal(planFollowups(db, config, Date.UTC(2026, 8, 10, 20, 0)).filter(plan => plan.kind === "unclaimed_task").length, 1, "unclaimed_task now nags around the clock, including outside working hours");
 
-  // Once delivered, no duplicate within the same hour -- but it fires again an hour later if still unclaimed.
+  // Once delivered it goes quiet for six hours, then chases again if the task
+  // is still unclaimed (Basim, 2026-09-20: "\u0644\u0627 \u062a\u062e\u0644\u064a\u0647 \u064a\u0643\u0631\u0631 \u0627\u0644\u0631\u0633\u0627\u0644\u0647").
   db.prepare("INSERT INTO agent_followups (id,kind,target_user,entity_id,sent_at,response) VALUES ('nudge1','unclaimed_task','shadi',NULL,?,'sent')").run(at);
-  assert.equal(planFollowups(db, config, at + 30 * 60_000).filter(plan => plan.kind === "unclaimed_task").length, 0, "no duplicate within the same hour");
-  assert.equal(planFollowups(db, config, at + 60 * 60_000 + 1000).filter(plan => plan.kind === "unclaimed_task").length, 1, "fires again once the hour has passed");
+  assert.equal(planFollowups(db, config, at + 30 * 60_000).filter(plan => plan.kind === "unclaimed_task").length, 0, "no duplicate half an hour later");
+  assert.equal(planFollowups(db, config, at + 60 * 60_000 + 1000).filter(plan => plan.kind === "unclaimed_task").length, 0, "nor an hour later, as it used to");
+  assert.equal(planFollowups(db, config, at + 6 * 60 * 60_000 + 1000).filter(plan => plan.kind === "unclaimed_task").length, 1, "fires again six hours on");
 
   // Declining it moves the decision to Basim -- the employee already
   // responded, so the hourly nag must stop even though the task itself

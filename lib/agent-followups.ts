@@ -26,6 +26,13 @@ type Planned = { id: string; kind: "overdue_task" | "silent_task" | "stale_appro
 // and the same one taskCloseDecisionPoll already uses.
 const REMINDER_POLL_LIFETIME_MS = 24 * 60 * 60_000;
 const DAY = 24 * 60 * 60_000, SILENT_AFTER = 3 * DAY, STALE_APPROVAL_AFTER = 2 * DAY, STALE_UNCLAIMED_AFTER = DAY, HOUR = 60 * 60_000;
+// Basim, 2026-09-20: "\u0644\u064a\u0634 \u0627\u0644\u0628\u0648\u062a \u0628\u064a\u0631\u0633\u0644 \u0643\u0644 \u0634\u0648\u064a \u0631\u0633\u0627\u0644\u0647 \u061f" ... "\u0644\u0627 \u062a\u062e\u0644\u064a\u0647 \u064a\u0643\u0631\u0631
+// \u0627\u0644\u0631\u0633\u0627\u0644\u0647". These two nudges repeated once an HOUR for as long as a task
+// sat unanswered: across the 9-18 window that is nine near-identical messages
+// a day, per person, which is how a reminder stops being read at all. Every
+// six hours instead -- at most two in a working day, and the task is still
+// chased the same day it goes quiet.
+const NUDGE_EVERY = 6 * HOUR;
 const newMessageId = () => "3EB0" + randomBytes(18).toString("hex").toUpperCase();
 const clean = (value: string) => value.replace(/[\x00-\x1f\u202a-\u202e\u2066-\u2069]/g, " ").slice(0, 200);
 // Small per-file duplicates of secretary-service.ts's PRIORITIES/LABELS and
@@ -246,12 +253,12 @@ export function planFollowups(db: DatabaseSync, config: FollowupConfig, at: numb
     if (responsible) {
       const userId = userIdByName.get(responsible); const number = userId ? numberOf(userId) : null;
       if (!userId || !number) continue;
-      if (alreadySent(db, "unclaimed_task", userId, null, at - HOUR)) continue;
+      if (alreadySent(db, "unclaimed_task", userId, null, at - NUDGE_EVERY)) continue;
       if (db.prepare("SELECT id FROM approvals WHERE status='pending' AND entity_id=?").get(task.id)) continue;
       const entry = unclaimed.get(userId) ?? { number, name: responsible, tasks: [] };
       entry.tasks.push(task); unclaimed.set(userId, entry);
     } else if (ownerNumber) {
-      if (alreadySent(db, "unowned_task", owner.id, task.id, at - HOUR)) continue;
+      if (alreadySent(db, "unowned_task", owner.id, task.id, at - NUDGE_EVERY)) continue;
       // Same resend/supersession hazard as unclaimed_task just above (see its
       // own comment): this nudge repeats hourly while the task stays unowned,
       // and each resend supersedes the previous WhatsApp poll bubble server-side

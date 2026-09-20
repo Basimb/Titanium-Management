@@ -110,7 +110,11 @@ export type InvoiceSales = { invoiceCount: number; totalAmount: number };
 // of the shelf, and a list built on it is 46,912 items of catalogue plus the
 // entire long tail. What matters is how long the stock lasts: quantity divided
 // by how fast the item actually sells.
-export type ShortageItem = { name: string; qty: number; perDay: number; daysLeft: number };
+// `combined` marks an item whose stock was added up across more than one
+// product record -- the pack and its تجزئة split. For those, `qty` and
+// `perDay` mix packs with loose pieces and mean nothing on their own, so the
+// message prints the days and leaves the piece count out.
+export type ShortageItem = { name: string; qty: number; perDay: number; daysLeft: number; combined: boolean };
 export type LocationSales = { location: string; orderCount: number; totalAmount: number };
 // Basim (2026-09-17): the three shifts the branches run -- 08:00-16:00,
 // 16:00-24:00, and 00:00-08:00, all Amman time. Each belongs to the calendar
@@ -390,22 +394,56 @@ export async function openOdooSession(config: OdooConfig, fetcher: Fetcher = fet
       }
 
       const stockRows = await page("product.product", "search_read",
-        [[["sale_ok", "=", true], ["active", "=", true], ["qty_available", ">", 0]], ["name", "qty_available"]],
+        [[["sale_ok", "=", true], ["active", "=", true], ["qty_available", ">", 0]], ["name", "qty_available", "barcode", "standard_price"]],
         { order: "id asc" });
 
-      const running: ShortageItem[] = [];
+      // Basim and Shadi, 2026-09-20, reading a shortage alert together: "\u0628\u0642\u0631\u0627
+      // \u0635\u062d \u0628\u0633 \u0639\u0633\u062a\u0648\u0643 \u0627\u0644\u062a\u062c\u0632\u0626\u0647". A medicine is kept as two product records --
+      // the pack and the تجزئة split that sells loose pieces from it. Measured
+      // apart, the split is always "13 pieces left, 252 a day" while a shelf of
+      // packs sits behind it, so the alert fires on a shortage that does not
+      // exist. Records that share a barcode are one medicine and are added up.
+      //
+      // Added up in MONEY, not pieces: the pack-to-piece factor is nowhere in
+      // the data, and money needs no factor. For a single record the cost
+      // cancels out of stock/(sold per day), so this changes nothing at all
+      // for the 99% that are not split -- it only makes merging possible.
+      // A group where any cost is missing falls back to counting pieces,
+      // because a wrong number is worse than a crude one.
+      type Bucket = { name: string; qty: number; value: number; sold: number; soldValue: number; records: number; costed: boolean };
+      const buckets = new Map<string, Bucket>();
       for (const row of stockRows) {
-        const movement = sold.get(Number(row.id));
+        const qty = Number(row.qty_available);
+        if (!Number.isFinite(qty) || qty <= 0) continue;
+        const cost = Number(row.standard_price);
+        const barcode = typeof row.barcode === "string" && row.barcode.trim() ? row.barcode.trim() : null;
+        const key = barcode ? "b:" + barcode : "i:" + String(row.id);
+        const name = String(row.name ?? "?");
+        const movement = sold.get(Number(row.id)) ?? 0;
+        const bucket = buckets.get(key) ?? { name, qty: 0, value: 0, sold: 0, soldValue: 0, records: 0, costed: true };
+        // The shortest name is the medicine; the longer twin usually just adds
+        // "(تجزئة)" or "(Pack)" to it.
+        if (name.length < bucket.name.length) bucket.name = name;
+        bucket.qty += qty;
+        bucket.sold += movement;
+        bucket.records += 1;
+        if (Number.isFinite(cost) && cost > 0) { bucket.value += qty * cost; bucket.soldValue += movement * cost; }
+        else bucket.costed = false;
+        buckets.set(key, bucket);
+      }
+
+      const running: ShortageItem[] = [];
+      for (const bucket of buckets.values()) {
         // Stock that never moves is not running out, however little of it there
         // is -- that is most of the long tail, and putting it on this list is
         // what made the old one unusable.
-        if (!movement) continue;
-        const qty = Number(row.qty_available);
-        if (!Number.isFinite(qty) || qty <= 0) continue;
-        const perDay = movement / windowDays;
-        const daysLeft = qty / perDay;
-        if (daysLeft > maxDaysLeft) continue;
-        running.push({ name: String(row.name ?? "?"), qty, perDay, daysLeft });
+        if (bucket.sold <= 0) continue;
+        const useValue = bucket.costed && bucket.soldValue > 0 && bucket.value > 0;
+        const perDay = (useValue ? bucket.soldValue : bucket.sold) / windowDays;
+        if (!Number.isFinite(perDay) || perDay <= 0) continue;
+        const daysLeft = (useValue ? bucket.value : bucket.qty) / perDay;
+        if (!Number.isFinite(daysLeft) || daysLeft > maxDaysLeft) continue;
+        running.push({ name: bucket.name, qty: bucket.qty, perDay: bucket.sold / windowDays, daysLeft, combined: bucket.records > 1 });
       }
       return running.sort((a, b) => a.daysLeft - b.daysLeft).slice(0, limit);
     },

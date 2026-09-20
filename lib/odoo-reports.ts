@@ -146,7 +146,11 @@ function weeklyText(sales: SalesSummary, invoiced: InvoiceSales, shortages: Shor
   if (shortages.length) {
     lines.push("رح تخلص خلال أسبوع:");
     for (const item of shortages) {
-      lines.push(`• ${clean(item.name)} — باقي ${Math.round(item.daysLeft * 10) / 10} يوم (${item.qty} قطعة، ${item.perDay.toFixed(1)}/يوم)`);
+      // See the same line in odoo-questions.ts: a combined pack+split item has
+      // no meaningful piece count, so it shows the days and nothing else.
+      lines.push(item.combined
+        ? `• ${clean(item.name)} — باقي ${Math.round(item.daysLeft * 10) / 10} يوم (علب + تجزئة)`
+        : `• ${clean(item.name)} — باقي ${Math.round(item.daysLeft * 10) / 10} يوم (${item.qty} قطعة، ${item.perDay.toFixed(1)}/يوم)`);
     }
   } else lines.push("ما في صنف متحرّك رح يخلص خلال أسبوع.");
   return clean(lines.join("\n"));

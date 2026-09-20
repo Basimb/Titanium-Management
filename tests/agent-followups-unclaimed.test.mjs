@@ -57,13 +57,21 @@ test('the hourly nag never re-fires for the same task inside the same hour windo
   assert.equal(plans.filter(p => p.kind === 'unclaimed_task' && p.targetUser === 'member').length, 0, 'sent 10 minutes ago -- too soon to repeat');
 });
 
-test('the hourly nag fires again once an hour has actually passed', t => {
+// Basim, 2026-09-20: "\u0644\u0627 \u062a\u062e\u0644\u064a\u0647 \u064a\u0643\u0631\u0631 \u0627\u0644\u0631\u0633\u0627\u0644\u0647" -- the nag used to repeat every
+// hour, nine times across a working day. Six hours now, so it still chases
+// the same day without becoming wallpaper.
+test('the nag waits six hours before repeating, not one', t => {
   const { db, config } = fixture(t);
   db.exec(`INSERT INTO tasks VALUES('t1','مهمة خالد','','yellow','open',NULL,'خالد',NULL,NULL,NULL,NULL,1,1,NULL,NULL)`);
   migrateManagementActions(db);
-  db.prepare("INSERT INTO agent_followups (id,kind,target_user,entity_id,sent_at,response) VALUES ('x','unclaimed_task','member',NULL,?,'sent')").run(NIGHT - 61 * 60_000);
-  const plans = planFollowups(db, config, NIGHT);
-  assert.equal(plans.filter(p => p.kind === 'unclaimed_task' && p.targetUser === 'member').length, 1);
+  const send = minutesAgo => {
+    db.prepare("DELETE FROM agent_followups WHERE id='x'").run();
+    db.prepare("INSERT INTO agent_followups (id,kind,target_user,entity_id,sent_at,response) VALUES ('x','unclaimed_task','member',NULL,?,'sent')").run(NIGHT - minutesAgo * 60_000);
+    return planFollowups(db, config, NIGHT).filter(p => p.kind === 'unclaimed_task' && p.targetUser === 'member').length;
+  };
+  assert.equal(send(61), 0, 'an hour later is too soon now');
+  assert.equal(send(5 * 60), 0, 'five hours is still too soon');
+  assert.equal(send(6 * 60 + 1), 1, 'six hours on, it chases again');
 });
 
 test('an open task with no suggested owner at all escalates to Basim hourly, including outside work hours', t => {
