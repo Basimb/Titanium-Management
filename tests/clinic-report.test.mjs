@@ -30,12 +30,17 @@ const page = (data, marker = '"collected"') =>
 /** A stand-in for the clinics' site: a login that must really be completed. */
 function site({ data = DATA, financeStatus = 200, loginStatus = 302, token = 'csrf-token', blade = false } = {}) {
   const seen = [];
+  // Laravel hands out the SAME token in two different wrappings: plain in a
+  // Blade form's _token input, encrypted in the XSRF-TOKEN cookie. Modelling
+  // them as one string hid a real bug, so here they are deliberately unequal.
+  const encrypted = `enc(${token})`;
   const fetcher = async (url, options = {}) => {
     const path = url.replace(clinic.url, '');
-    seen.push({ path, method: options.method || 'GET', cookie: (options.headers || {}).cookie || '' });
+    seen.push({ path, method: options.method || 'GET', cookie: (options.headers || {}).cookie || '',
+      body: options.body ?? '', headers: { ...(options.headers || {}) } });
     const headers = new Headers();
     if (path === '/login' && (options.method || 'GET') === 'GET') {
-      headers.append('set-cookie', `XSRF-TOKEN=${encodeURIComponent(token)}; Path=/`);
+      headers.append('set-cookie', `XSRF-TOKEN=${encodeURIComponent(encrypted)}; Path=/`);
       headers.append('set-cookie', 'clinic_session=s1; Path=/; HttpOnly');
       // The real site is a Vue front end: its sign-in page ships no HTML form
       // and no _token input, only the XSRF cookie above. `blade` puts the old
@@ -45,8 +50,13 @@ function site({ data = DATA, financeStatus = 200, loginStatus = 302, token = 'cs
     }
     if (path === '/login') {
       const body = new URLSearchParams(options.body);
-      const sentToken = body.get('_token') || (options.headers || {})['x-xsrf-token'];
-      if (sentToken !== token) return new Response('', { status: 419 });
+      // Laravel's own order: _token from the body wins outright, and only when
+      // it is absent is the header decrypted. A body carrying the cookie's
+      // encrypted copy therefore fails -- which is what the live site did.
+      const sent = body.has('_token')
+        ? body.get('_token')
+        : ((options.headers || {})['x-xsrf-token'] || '').replace(/^enc\((.*)\)$/, '$1');
+      if (sent !== token) return new Response(JSON.stringify({ message: 'Page expired. Please retry.' }), { status: 419 });
       if (body.get('email') !== clinic.email || body.get('password') !== clinic.password) {
         return new Response(JSON.stringify({ errors: {} }), { status: 422 });
       }
@@ -200,4 +210,21 @@ test('the clinics answer names the doctors, and reads its own system for the day
   assert.match(reply, /المستحقات: \*12\.500 دينار\*/);
   const finance = seen.find(call => call.path.startsWith('/reports/finance'));
   assert.match(finance.path, /from=2026-09-21&to=2026-09-21/, 'yesterday, whole');
+});
+
+// 2026-09-21, the second round: the login still answered 419 "Page expired".
+// The cookie's copy of the token is encrypted and the form's is plain, and
+// Laravel reads `_token` from the body before it ever looks at the header --
+// so sending the cookie's value as `_token` had it compared raw against the
+// session's plain token and rejected. Each copy now goes only where it is
+// understood.
+test('the cookie\'s token is sent as a header and never as the form field', async () => {
+  const { fetcher, seen } = site();
+  const session = await openClinicSession(clinic, fetcher);
+  assert.equal((await session.finance('2026-09-21', '2026-09-21')).net, 759);
+  const post = seen.find(call => call.method === 'POST' && call.path === '/login');
+  assert.equal(new URLSearchParams(post.body).has('_token'), false,
+    'the encrypted cookie copy must not be put in _token');
+  assert.match(post.headers['x-xsrf-token'], /^enc\(/,
+    'the cookie copy travels in the header, where it gets decrypted');
 });

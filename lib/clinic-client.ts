@@ -111,14 +111,23 @@ export async function openClinicSession(config: ClinicConfig, fetcher: Fetcher =
   // Laravel's CSRF token travels two ways, and this site uses the second one:
   // a Blade form carries it in a hidden _token input, while a Vue front end
   // (which this is -- its login page ships no HTML form at all) carries it in
-  // the XSRF-TOKEN cookie and echoes it back as a header. Read the form's copy
-  // when there is one, fall back to the cookie, and send both.
+  // the XSRF-TOKEN cookie and echoes it back as a header.
+  //
+  // The two are NOT interchangeable, which cost us a round: the cookie's copy
+  // is encrypted, the form's is plain, and Laravel reads `_token` from the body
+  // BEFORE it looks at the X-XSRF-TOKEN header -- so putting the cookie's
+  // encrypted value in `_token` makes the check compare it raw against the
+  // session's plain token and answer 419 "Page expired", header or no header.
+  // 2026-09-21: that is exactly what the live site answered. So each copy goes
+  // only where it is understood: the form's in `_token`, the cookie's in the
+  // header, and never the cookie's in the body.
   const page = await get("/login");
   if (!page.ok && page.status < 300) throw new ClinicError("clinic_login_unreachable");
   const html = await page.text();
   const formToken = html.match(/name="_token"\s+value="([^"]+)"/)?.[1] ?? html.match(/value="([^"]+)"\s+name="_token"/)?.[1];
-  const cookieToken = cookies.get("XSRF-TOKEN");
-  const token = formToken ?? (cookieToken ? decodeURIComponent(cookieToken) : undefined);
+  const rawCookie = cookies.get("XSRF-TOKEN");
+  const cookieToken = rawCookie ? decodeURIComponent(rawCookie) : undefined;
+  const token = formToken ?? cookieToken;
   if (!token) throw new ClinicError("clinic_login_form_changed");
 
   let signIn: Response;
@@ -129,10 +138,15 @@ export async function openClinicSession(config: ClinicConfig, fetcher: Fetcher =
         "content-type": "application/x-www-form-urlencoded",
         accept: "application/json, text/html",
         "x-requested-with": "XMLHttpRequest",
-        "x-xsrf-token": token,
+        // The header side is only ever the cookie's own copy -- it is the
+        // only value Laravel tries to decrypt there.
+        ...(cookieToken ? { "x-xsrf-token": cookieToken } : {}),
         cookie: cookies.header(), "accept-language": "ar",
       },
-      body: new URLSearchParams({ _token: token, email: config.email, password: config.password }).toString(),
+      body: new URLSearchParams({
+        ...(formToken ? { _token: formToken } : {}),
+        email: config.email, password: config.password,
+      }).toString(),
       redirect: "manual", signal: AbortSignal.timeout(25_000),
     });
   } catch { throw new ClinicError("clinic_unreachable"); }
