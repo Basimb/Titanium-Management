@@ -176,6 +176,37 @@ export function bridgeChildEnvironment(settings, env, pair, serviceDirectory = S
       if (/^(off|group|owner|both)$/.test(routing)) childEnv[key] = routing;
     }
   }
+  // The clinics' own daily money report. Same shape as the Odoo block above
+  // and for the same reason -- the child environment is built from scratch and
+  // inherits nothing, so a CLINIC_ value that is not named here never reaches
+  // the bridge, however correctly it sits in run-bridge.sh. Basim hit exactly
+  // that on 2026-09-21: the settings were right and the report saw none of
+  // them. Separate from Odoo throughout: a broken clinics setting disables the
+  // clinics report and touches nothing else.
+  const clinic = key => {
+    const stored = settings[key];
+    if (typeof stored === 'string' && stored.trim()) return stored;
+    const inherited = env[key];
+    return typeof inherited === 'string' && inherited.trim() ? inherited : undefined;
+  };
+  const clinicUrl = clinic('CLINIC_URL'), clinicEmail = clinic('CLINIC_EMAIL'), clinicPassword = clinic('CLINIC_PASSWORD');
+  const clinicEnabled = childEnv.SECRETARY_ENABLED === '1' && clinic('CLINIC_REPORT_ENABLED') === '1'
+    && typeof clinicUrl === 'string' && /^https:\/\/[\w.-]+(?::\d+)?$/.test(clinicUrl)
+    // A stray character in front of the address is exactly how this was first
+    // configured (an Arabic keyboard on the first keystroke), and it fails as
+    // a silent login rejection at midnight rather than here. Checked here.
+    && typeof clinicEmail === 'string' && /^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$/.test(clinicEmail)
+    && typeof clinicPassword === 'string' && !/[\r\n]/.test(clinicPassword);
+  childEnv.CLINIC_REPORT_ENABLED = clinicEnabled ? '1' : '0';
+  if (clinicEnabled) {
+    childEnv.CLINIC_URL = clinicUrl;
+    childEnv.CLINIC_EMAIL = clinicEmail;
+    childEnv.CLINIC_PASSWORD = clinicPassword;
+    if (/^([0-9]|1[0-9]|2[0-3])$/.test(clinic('CLINIC_REPORT_HOUR') || '')) childEnv.CLINIC_REPORT_HOUR = clinic('CLINIC_REPORT_HOUR');
+    if (clinic('CLINIC_REPORT_OWNER') === '1') childEnv.CLINIC_REPORT_OWNER = '1';
+    const currency = clinic('CLINIC_CURRENCY_LABEL');
+    if (typeof currency === 'string' && currency.length <= 20 && !/[\r\n]/.test(currency)) childEnv.CLINIC_CURRENCY_LABEL = currency;
+  }
   // Phone/user mapping only; no names or AI key. launchPrivate separately grants
   // the validated settings path for fresh outbox authorization, never from an override.
   if (path.isAbsolute(settings.WHATSAPP_LOGIN_DATABASE || '')) {

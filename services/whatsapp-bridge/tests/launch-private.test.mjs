@@ -346,3 +346,39 @@ test('the settings file wins over the launcher environment, and an invalid value
   assert.equal(broken.ODOO_API_KEY, undefined);
   assert.equal(broken.TEAM_CHAT_BRIDGE_ENABLED, '1', 'a bad pharmacy setting must never take the bridge down');
 });
+
+// The clinics' report, 2026-09-21. Its settings sat correctly in
+// run-bridge.sh and the report saw none of them: the child environment is
+// built from scratch and inherits nothing, so a value that is not named in
+// bridgeChildEnvironment never arrives, however right it looks on the server.
+const clinicSettings = { SECRETARY_ENABLED: '1', CLINIC_REPORT_ENABLED: '1',
+  CLINIC_URL: 'https://clinic.example.com', CLINIC_EMAIL: 'owner@example.com', CLINIC_PASSWORD: 'synthetic-clinic-password' };
+
+test('clinic settings reach the child, from the file or from the launcher environment', () => {
+  const fromFile = bridgeChildEnvironment({ ...settings, ...clinicSettings, CLINIC_REPORT_HOUR: '0' }, env, false, serviceDirectory);
+  assert.equal(fromFile.CLINIC_REPORT_ENABLED, '1');
+  assert.equal(fromFile.CLINIC_URL, 'https://clinic.example.com');
+  assert.equal(fromFile.CLINIC_PASSWORD, 'synthetic-clinic-password');
+  assert.equal(fromFile.CLINIC_REPORT_HOUR, '0');
+  const fromEnvironment = bridgeChildEnvironment({ ...settings, SECRETARY_ENABLED: '1' },
+    { ...env, ...clinicSettings, CLINIC_CURRENCY_LABEL: 'دينار' }, false, serviceDirectory);
+  assert.equal(fromEnvironment.CLINIC_REPORT_ENABLED, '1');
+  assert.equal(fromEnvironment.CLINIC_EMAIL, 'owner@example.com');
+  assert.equal(fromEnvironment.CLINIC_CURRENCY_LABEL, 'دينار');
+});
+
+// How it was really typed the first time: an Arabic keyboard on the first
+// keystroke put a ل in front of the address. That fails as a silent login
+// rejection at midnight; it has to fail here instead.
+test('a malformed clinic address disables the clinics report and nothing else', () => {
+  const broken = bridgeChildEnvironment({ ...settings, ...odooSettings, ...clinicSettings, CLINIC_EMAIL: 'لowner@example.com' }, env, false, serviceDirectory);
+  assert.equal(broken.CLINIC_REPORT_ENABLED, '0');
+  assert.equal(broken.CLINIC_PASSWORD, undefined, 'a password must not travel for a login that cannot work');
+  assert.equal(broken.ODOO_REPORT_ENABLED, '1', 'the pharmacy reports are untouched by it');
+});
+
+test('with no clinic settings at all the report is simply off', () => {
+  const child = bridgeChildEnvironment({ ...settings, SECRETARY_ENABLED: '1' }, env, false, serviceDirectory);
+  assert.equal(child.CLINIC_REPORT_ENABLED, '0');
+  assert.equal(child.CLINIC_URL, undefined);
+});

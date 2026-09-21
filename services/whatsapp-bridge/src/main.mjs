@@ -38,7 +38,7 @@ async function main() {
   let secretaryJobs;
   let secretaryOutbox;
   let agentFollowups;
-  let odooReportJobs;
+  let odooReportJobs, clinicReportJobs;
   if (process.env.TEAM_CHAT_AUTH_DATABASE) {
     const { DatabaseSync } = await import('node:sqlite');
     const { lstatSync, realpathSync } = await import('node:fs');
@@ -84,11 +84,25 @@ async function main() {
           odoo_purchases_weekly: reportRouting(process.env.ODOO_REPORT_PURCHASES),
         },
       }) });
+      // The clinics' daily money report: its own client, its own queue, its
+      // own credentials. Off unless CLINIC_URL/EMAIL/PASSWORD are all set, so
+      // a pharmacy-only install behaves exactly as it did before.
+      const { createClinicReportJobs } = await import('../../../lib/clinic-reports.ts');
+      clinicReportJobs = createClinicReportJobs({ db: jobsDb, config: () => ({
+        enabled: process.env.CLINIC_REPORT_ENABLED === '1' && !!process.env.CLINIC_URL
+          && !!process.env.CLINIC_EMAIL && !!process.env.CLINIC_PASSWORD,
+        clinic: { url: process.env.CLINIC_URL || '', email: process.env.CLINIC_EMAIL || '', password: process.env.CLINIC_PASSWORD || '' },
+        groupId: [...config.allowedGroups][0] ?? null,
+        ownerNumber: contacts.find(contact => contact.userId === 'basem')?.number ?? '',
+        toOwner: process.env.CLINIC_REPORT_OWNER === '1',
+        currencyLabel: process.env.CLINIC_CURRENCY_LABEL || process.env.ODOO_CURRENCY_LABEL || undefined,
+        dailyHour: process.env.CLINIC_REPORT_HOUR ? Number(process.env.CLINIC_REPORT_HOUR) : undefined,
+      }) });
     }
   }
   const runtime = createBridgeRuntime({
     config, store, auth, makeWASocket, jidNormalizedUser, makeCacheableSignalKeyStore, DisconnectReason, logger,
-    control, isActiveNumber, secretaryJobs, secretaryOutbox, agentFollowups, odooReportJobs, proto, generateWAMessageContent, generateWAMessage, decryptPollVote, normalizeMessageContent,
+    control, isActiveNumber, secretaryJobs, secretaryOutbox, agentFollowups, odooReportJobs, clinicReportJobs, proto, generateWAMessageContent, generateWAMessage, decryptPollVote, normalizeMessageContent,
     ...(config.voiceEnabled ? { transcribeVoice: createVoiceTranscriber({ apiKey: process.env.OPENAI_API_KEY, downloadContent: downloadContentFromMessage }) } : {}),
     onStop: code => { process.exitCode = code === 'service_shutdown' ? 0 : 78; },
   });

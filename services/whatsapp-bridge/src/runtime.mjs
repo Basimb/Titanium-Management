@@ -18,7 +18,7 @@ function withDeadline(work) {
 export function createBridgeRuntime({ config, store, auth, makeWASocket, jidNormalizedUser,
   makeCacheableSignalKeyStore, DisconnectReason, logger, onStop = () => {}, output = console,
   now = Date.now, timers = { setTimeout, clearTimeout, setInterval, clearInterval }, fetcher = fetch,
-  control, isActiveNumber = () => false, secretaryJobs, secretaryOutbox, agentFollowups, odooReportJobs, transcribeVoice,
+  control, isActiveNumber = () => false, secretaryJobs, secretaryOutbox, agentFollowups, odooReportJobs, clinicReportJobs, transcribeVoice,
   proto, generateWAMessageContent, generateWAMessage, decryptPollVote, normalizeMessageContent }) {
   let socket;
   let ready = false;
@@ -309,10 +309,13 @@ export function createBridgeRuntime({ config, store, auth, makeWASocket, jidNorm
   }
 
   async function drainBackground() {
-    const jobs = preferOutbox ? ['outbox', 'reminder', 'followup', 'odoo_report'] : ['reminder', 'outbox', 'followup', 'odoo_report'];
+    // clinic_report is last on purpose: the clinics' daily money report goes
+    // out just after the pharmacy's own one, never in front of it.
+    const jobs = preferOutbox ? ['outbox', 'reminder', 'followup', 'odoo_report', 'clinic_report'] : ['reminder', 'outbox', 'followup', 'odoo_report', 'clinic_report'];
     for (const kind of jobs) {
       if (!ready || stopped) return false;
-      const queue = kind === 'outbox' ? secretaryOutbox : kind === 'followup' ? agentFollowups : kind === 'odoo_report' ? odooReportJobs : secretaryJobs;
+      const queue = kind === 'outbox' ? secretaryOutbox : kind === 'followup' ? agentFollowups
+        : kind === 'odoo_report' ? odooReportJobs : kind === 'clinic_report' ? clinicReportJobs : secretaryJobs;
       if (!queue) continue;
       let result;
       try { result = await queue.deliverNext(message => sendScheduled(message, kind === 'outbox')); }
@@ -323,7 +326,7 @@ export function createBridgeRuntime({ config, store, auth, makeWASocket, jidNorm
       }
       if (result.status !== 'idle') {
         preferOutbox = kind !== 'outbox';
-        const label = kind === 'outbox' ? 'outbox' : kind === 'followup' ? 'followup' : kind === 'odoo_report' ? 'odoo_report' : 'delivery';
+        const label = kind === 'outbox' ? 'outbox' : kind === 'followup' ? 'followup' : kind === 'odoo_report' ? 'odoo_report' : kind === 'clinic_report' ? 'clinic_report' : 'delivery';
         const status = result.status === 'sent' ? 'sent' : result.status === 'submitted' ? 'submitted' : result.status === 'uncertain' ? 'uncertain' : 'failed';
         output.info(`Titanium secretary ${label}: ${status}.`);
         return true;
