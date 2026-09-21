@@ -15,7 +15,13 @@ export const SETTINGS_KEYS = new Set(['TEAM_CHAT_ENABLED', 'TEAM_CHAT_SHARED_KEY
   // makes readPrivateConfig throw -- which pauses the whole bridge behind the
   // attention marker. Any key the dashboard allows must be accepted here too.
   'ODOO_REPORT_DAILY', 'ODOO_REPORT_WEEKLY', 'ODOO_REPORT_PURCHASES', 'ODOO_QUESTIONS_ENABLED', 'ODOO_EXPIRY_WINDOW_DAYS',
-  'OPENAI_ROUTER_MODEL', 'ODOO_USER_KEYS_JSON']);
+  'OPENAI_ROUTER_MODEL', 'ODOO_USER_KEYS_JSON',
+  // The clinics -- see the note beside ALLOWED_KEYS in lib/team-chat-settings.ts.
+  // These two lists are one list; the launcher test checks them against each
+  // other, because a key the dashboard accepts and this file does not pauses
+  // the whole bridge on the next read.
+  'CLINIC_URL', 'CLINIC_EMAIL', 'CLINIC_PASSWORD', 'CLINIC_REPORT_ENABLED', 'CLINIC_REPORT_HOUR',
+  'CLINIC_REPORT_OWNER', 'CLINIC_CURRENCY_LABEL', 'CLINIC_QUESTIONS_ENABLED']);
 const MAX_BYTES = 32_768;
 const SERVICE_DIRECTORY = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
