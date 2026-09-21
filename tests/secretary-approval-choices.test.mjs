@@ -107,3 +107,33 @@ test("a group-chat reply and an employee's own request view never get a live pol
   assert.equal(employee.choices, undefined);
   assert.match(employee.reply, /بانتظار قرار باسم/);
 });
+
+// Shadi, 2026-09-21, asked why two tasks of his never reached him: "ما اجاني
+// طلبات استلام... بس موافقة رفع طلب منك". He had asked for the tasks to be
+// opened; Basim approved; the group was told, Shadi was told his REQUEST was
+// approved -- and the task itself, assigned to him, arrived with nothing to
+// pick it up with. The bundle path (tasks_create) always sent the owner a
+// heads-up; the single-task path never did.
+test("a task opened through an approval reaches its owner with something to take it with", async t => {
+  const f = fixture(t);
+  const { requestTaskCreate } = await import("../lib/approvals.ts");
+  requestTaskCreate(f.db, shadi, { title: "متابعة التنسيق مع حملة فاين", priority: "yellow", dueDate: null, ownerId: "other" }, { now: f.now });
+  const pending = pendingList(f.db)[0];
+  assert.equal(pending.type, "task_create");
+
+  await f.run(undefined, { ...asOwner, choice: { questionId: `APR${pending.id}`, optionId: `APR${pending.id}Y` } });
+
+  const created = f.db.prepare("SELECT id,suggested_owner AS suggestedOwner FROM tasks WHERE title=?").get("متابعة التنسيق مع حملة فاين");
+  assert.ok(created, "the task itself was created");
+  assert.equal(created.suggestedOwner, "شادي");
+
+  const toShadi = f.db.prepare("SELECT text,choices_json AS choicesJson FROM agent_outbox WHERE to_user='other' ORDER BY id").all();
+  const headsUp = toShadi.find(row => row.text.includes("متابعة التنسيق مع حملة فاين") && row.text.includes("عيّن لك"));
+  assert.ok(headsUp, `شادي must be told the task is his: ${toShadi.map(r => r.text.slice(0, 40)).join(" | ")}`);
+  assert.ok(headsUp.choicesJson, "and it must carry the poll that lets him take it with a tap");
+  const options = JSON.parse(headsUp.choicesJson).options.map(o => o.id);
+  assert.ok(options.some(id => id.endsWith("CLAIM")), `a CLAIM option, not just an FYI: ${options.join(",")}`);
+  // This poll carries its own way out already, so the universal one is not
+  // added on top of it.
+  assert.equal(JSON.parse(headsUp.choicesJson).options.at(-1).label, CHOICE_CANCEL, "and the way out, like every poll");
+});

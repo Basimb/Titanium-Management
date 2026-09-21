@@ -11,7 +11,10 @@ export type Approval = {
   entityType: "task" | "rule"; entityId: string | null; summary: string; payload: Record<string, unknown>;
   decidedBy: string | null; decisionNote: string | null; createdAt: number; decidedAt: number | null; lastNudgedAt: number | null;
 };
-export type ApprovalDecision = { approval: Approval; effect: ManagementResult | null; notifyRequester: string; notifyGroup: string | null; notifyExtra: Array<{ userId: string; text: string }> };
+// A notifyExtra entry that names a task is a HEADS-UP ABOUT WORK, not an FYI:
+// the caller turns `taskId` into that task's own tap-to-claim poll, the same
+// one an ordinary assignment already carries.
+export type ApprovalDecision = { approval: Approval; effect: ManagementResult | null; notifyRequester: string; notifyGroup: string | null; notifyExtra: Array<{ userId: string; text: string; taskId?: string }> };
 
 export class ApprovalError extends ManagementActionError {}
 const fail = (status: number, code: string, message: string): never => { throw new ApprovalError(status, code, message); };
@@ -321,7 +324,7 @@ export function decideApproval(db: DatabaseSync, claimed: ManagementActor, input
     let notifyGroup: string | null = null;
     // Owners to privately notify once the decision commits (each newly created
     // task's own owner, for a multi-task "tasks_create" approval -- see below).
-    const createdTaskOwners: Array<{ userId: string; text: string }> = [];
+    const createdTaskOwners: Array<{ userId: string; text: string; taskId?: string }> = [];
     if (input.decision === "approved") {
       switch (approval.type) {
         case "deadline_extension": {
@@ -360,6 +363,14 @@ export function decideApproval(db: DatabaseSync, claimed: ManagementActor, input
           effect = executeManagementAction(db, actor, { action: "add_task", title: String(approval.payload.title),
             ...(approval.payload.details ? { details: String(approval.payload.details) } : {}), priority: approval.payload.priority as "red" | "yellow" | "green",
             dueDate: approval.payload.dueDate as string | null, ownerId: approval.payload.ownerId as string | null }, { now: at, source: "approval", auditContext: { origin: "approval", confirmedBy: actor.id } });
+          // Shadi, 2026-09-21, asked why two tasks of his never reached him:
+          // "ما اجاني طلبات استلام... بس موافقة رفع طلب منك". A task opened
+          // through an approval is still a task somebody has to pick up, and
+          // this path told the group and the requester and left its own owner
+          // with nothing to act on. The bundle case below always got this
+          // right; the single-task case never did.
+          if (approval.payload.ownerId) createdTaskOwners.push({ userId: String(approval.payload.ownerId), taskId: effect?.entityId,
+            text: `📌 عيّن لك باسم مهمة «${String(approval.payload.title).slice(0, 200)}». اكتب «استلمت» أو اسم المهمة لبدء التنفيذ.` });
           notifyGroup = `🆕 مهمة جديدة: ${approval.payload.title}${approval.payload.ownerName ? ` — ${approval.payload.ownerName}` : ""}`;
           break;
         }
@@ -375,7 +386,8 @@ export function decideApproval(db: DatabaseSync, claimed: ManagementActor, input
           for (const task of tasks) {
             effect = executeManagementAction(db, actor, { action: "add_task", title: task.title, ...(details ? { details } : {}),
               priority: task.priority, dueDate: task.dueDate, ownerId: task.ownerId }, { now: at + index, source: "approval", auditContext: { origin: "approval", confirmedBy: actor.id, approvalId: approval.id } });
-            if (task.ownerId) createdTaskOwners.push({ userId: task.ownerId, text: `📌 عيّن لك باسم مهمة «${String(task.title).slice(0, 200)}». اكتب «استلمت» أو اسم المهمة لبدء التنفيذ.` });
+            if (task.ownerId) createdTaskOwners.push({ userId: task.ownerId, taskId: effect?.entityId,
+              text: `📌 عيّن لك باسم مهمة «${String(task.title).slice(0, 200)}». اكتب «استلمت» أو اسم المهمة لبدء التنفيذ.` });
             index += 1;
           }
           notifyGroup = `🆕 مهام جديدة:\n${tasks.map(task => `• ${task.title}${task.ownerId ? ` — ${task.ownerId}` : ""}`).join("\n")}`;
@@ -407,9 +419,9 @@ export function decideApproval(db: DatabaseSync, claimed: ManagementActor, input
     // this, a named colleague would have a task land on them with zero
     // heads-up. Centralized here so every caller (WhatsApp decide, and the
     // website's own decide_approval action) sends it the same way.
-    const notifyExtra: Array<{ userId: string; text: string }> = [...createdTaskOwners];
+    const notifyExtra: Array<{ userId: string; text: string; taskId?: string }> = [...createdTaskOwners];
     if (decided.type === "task_transfer" && decided.status === "approved" && decided.payload.suggestedOwnerId) {
-      notifyExtra.push({ userId: String(decided.payload.suggestedOwnerId), text: `📌 عيّن لك باسم مهمة «${String(decided.payload.taskTitle).slice(0, 200)}» (كانت مع ${String(decided.payload.fromOwnerName).slice(0, 100)}). اكتب «استلمت» أو اسم المهمة لبدء التنفيذ.` });
+      notifyExtra.push({ userId: String(decided.payload.suggestedOwnerId), taskId: decided.entityId ?? undefined, text: `📌 عيّن لك باسم مهمة «${String(decided.payload.taskTitle).slice(0, 200)}» (كانت مع ${String(decided.payload.fromOwnerName).slice(0, 100)}). اكتب «استلمت» أو اسم المهمة لبدء التنفيذ.` });
     }
     return { approval: decided, effect, notifyRequester, notifyGroup, notifyExtra };
   } catch (error) { db.exec(nested ? "ROLLBACK TO approval_decision" : "ROLLBACK"); throw error; }

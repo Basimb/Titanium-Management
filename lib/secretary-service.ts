@@ -2948,7 +2948,18 @@ function safeKnowledge(db: DatabaseSync, actor: ChatUser, query: string) {
 }
 /** Private notifications and group notices produced by agent actions go to the durable queue; the bridge delivers them. */
 function deliverAgentSideEffects(db: DatabaseSync, actor: ChatUser, result: AgentResult, now: number) {
-  for (const item of result.notify ?? []) if (item.userId !== actor.id) { enqueueAgentMessage(db, { toUser: item.userId, text: item.text, choices: item.choices }, now); notifyTaskLegend(db, item.userId, now + 1, !item.choices); }
+  for (const item of result.notify ?? []) if (item.userId !== actor.id) {
+    // A heads-up that names a task carries that task's own poll, so the person
+    // can take it with a tap -- the same poll an ordinary assignment already
+    // sends. Shadi, 2026-09-21, on two tasks opened for him through an
+    // approval: "\u0645\u0627 \u0627\u062c\u0627\u0646\u064a \u0637\u0644\u0628\u0627\u062a \u0627\u0633\u062a\u0644\u0627\u0645... \u0628\u0633 \u0645\u0648\u0627\u0641\u0642\u0629 \u0631\u0641\u0639 \u0637\u0644\u0628 \u0645\u0646\u0643".
+    const targetName = item.taskId && !item.choices
+      ? (db.prepare("SELECT name FROM users WHERE id=?").get(item.userId) as { name: string } | undefined)?.name
+      : undefined;
+    const choices = item.choices ?? (item.taskId && targetName ? freshTaskActionPoll(db, item.taskId, targetName, now) : undefined);
+    enqueueAgentMessage(db, { toUser: item.userId, text: item.text, choices }, now);
+    notifyTaskLegend(db, item.userId, now + 1, !choices);
+  }
   if (result.groupNotice) enqueueAgentMessage(db, { toUser: "group", text: result.groupNotice }, now);
 }
 

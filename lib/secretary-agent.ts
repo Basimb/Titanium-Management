@@ -13,7 +13,7 @@ import { can, isOwner, type PermissionActor } from "./permissions.ts";
 import type { SecretaryIntent } from "./secretary-intent.ts";
 import { createSecretaryChoices, type SecretaryChoices } from "./secretary-choices.ts";
 
-export type AgentResult = { status: string; reply: string; taskId?: string; groupNotice?: string | null; notify?: Array<{ userId: string; text: string; choices?: SecretaryChoices }>; choices?: SecretaryChoices };
+export type AgentResult = { status: string; reply: string; taskId?: string; groupNotice?: string | null; notify?: Array<{ userId: string; text: string; taskId?: string; choices?: SecretaryChoices }>; choices?: SecretaryChoices };
 export type AgentContext = {
   db: DatabaseSync; actor: ManagementActor; now: number; inputKind?: string | null; suppressNotices?: boolean;
   // The admin's own raw WhatsApp text, when available -- see the "decide"
