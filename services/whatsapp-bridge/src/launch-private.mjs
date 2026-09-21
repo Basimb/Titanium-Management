@@ -204,6 +204,7 @@ export function bridgeChildEnvironment(settings, env, pair, serviceDirectory = S
     childEnv.CLINIC_PASSWORD = clinicPassword;
     if (/^([0-9]|1[0-9]|2[0-3])$/.test(clinic('CLINIC_REPORT_HOUR') || '')) childEnv.CLINIC_REPORT_HOUR = clinic('CLINIC_REPORT_HOUR');
     if (clinic('CLINIC_REPORT_OWNER') === '1') childEnv.CLINIC_REPORT_OWNER = '1';
+    if (clinic('CLINIC_QUESTIONS_ENABLED') === '0') childEnv.CLINIC_QUESTIONS_ENABLED = '0';
     const currency = clinic('CLINIC_CURRENCY_LABEL');
     if (typeof currency === 'string' && currency.length <= 20 && !/[\r\n]/.test(currency)) childEnv.CLINIC_CURRENCY_LABEL = currency;
   }

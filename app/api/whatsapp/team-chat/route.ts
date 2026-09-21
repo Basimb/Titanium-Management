@@ -4,6 +4,7 @@ import { readTeamChatSettings } from "@/lib/team-chat-settings";
 import { handleSecretaryEvent } from "@/lib/secretary-service";
 import { inferSecretaryIntent, searchSecretaryWeb } from "@/lib/secretary-intent";
 import { answerOdooQuestion } from "@/lib/odoo-questions";
+import { answerClinicQuestion } from "@/lib/clinic-questions";
 import { classifyOdooQuestion } from "@/lib/odoo-question-model";
 import { exploreOdoo } from "@/lib/odoo-explore";
 import { odooPersonFor } from "@/lib/odoo-people";
@@ -30,6 +31,15 @@ export async function POST(request: Request) {
               odoo: { url: settings.ODOO_URL!, db: settings.ODOO_DB!, username: settings.ODOO_USERNAME!, apiKey: settings.ODOO_API_KEY! },
               ...(settings.ODOO_CURRENCY_LABEL ? { currencyLabel: settings.ODOO_CURRENCY_LABEL } : {}),
               ...(/^\d{1,3}$/.test(settings.ODOO_EXPIRY_WINDOW_DAYS || "") ? { expiryWindowDays: Number(settings.ODOO_EXPIRY_WINDOW_DAYS) } : {}),
+            }, at) }
+          : {}),
+        // The clinics: a different business on a different system, asked about
+        // by name. All three settings must be present -- a half-filled config
+        // can never half-answer a question about real money.
+        ...(settings.CLINIC_QUESTIONS_ENABLED !== "0" && settings.CLINIC_URL && settings.CLINIC_EMAIL && settings.CLINIC_PASSWORD
+          ? { askClinic: (match: import("@/lib/clinic-questions").ClinicQuestionMatch, at: number) => answerClinicQuestion(match, {
+              clinic: { url: settings.CLINIC_URL!, email: settings.CLINIC_EMAIL!, password: settings.CLINIC_PASSWORD! },
+              ...(settings.CLINIC_CURRENCY_LABEL || settings.ODOO_CURRENCY_LABEL ? { currencyLabel: (settings.CLINIC_CURRENCY_LABEL || settings.ODOO_CURRENCY_LABEL)! } : {}),
             }, at) }
           : {}),
         // Wording only. The router says WHICH report was asked for; the figures

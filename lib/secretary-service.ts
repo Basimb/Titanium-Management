@@ -1,5 +1,6 @@
 import { createHash, randomBytes } from "node:crypto";
 import { matchOdooQuestion, looksLikeOdooQuestion, type OdooQuestionMatch } from "./odoo-questions.ts";
+import { matchClinicQuestion, type ClinicQuestionMatch } from "./clinic-questions.ts";
 import type { DatabaseSync } from "node:sqlite";
 import { executeManagementAction, getManagementSnapshot, migrateManagementActions, ManagementActionError, ACTION_KEYS, type ManagementActor, type ManagementCommand, type ManagementResult } from "./management-actions.ts";
 import { resolveChatUser, normalizeContactNumber, type ChatUser } from "./team-chat-policy.ts";
@@ -1304,6 +1305,11 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
   // system is configured; absent, every question below simply is not one, and
   // the message goes to the ordinary secretary untouched.
   askOdoo?: (match: OdooQuestionMatch, at: number) => Promise<string>;
+  // The clinics are a different business on a different system. A question
+  // that names one is answered from THAT system, and is checked before the
+  // pharmacy's matcher so "مبيعات العيادات اليوم" can never be answered with
+  // the pharmacy's till. Absent, a clinics question is simply not one.
+  askClinic?: (match: ClinicQuestionMatch, at: number) => Promise<string>;
   // Basim (2026-09-17): "بدي يصير الذكاء يربط الاسئله انها مبيعات وهيك". The
   // model reads the wording and nothing else: it returns which report was
   // asked for, or nothing. It never sees a figure and never writes one.
@@ -1367,6 +1373,24 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
   // lib/odoo-questions.ts) and nothing else, so a figure in the reply was read
   // from Odoo, never composed. Anything it does not recognise falls straight
   // through and is handled exactly as before.
+  if (dependencies.askClinic && event.choice === undefined && !event.replyToMessageId && event.inputKind !== "voice") {
+    const clinicQuestion = matchClinicQuestion(event.text);
+    if (clinicQuestion) {
+      const asking = actorFor(db, event, config);
+      if (asking && asking.active === 1 && config.enabled) {
+        const state = stateFor(db, asking);
+        const duplicate = lookup(db, event, asking, state);
+        if (duplicate) return duplicate;
+        try {
+          const reply = await dependencies.askClinic(clinicQuestion, now);
+          return transaction(db, () => save(db, event, asking, { status: "summary", reply }, [], now));
+        } catch {
+          return transaction(db, () => save(db, event, asking, { status: "clarify",
+            reply: "ما قدرت أوصل لنظام العيادات هلأ. جرّب بعد شوي." }, [], now));
+        }
+      }
+    }
+  }
   if (dependencies.askOdoo && event.choice === undefined && !event.replyToMessageId && event.inputKind !== "voice") {
     // The written-out wordings answer first and cost nothing. Only what they
     // do not recognise -- and only when it reads like a question at all -- is

@@ -152,3 +152,34 @@ test('a clinics outage says so in one line and never blocks the slot forever', a
   assert.equal((await jobs.deliverNext(async m => { text = m.text; return {}; })).status, 'sent');
   assert.match(text, /تعذر جلب تقرير العيادات/);
 });
+
+// Basim, 2026-09-21: "شو بيع العيادات مثلا؟" -- the clinics answer live too,
+// but only when the question names them. An unqualified sales question has
+// meant the pharmacy since the day the bot existed and must keep meaning it.
+test('a question is a clinics question only when it names a clinic', async () => {
+  const { matchClinicQuestion } = await import('../lib/clinic-questions.ts');
+  assert.equal(matchClinicQuestion('شو بيع العيادات')?.kind, 'finance_today');
+  assert.equal(matchClinicQuestion('شو بيع العيادات اليوم')?.kind, 'finance_today');
+  assert.equal(matchClinicQuestion('تحصيل العيادة امبارح')?.kind, 'finance_yesterday');
+  assert.equal(matchClinicQuestion('مبيعات العيادات هالشهر')?.kind, 'finance_month');
+  assert.equal(matchClinicQuestion('كم بعنا بالعيادة هالاسبوع')?.kind, 'finance_week');
+  // The pharmacy keeps every wording it had.
+  for (const pharmacy of ['شو مبيعات اليوم', 'مبيعات الناعور اليوم', 'شو ناقص من المخزون', 'كم علينا للموردين']) {
+    assert.equal(matchClinicQuestion(pharmacy), null, pharmacy);
+  }
+  // Naming a clinic is not enough on its own -- it has to be about money.
+  assert.equal(matchClinicQuestion('في مريض بالعيادة'), null);
+});
+
+test('the clinics answer names the doctors, and reads its own system for the day asked for', async () => {
+  const { answerClinicQuestion, matchClinicQuestion } = await import('../lib/clinic-questions.ts');
+  const { fetcher, seen } = site();
+  const at = Date.UTC(2026, 8, 22, 9, 0, 0); // 09:00 local at offset 0
+  const reply = await answerClinicQuestion(matchClinicQuestion('شو بيع العيادات امبارح'),
+    { clinic, currencyLabel: 'دينار', timezoneOffsetMinutes: 0, fetcher }, at);
+  assert.match(reply, /مبيعات العيادات امبارح/);
+  assert.match(reply, /طبيب عام\n653\.000 دينار — 41 فاتورة/);
+  assert.match(reply, /المستحقات: \*12\.500 دينار\*/);
+  const finance = seen.find(call => call.path.startsWith('/reports/finance'));
+  assert.match(finance.path, /from=2026-09-21&to=2026-09-21/, 'yesterday, whole');
+});
