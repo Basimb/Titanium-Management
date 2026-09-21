@@ -11,6 +11,7 @@ import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 import { handleSecretaryEvent, migrateSecretary } from '../lib/secretary-service.ts';
 import { emptySecretaryIntent } from '../lib/secretary-intent.ts';
+import { CHOICE_CANCEL } from '../lib/secretary-choices.ts';
 
 const A = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
 const B = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
@@ -50,40 +51,58 @@ async function askWhichOne(f) {
   return asked;
 }
 
-test('a number typed under the picker answers the picker, not the ownership list', async t => {
+// Basim, 2026-09-21, after Shadi typed "5" into a chat that already had the
+// task menu waiting and closed a task he was still working on: "الغي كل
+// الاحتمالات وضلك كررله يختار خيار فقط لحد ما يختار من القائمة". A typed number no
+// longer answers an employee's open question -- nothing typed does. The
+// question comes back, with its way out on it, until he taps.
+test('an employee cannot answer an open question by typing -- not a number, not anything', async t => {
   const f = fixture(t);
   const asked = await askWhichOne(f);
-  // The label carries its number in front (it is what makes every option
-  // unique, whatever the titles are); the reply names the task itself.
-  const second = asked.choices.options[1].label.replace(/^\d+\.\s*/, '');
-  const reply = await f.say('2');
-  // The old behaviour: an ownership request on some other task.
-  assert.doesNotMatch(reply.reply, /معيّنة لك/, 'never the ownership answer to a question about finishing');
-  assert.match(reply.reply, new RegExp(second.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').slice(0, 20)),
-    'it acts on the second task OF THAT LIST');
-  assert.equal(rows(f.db), 0, 'the question is answered and gone');
-});
-
-test('a number outside the list says so and leaves the question standing', async t => {
-  const f = fixture(t);
-  await askWhichOne(f);
-  const reply = await f.say('7');
-  assert.match(reply.reply, /الرقم مش من القائمة/);
-  assert.match(reply.reply, /1/);
-  assert.equal(rows(f.db), 1, 'nothing is consumed, so he can still answer');
+  for (const typed of ['2', '7', 'خلصت', 'شو مبيعات اليوم']) {
+    const reply = await f.say(typed);
+    assert.match(reply.reply, /اختار من القائمة/, `"${typed}" must be refused, not acted on`);
+    assert.ok(reply.choices, 'and the same question comes back rather than being pointed at');
+    assert.ok(reply.choices.options.some(o => o.label === CHOICE_CANCEL), 'carrying the way out');
+  }
+  assert.equal(rows(f.db), 1, 'the question is still standing');
   assert.equal(status(f.db, A), 'progress');
   assert.equal(status(f.db, B), 'progress');
+  // ...and the tap he was supposed to make still works.
+  const done = await f.tap(asked.choices.id, asked.choices.options[1].id);
+  assert.doesNotMatch(done.reply, /اختار من القائمة/);
+  assert.equal(rows(f.db), 0, 'answered and gone');
 });
 
-test('typing the number and tapping the option do the same thing', async t => {
-  const typed = fixture(t);
-  const askedTyped = await askWhichOne(typed);
-  const byTyping = await typed.say('1');
-  const tapped = fixture(t);
-  const askedTapped = await askWhichOne(tapped);
-  const byTapping = await tapped.tap(askedTapped.choices.id, askedTapped.choices.options[0].id);
-  assert.equal(byTyping.reply, byTapping.reply);
-  assert.equal(askedTyped.choices.options[0].label, askedTapped.choices.options[0].label);
+// The way out is universal: it is appended to every poll that does not carry
+// one of its own, and answering it leaves nothing behind waiting on him.
+test('choosing the way out drops the question and frees him to type again', async t => {
+  const f = fixture(t);
+  const asked = await askWhichOne(f);
+  const out = asked.choices.options.find(o => o.label === CHOICE_CANCEL);
+  assert.ok(out, 'every poll carries it');
+  const cancelled = await f.tap(asked.choices.id, out.id);
+  assert.match(cancelled.reply, /ألغيت الطلب/);
+  assert.equal(rows(f.db), 0, 'nothing left waiting');
+  assert.equal(status(f.db, A), 'progress');
+  const after = await f.say('شو أخبارك', async () => emptySecretaryIntent('clarify', 'تمام'));
+  assert.doesNotMatch(after.reply, /اختار من القائمة/, 'and he can talk again');
+});
+
+// Basim runs the place from this chat and types into it all day; an approval
+// poll sitting in his thread must never stop him. The lock is the employees'.
+test('Basim is not locked by an open poll -- his typed number still answers it', async t => {
+  const f = fixture(t);
+  f.db.exec(`INSERT INTO tasks (id,title,details,priority,status,owner,suggested_owner,started_at,created_at,updated_at) VALUES
+    ('b1','ترخيص دابوق','','red','progress','باسم','باسم',1,3,3),
+    ('b2','عقد النفايات','','red','progress','باسم','باسم',1,4,4)`);
+  const asked = await f.say('انهاء المهمة', undefined, '12025550103');
+  assert.ok(asked.choices);
+  const second = asked.choices.options[1].label.replace(/^\d+\.\s*/, '');
+  const reply = await f.say('2', undefined, '12025550103');
+  assert.doesNotMatch(reply.reply, /اختار من القائمة/, 'he is never told to stop typing');
+  assert.match(reply.reply, new RegExp(second.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').slice(0, 20)));
+  assert.equal(rows(f.db), 0);
 });
 
 test('with no picker waiting, a number keeps its old meaning', async t => {
@@ -148,4 +167,34 @@ test('two tasks with the identical title still produce a valid, tappable poll', 
     assert.ok(label.startsWith(`${index + 1}. `), label);
     assert.match(asked.reply, new RegExp(`${index + 1}\\. `));
   });
+});
+
+// The lock is not only for a poll he asked for: a poll the secretary sends him
+// on its own -- a nudge, a task card, an approval -- puts him in the same
+// place, and the way out is on that one too.
+test('a poll pushed to him unprompted locks his typing exactly the same way', async t => {
+  const f = fixture(t);
+  const { enqueueAgentMessage } = await import('../lib/agent-followups.ts');
+  enqueueAgentMessage(f.db, { toUser: 'khaled', text: 'شو بدك تعمل؟',
+    choices: { id: 'XQ', title: 'شو بدك تعمل؟', expiresAt: 1788580000000 + 3600_000, options: [{ id: 'X1', label: 'واحد' }, { id: 'X2', label: 'اثنين' }] } }, 1788580000000);
+  const sent = JSON.parse(f.db.prepare("SELECT choices_json AS c FROM agent_outbox WHERE to_user='khaled'").get().c);
+  assert.equal(sent.options.at(-1).label, CHOICE_CANCEL, 'the way out is added on the way out the door');
+  const refused = await f.say('تمام');
+  assert.match(refused.reply, /اختار من القائمة/);
+  const freed = await f.tap('XQ', sent.options.at(-1).id);
+  assert.match(freed.reply, /ألغيت الطلب/);
+  const after = await f.say('شو أخبارك', async () => emptySecretaryIntent('clarify', 'تمام'));
+  assert.doesNotMatch(after.reply, /اختار من القائمة/);
+});
+
+// Basim, asked how long the lock should hold: "ماشي 24 ساعه كويس". The picker
+// used to live ten minutes, which was fine while it only asked a question --
+// but now it also holds him, and a ten-minute unlock would have handed his
+// next stray digit straight back to the command that closed Shadi's task.
+test('the question that holds him lives a full day, not ten minutes', async t => {
+  const f = fixture(t);
+  const asked = await askWhichOne(f);
+  assert.equal(asked.choices.expiresAt - 1788580000000, 24 * 60 * 60_000);
+  assert.equal(f.db.prepare('SELECT expires_at AS e FROM secretary_task_choice').get().e - 1788580000000, 24 * 60 * 60_000,
+    'the poll and the row it answers must die together, or a tap lands on nothing');
 });

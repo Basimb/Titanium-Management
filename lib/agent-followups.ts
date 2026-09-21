@@ -10,7 +10,7 @@ import type { DatabaseSync } from "node:sqlite";
 import { formatPendingList, pendingApprovalsPoll, staleApprovals, markNudged } from "./approvals.ts";
 import { getManagementSnapshot, migrateManagementActions, type ManagementActor, type ManagementTask } from "./management-actions.ts";
 import { GROUP_EVENT_ALLOWLIST, groupBudgetRemaining } from "./team-chat-policy.ts";
-import { CHOICE_CANCEL, type SecretaryChoices } from "./secretary-choices.ts";
+import { CHOICE_CANCEL, withWayOut, type SecretaryChoices } from "./secretary-choices.ts";
 
 export type FollowupConfig = { enabled: boolean; contacts: Array<{ userId: string; number: string }>; groupId?: string | null; workStartHour?: number; workEndHour?: number; timezoneOffsetMinutes?: number; publicUrl?: string };
 type Planned = { id: string; kind: "overdue_task" | "silent_task" | "stale_approval" | "daily_digest" | "auto_reminder_morning" | "auto_reminder_evening" | "unclaimed_task" | "stale_unclaimed" | "unowned_task"; targetUser: string; entityId: string | null; to: string; text: string; choices?: SecretaryChoices };
@@ -372,9 +372,44 @@ export function planFollowups(db: DatabaseSync, config: FollowupConfig, at: numb
 export function enqueueAgentMessage(db: DatabaseSync, input: { toUser: string; text: string; choices?: SecretaryChoices }, at: number): string {
   migrateManagementActions(db);
   const id = randomBytes(8).toString("hex");
+  // Every poll carries the universal way out, and every poll sent to a person
+  // is remembered as the one they now have open -- see recordOpenChoice.
+  const choices = input.toUser !== "group" && input.choices ? withWayOut(input.choices) : null;
   db.prepare("INSERT INTO agent_outbox (id,to_user,text,choices_json,state,created_at) VALUES (?,?,?,?,'pending',?)")
-    .run(id, input.toUser, input.text.slice(0, 3800), input.toUser !== "group" && input.choices ? JSON.stringify(input.choices) : null, at);
+    .run(id, input.toUser, input.text.slice(0, 3800), choices ? JSON.stringify(choices) : null, at);
+  if (choices) recordOpenChoice(db, input.toUser, choices);
   return id;
+}
+/**
+ * Remember the poll this person now has open. While it is remembered, the
+ * secretary answers nothing they type -- Basim, after Shadi typed "5" at an
+ * open poll and closed a task with it: "\u0627\u0644\u063a\u064a \u0643\u0644 \u0627\u0644\u0627\u062d\u062a\u0645\u0627\u0644\u0627\u062a ... \u0648\u0636\u0644\u0643 \u0643\u0631\u0631\u0644\u0647
+ * \u064a\u062e\u062a\u0627\u0631 \u062e\u064a\u0627\u0631 \u0641\u0642\u0637 \u0644\u062d\u062f \u0645\u0627 \u064a\u062e\u062a\u0627\u0631 \u0645\u0646 \u0627\u0644\u0642\u0627\u0626\u0645\u0629". The row carries the poll itself, so the
+ * reminder can put the same bubble back in front of them rather than pointing
+ * at one that has scrolled away.
+ */
+export function recordOpenChoice(db: DatabaseSync, userId: string, choices: SecretaryChoices): void {
+  migrateManagementActions(db);
+  if (userId === "group") return;
+  db.prepare("INSERT INTO secretary_open_choice (user_id,choices_json,expires_at,nudges) VALUES(?,?,?,0) ON CONFLICT(user_id) DO UPDATE SET choices_json=excluded.choices_json,expires_at=excluded.expires_at,nudges=0")
+    .run(userId, JSON.stringify(choices), choices.expiresAt);
+}
+/** They tapped, or the poll died: either way they are free to type again. */
+export function clearOpenChoice(db: DatabaseSync, userId: string): void {
+  migrateManagementActions(db);
+  db.prepare("DELETE FROM secretary_open_choice WHERE user_id=?").run(userId);
+}
+export function openChoiceFor(db: DatabaseSync, userId: string, at: number): { choices: SecretaryChoices; nudges: number } | null {
+  migrateManagementActions(db);
+  const row = db.prepare("SELECT choices_json AS choicesJson,expires_at AS expiresAt,nudges FROM secretary_open_choice WHERE user_id=?")
+    .get(userId) as { choicesJson: string; expiresAt: number; nudges: number } | undefined;
+  if (!row) return null;
+  if (row.expiresAt <= at) { clearOpenChoice(db, userId); return null; }
+  try { return { choices: JSON.parse(row.choicesJson) as SecretaryChoices, nudges: row.nudges }; }
+  catch { clearOpenChoice(db, userId); return null; }
+}
+export function countOpenChoiceNudge(db: DatabaseSync, userId: string): void {
+  db.prepare("UPDATE secretary_open_choice SET nudges=nudges+1 WHERE user_id=?").run(userId);
 }
 
 function nextQueued(db: DatabaseSync, config: FollowupConfig, at: number): Planned | null {

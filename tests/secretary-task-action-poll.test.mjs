@@ -27,6 +27,8 @@ import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 import { handleSecretaryEvent, migrateSecretary } from '../lib/secretary-service.ts';
 import { emptySecretaryIntent } from '../lib/secretary-intent.ts';
+import { APPROVAL_TTL_MS } from '../lib/approvals.ts';
+import { CHOICE_CANCEL } from '../lib/secretary-choices.ts';
 
 const OPEN = '11111111-1111-4111-8111-111111111111';
 const PROGRESS = '22222222-2222-4222-8222-222222222222';
@@ -143,11 +145,16 @@ test('a FINISH tap that succeeds sends Basim a real 🟢/🔴 decision poll, not
   f.db.prepare("INSERT INTO comments VALUES(1,?,?,?,?)").run(PROGRESS, 'خالد', 'سلّمت اللوحة للفريق الفني اليوم', f.now - 1000);
   await f.run(undefined, tap(`TSKQ${PROGRESS}`, `TSK${PROGRESS}FINISH`), async () => { throw Error('a FINISH tap must resolve directly, never ask the model'); });
   const toBasim = f.db.prepare("SELECT text, choices_json AS choicesJson FROM agent_outbox WHERE to_user='basem' ORDER BY id DESC LIMIT 1").get();
-  assert.match(toBasim.text, /بانتظار اعتماد باسم/);
-  assert.ok(toBasim.choicesJson, 'Basim must get a tappable poll, not just an FYI, for a submit with no approvals row behind it');
+  assert.match(toBasim.text, /انتهت/);
+  assert.ok(toBasim.choicesJson, 'Basim must get a tappable poll, not just an FYI');
+  // The tap files the same durable approval the typed close flow files -- a
+  // poll that dies in 24 hours must not be the only record of the request.
+  const approval = f.db.prepare("SELECT id,type,status FROM approvals WHERE entity_id=? ORDER BY rowid DESC LIMIT 1").get(PROGRESS);
+  assert.equal(approval.type, 'task_close');
+  assert.equal(approval.status, 'pending');
   const choices = JSON.parse(toBasim.choicesJson);
-  assert.equal(choices.id, `TCLQ${PROGRESS}`);
-  assert.deepEqual(choices.options.map(o => o.id), [`TCL${PROGRESS}Y`, `TCL${PROGRESS}N`]);
+  assert.equal(choices.id, `APR${approval.id}`);
+  assert.deepEqual(choices.options.map(o => o.id), [`APR${approval.id}Y`, `APR${approval.id}N`, 'NOPEX']);
 });
 // Basim's exact report: "تجربة نسخة سكرتير مطور بانتظار اعتماد باسم مع اني
 // اقفلتها" -- he finished a task he does himself (owner === "باسم") over
@@ -170,11 +177,14 @@ test('Basim submitting a task he owns himself still gets a real decision poll --
   assert.equal(f.db.prepare('SELECT status FROM tasks WHERE id=?').get(SELF).status, 'approval');
   const toBasim = f.db.prepare("SELECT text, choices_json AS choicesJson FROM agent_outbox WHERE to_user='basem'").all();
   assert.equal(toBasim.length, 1, 'exactly one private message -- not silence, and not a duplicate FYI plus the decision poll');
-  assert.match(toBasim[0].text, /بانتظار اعتماد باسم/);
+  assert.match(toBasim[0].text, /انتهت/);
   assert.ok(toBasim[0].choicesJson, 'Basim must get the same real tappable poll any employee\'s submit already gets, even for his own');
+  const approval = f.db.prepare("SELECT id,type,status FROM approvals WHERE entity_id=? ORDER BY rowid DESC LIMIT 1").get(SELF);
+  assert.equal(approval.type, 'task_close');
+  assert.equal(approval.status, 'pending');
   const choices = JSON.parse(toBasim[0].choicesJson);
-  assert.equal(choices.id, `TCLQ${SELF}`);
-  assert.deepEqual(choices.options.map(o => o.id), [`TCL${SELF}Y`, `TCL${SELF}N`]);
+  assert.equal(choices.id, `APR${approval.id}`);
+  assert.deepEqual(choices.options.map(o => o.id), [`APR${approval.id}Y`, `APR${approval.id}N`, 'NOPEX']);
 });
 test('a plain "claim" notice to Basim never carries the task-close decision poll -- only "submit" does', async t => {
   const f = fixture(t);
@@ -265,8 +275,8 @@ test('tapping EDIT offers the three priorities, never asks the model to guess on
   assert.equal(asked, 0);
   assert.equal(r.taskId, PROGRESS);
   assert.equal(r.choices.id, `PRQ${PROGRESS}`);
-  assert.deepEqual(r.choices.options.map(o => o.id), [`PR${PROGRESS}_red`, `PR${PROGRESS}_yellow`, `PR${PROGRESS}_green`]);
-  assert.deepEqual(r.choices.options.map(o => o.label), ['🔴 قصوى', '🟡 متوسطة', '🟢 عادية']);
+  assert.deepEqual(r.choices.options.map(o => o.id), [`PR${PROGRESS}_red`, `PR${PROGRESS}_yellow`, `PR${PROGRESS}_green`, 'NOPEX']);
+  assert.deepEqual(r.choices.options.map(o => o.label), ['🔴 قصوى', '🟡 متوسطة', '🟢 عادية', CHOICE_CANCEL]);
 });
 
 test('tapping a priority files it against that exact task, with no model turn', async t => {
@@ -306,8 +316,8 @@ test('tapping EXTEND asks for the duration with the three fixed options, never a
   assert.match(r.reply, /لأي مدة/);
   assert.equal(r.taskId, PROGRESS);
   assert.equal(r.choices.id, `EXTQ${PROGRESS}`);
-  assert.deepEqual(r.choices.options.map(o => o.id), [`EXT${PROGRESS}D1`, `EXT${PROGRESS}D2`, `EXT${PROGRESS}D5`]);
-  assert.deepEqual(r.choices.options.map(o => o.label), ['🟢 يوم واحد', '🟡 يومين', '🟠 ٥ أيام']);
+  assert.deepEqual(r.choices.options.map(o => o.id), [`EXT${PROGRESS}D1`, `EXT${PROGRESS}D2`, `EXT${PROGRESS}D5`, 'NOPEX']);
+  assert.deepEqual(r.choices.options.map(o => o.label), ['🟢 يوم واحد', '🟡 يومين', '🟠 ٥ أيام', CHOICE_CANCEL]);
 });
 
 test('an EXTEND tap on a task that is gone says so instead of asking the model', async t => {
@@ -340,7 +350,7 @@ test('the standalone command legend carries a tappable poll of its own five numb
   assert.ok(legend?.choicesJson, 'the legend message must carry a poll, not go out as plain text alone');
   const choices = JSON.parse(legend.choicesJson);
   assert.equal(choices.id, 'LGDQ');
-  assert.deepEqual(choices.options.map(o => o.id), ['LGDADD', 'LGDNOTE', 'LGDTRANSFER', 'LGDEXTEND', 'LGDFINISH']);
+  assert.deepEqual(choices.options.map(o => o.id), ['LGDADD', 'LGDNOTE', 'LGDTRANSFER', 'LGDEXTEND', 'LGDFINISH', 'NOPEX']);
   assert.equal(choices.expiresAt - f.now, 24 * 60 * 60_000, '24h is the ceiling the bridge enforces (MAX_POLL_LIFETIME_MS); a shorter one silently drops late taps');
 });
 // Basim hit this for real: he tapped the legend's generic "انهاء المهمة" on
@@ -458,7 +468,7 @@ test('nudge on a task pending Basim\'s own approval resends his 🟢/🔴 decisi
   assert.ok(poll, 'Basim must get a real tappable decision poll, not just plain text');
   const choices = JSON.parse(poll.choicesJson);
   assert.equal(choices.id, `TCLQ${PROGRESS}`);
-  assert.deepEqual(choices.options.map(o => o.id), [`TCL${PROGRESS}Y`, `TCL${PROGRESS}N`]);
+  assert.deepEqual(choices.options.map(o => o.id), [`TCL${PROGRESS}Y`, `TCL${PROGRESS}N`, 'NOPEX']);
 });
 test('nudge on a task pending approval but owned by someone else still resends Basim his decision poll, not a poll to the owner', async t => {
   const f = fixture(t); const admin = { senderNumber: '12025550103' };
@@ -496,4 +506,36 @@ test('a duplicate delivery of the same details view replays the identical poll f
   const second = await f.run(details(OPEN), extra, async () => { throw Error('a duplicate delivery must never reinvoke the model'); });
   assert.equal(second.status, 'duplicate');
   assert.deepEqual(second.choices, first.choices, 'the replayed poll must be identical, not silently dropped');
+});
+
+// 2026-09-21, Basim going looking for tasks that never closed: شادي tapped
+// "✅ خلصت المهمة" on «مراسلة دواء تك وطلب API» on the 16th, the poll reached
+// Basim, he did not open it inside its 24 hours, and nothing was left behind --
+// no approvals row, so nothing listed under "شو مستني اعتمادي", nothing to
+// nudge, and no way to answer it at all. The task sat in "بانتظار الاعتماد"
+// for five days. The request must outlive the poll.
+test('a finished task is still waiting for a decision long after its poll has died', async t => {
+  const f = fixture(t);
+  f.db.prepare("INSERT INTO comments VALUES(9,?,?,?,?)").run(PROGRESS, 'خالد', 'سلّمت اللوحة', f.now - 1000);
+  await f.run(undefined, tap(`TSKQ${PROGRESS}`, `TSK${PROGRESS}FINISH`), async () => { throw Error('must not ask the model'); });
+  const approval = f.db.prepare("SELECT id,type,status,created_at AS createdAt FROM approvals WHERE entity_id=? ORDER BY rowid DESC LIMIT 1").get(PROGRESS);
+  assert.equal(approval.status, 'pending');
+  const poll = JSON.parse(f.db.prepare("SELECT choices_json AS c FROM agent_outbox WHERE to_user='basem' ORDER BY id DESC LIMIT 1").get().c);
+  // The poll dies in 24 hours; the request lives fourteen days (APPROVAL_TTL_MS)
+  // and is still pending long after the bubble has stopped answering.
+  const twoDaysLater = poll.expiresAt + 24 * 60 * 60_000;
+  assert.ok(approval.createdAt + APPROVAL_TTL_MS > twoDaysLater,
+    'the request must outlive the poll by days, not expire with it');
+  assert.equal(f.db.prepare("SELECT COUNT(*) AS n FROM approvals WHERE entity_id=? AND status='pending'").get(PROGRESS).n,
+    1, 'and it is still there, listed and answerable, after the bubble stops responding');
+});
+
+test('a second FINISH tap on a task already waiting does not file the request twice', async t => {
+  const f = fixture(t);
+  f.db.prepare("INSERT INTO comments VALUES(10,?,?,?,?)").run(PROGRESS, 'خالد', 'سلّمت اللوحة', f.now - 1000);
+  await f.run(undefined, tap(`TSKQ${PROGRESS}`, `TSK${PROGRESS}FINISH`), async () => { throw Error('must not ask the model'); });
+  f.db.prepare("UPDATE tasks SET status='progress' WHERE id=?").run(PROGRESS);
+  await f.run(undefined, { ...tap(`TSKQ${PROGRESS}`, `TSK${PROGRESS}FINISH`), messageId: 'second' }, async () => { throw Error('must not ask the model'); });
+  const count = f.db.prepare("SELECT COUNT(*) AS n FROM approvals WHERE entity_id=? AND type='task_close' AND status='pending'").get(PROGRESS).n;
+  assert.equal(count, 1, 'one open request per task, however many times the button is pressed');
 });

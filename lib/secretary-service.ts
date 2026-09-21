@@ -8,15 +8,15 @@ import { directTaskCreationIntent, emptySecretaryIntent, validateSecretaryIntent
 import { priorityTaskQuery, type PriorityTaskQuery } from "./secretary-priority-query.ts";
 import { AGENT_KINDS } from "./secretary-intent.ts";
 import { applyDecision, createTasks, handleAgentIntent, type AgentResult, type TaskDraftTask } from "./secretary-agent.ts";
-import { approvalDecisionPollFor, formatApprovalChoice, listApprovals, requestDeadlineExtension, requestTaskCreate } from "./approvals.ts";
+import { approvalDecisionPollFor, formatApprovalChoice, listApprovals, requestDeadlineExtension, requestTaskClose, requestTaskCreate } from "./approvals.ts";
 import { activeRules } from "./rules.ts";
 import { searchKnowledge, formatKnowledgeHits } from "./knowledge.ts";
 import { migrateSecretaryMemory, rememberSecretaryMistake, recallSecretaryMemory, personalMemoryCommand, updatePersonalMemory, personalMemory } from "./secretary-memory.ts";
-import { enqueueAgentMessage } from "./agent-followups.ts";
+import { enqueueAgentMessage, recordOpenChoice, clearOpenChoice, openChoiceFor, countOpenChoiceNudge } from "./agent-followups.ts";
 import { safeConversationalReply } from "./secretary-conversation-policy.ts";
 import { secretaryReviewRequest, isSecretaryIdentityQuery, isAddressedToSecretary, SECRETARY_IDENTITY } from "./secretary-review.ts";
 import { migrateSecretaryOutbox, getSecretaryOutboxRecipients, createSecretaryOutboxPreview, confirmSecretaryOutboxPreview, getSecretaryOutboxStatus, secretaryOutboxDeliveryLabel, SecretaryOutboxError } from "./secretary-outbox.ts";
-import { CHOICE_CANCEL, migrateSecretaryChoices, createSecretaryChoices, consumeSecretaryChoice, clearSecretaryChoices, secretaryChoiceOptions, peekSecretaryChoiceField, SecretaryChoiceError, type SecretaryChoices, type SecretaryChoiceField } from "./secretary-choices.ts";
+import { CHOICE_CANCEL, UNIVERSAL_CANCEL_ID, withWayOut, migrateSecretaryChoices, createSecretaryChoices, consumeSecretaryChoice, clearSecretaryChoices, secretaryChoiceOptions, peekSecretaryChoiceField, SecretaryChoiceError, type SecretaryChoices, type SecretaryChoiceField } from "./secretary-choices.ts";
 
 type Task = { id: string; title: string; details: string; status: string; priority: string; owner: string | null; suggestedOwner: string | null; dueDate: string | null; updatedAt: number | null; archivedAt: number | null };
 export type Snapshot = { tasks: Task[]; users: Array<ChatUser>; comments: Array<{ taskId: string; author: string; body: string; createdAt: number }> };
@@ -35,6 +35,14 @@ type TaskDraft = { title: string | null; details: string | null; priority: "red"
 type IntakeRow = { draft_json: string; last_event_key: string; expires_at: number };
 const ORIGIN = "https://www.management.titanium-pharmacy.com";
 const CONFIRM_MS = 10 * 60_000;
+// The "which task did you mean?" picker outlives the ten-minute confirmation
+// window, because since 2026-09-21 it does more than ask: while it is open the
+// employee cannot type at all (see the gate in handleSecretaryEvent). Ten
+// minutes would have quietly unlocked him and handed his next stray digit
+// straight back to the command that closed Shadi's task. Basim, asked how long
+// it should hold: "\u0645\u0627\u0634\u064a 24 \u0633\u0627\u0639\u0647 \u0643\u0648\u064a\u0633" -- the same 24 hours every other poll
+// gets, and the ceiling the bridge enforces (MAX_POLL_LIFETIME_MS).
+const TASK_PICK_MS = 24 * 60 * 60_000;
 const HISTORY_MS = 24 * 60 * 60_000;
 const HISTORY_CHARS = 6000;
 const INTAKE_MS = 30 * 60_000;
@@ -226,7 +234,7 @@ function parseExtensionDurationChoice(event: Event): { taskId: string; days: num
 // eleven tasks offered, never twelve.
 const MAX_CHOICE_CANDIDATES = 11;
 function taskChoicePoll(token: string, candidates: Task[], now: number, title: string): SecretaryChoices {
-  return { id: `TDQ${token}`, title, expiresAt: now + CONFIRM_MS,
+  return { id: `TDQ${token}`, title, expiresAt: now + TASK_PICK_MS,
     // Basim, 2026-09-20: Khalid asked to finish a task and got the question
     // as plain text with nothing to tap, while the same question gave Basim a
     // poll. The bridge refuses a poll whose labels are not unique (a vote is
@@ -554,6 +562,15 @@ function boundedHistory(rows: HistoryRow[], quote?: { result_json: string }): Se
   if (quoted) history.push({ role: "assistant", content: quoted });
   return history;
 }
+// Everything this person had half-finished, dropped in one place: the way out
+// on a poll means "\u0645\u0627 \u0628\u062f\u064a \u0625\u0634\u064a", so it must leave nothing behind waiting on them.
+function forgetPendingWork(db: DatabaseSync, conversationKey: string, userId: string) {
+  for (const table of ["secretary_task_choice", "secretary_note_followup", "secretary_pending", "secretary_task_intake", "secretary_confirmation_views"]) {
+    db.prepare(`DELETE FROM ${table} WHERE conversation_key=?`).run(conversationKey);
+  }
+  clearSecretaryChoices(db, conversationKey);
+  clearOpenChoice(db, userId);
+}
 function lookup(db: DatabaseSync, event: Event, actor: ChatUser, state: Snapshot): Result | null {
   const row = db.prepare("SELECT payload_hash,actor_id,result_json,scope_json FROM secretary_events WHERE event_key=?").get(eventKey(event)) as { payload_hash: string; actor_id: string; result_json: string; scope_json: string } | undefined;
   if (!row) return null;
@@ -592,6 +609,14 @@ function save(db: DatabaseSync, event: Event, actor: ChatUser, result: Result, s
     if (actor.id === "basem" && actor.role === "admin" && actor.active === 1 && event.groupId === null) {
       bounded.choices = confirmChoices(pending.token, now);
     }
+  }
+  // Every poll leaves with the universal way out on it, and is remembered as
+  // the one this person now has open -- from here until they tap something,
+  // nothing they type is read as an answer (see the gate in
+  // handleSecretaryEvent). Polls never reach a group, so neither does this.
+  if (bounded.choices && event.groupId === null) {
+    bounded.choices = withWayOut(bounded.choices);
+    recordOpenChoice(db, actor.id, bounded.choices);
   }
   db.prepare("INSERT INTO secretary_events VALUES (?,?,?,?,?,?,?,?,?)").run(eventKey(event), eventHash(event), actor.id, conversation(event, actor), event.text, JSON.stringify(bounded), JSON.stringify(scope), now, event.responseMessageId ?? null);
   return bounded;
@@ -1290,6 +1315,52 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
   exploreOdoo?: (userId: string, text: string, at: number) => Promise<string | null>;
 }): Promise<Result> {
   migrateSecretary(db); const now = (dependencies.now || Date.now)();
+  // ---------------------------------------------------------------------
+  // An open poll is the only thing this person can answer.
+  //
+  // 2026-09-21: Shadi had the task menu open and typed "5" -- meant for
+  // something else entirely -- and the secretary read it as "\u0627\u0646\u0647\u0627\u0621 \u0627\u0644\u0645\u0647\u0645\u0629"
+  // and closed a task he was still working on. Basim: "\u0627\u0644\u063a\u064a \u0643\u0644
+  // \u0627\u0644\u0627\u062d\u062a\u0645\u0627\u0644\u0627\u062a \u0648\u0636\u0644\u0643 \u0643\u0631\u0631\u0644\u0647 \u064a\u062e\u062a\u0627\u0631 \u062e\u064a\u0627\u0631 \u0641\u0642\u0637 \u0644\u062d\u062f \u0645\u0627 \u064a\u062e\u062a\u0627\u0631 \u0645\u0646 \u0627\u0644\u0642\u0627\u0626\u0645\u0629".
+  //
+  // So while an employee has a live poll in front of them, NOTHING they type
+  // is read -- not a digit, not a sentence, not a voice note. They get the
+  // same poll put back in front of them, every time, until they tap. The way
+  // out is on the poll itself, so this can never trap anyone.
+  //
+  // Basim is deliberately outside this: he runs the place from this chat and
+  // types commands into it all day, and an approval poll sitting in his
+  // thread must never stop him asking what today's sales were.
+  {
+    const gateActor = actorFor(db, event, config);
+    if (config.enabled && gateActor && gateActor.active === 1 && event.groupId === null) {
+      const seen = db.prepare("SELECT 1 FROM secretary_events WHERE event_key=?").get(eventKey(event));
+      if (!seen && event.choice && event.choice.optionId === UNIVERSAL_CANCEL_ID) {
+        return transaction(db, () => {
+          const key = conversation(event, gateActor);
+          // Cancelling an action is not changing the subject: whatever task the
+          // conversation was on stays on, so the next sentence still lands on it.
+          const last = db.prepare("SELECT result_json FROM secretary_events WHERE conversation_key=? ORDER BY created_at DESC,rowid DESC LIMIT 1").get(key) as { result_json: string } | undefined;
+          let focused: string | undefined;
+          try { focused = last ? JSON.parse(last.result_json).taskId ?? undefined : undefined; } catch { focused = undefined; }
+          forgetPendingWork(db, key, gateActor.id);
+          return save(db, event, gateActor, { status: "applied",
+            reply: "\u062a\u0645\u0627\u0645\u060c \u0623\u0644\u063a\u064a\u062a \u0627\u0644\u0637\u0644\u0628. \u0645\u0627 \u0635\u0627\u0631 \u0625\u0634\u064a.",
+            ...(focused ? { taskId: focused } : {}) }, [], now);
+        });
+      }
+      if (event.choice) clearOpenChoice(db, gateActor.id);
+      else if (gateActor.role !== "admin" && !seen) {
+        const open = openChoiceFor(db, gateActor.id, now);
+        if (open) {
+          countOpenChoiceNudge(db, gateActor.id);
+          return transaction(db, () => save(db, event, gateActor, { status: "clarify",
+            reply: "\u261d\ufe0f \u0644\u0633\u0627 \u0641\u064a \u0633\u0624\u0627\u0644 \u0645\u0641\u062a\u0648\u062d \u0639\u0646\u062f\u0643. \u0627\u062e\u062a\u0627\u0631 \u0645\u0646 \u0627\u0644\u0642\u0627\u0626\u0645\u0629 \u2014 \u0627\u0644\u0643\u062a\u0627\u0628\u0629 \u0645\u0627 \u0628\u062a\u0646\u0641\u0639 \u0647\u0644\u0623.\n\u0625\u0630\u0627 \u0645\u0627 \u0628\u062f\u0643 \u0625\u0634\u064a\u060c \u0627\u062e\u062a\u0627\u0631 \u00ab" + CHOICE_CANCEL + "\u00bb.",
+            choices: open.choices }, [], now));
+        }
+      }
+    }
+  }
   // A question about the pharmacy's own system, answered from its real numbers
   // before anything else looks at the message. Deliberately ahead of the model:
   // matchOdooQuestion recognises a fixed set of questions by their wording (see
@@ -1749,7 +1820,7 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
       // branches further below -- a stale unconsumed row for this
       // conversation must be replaced, never collide with the new one.
       db.prepare("INSERT INTO secretary_task_choice VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(conversation_key) DO UPDATE SET token=excluded.token,kind=excluded.kind,candidate_ids=excluded.candidate_ids,fields_json=excluded.fields_json,original_text=excluded.original_text,source_message_id=excluded.source_message_id,expires_at=excluded.expires_at")
-        .run(key, token, kind, JSON.stringify(candidates.map(t => t.id)), JSON.stringify({}), event.text, event.messageId, now + CONFIRM_MS);
+        .run(key, token, kind, JSON.stringify(candidates.map(t => t.id)), JSON.stringify({}), event.text, event.messageId, now + TASK_PICK_MS);
       log(db, fresh, event, "secretary_task_choice", { summary: "عرض اختيار المهمة قبل التنفيذ", kind, candidateIds: candidates.map(t => t.id) }, now);
       const question = manyTaskQuestion(kind);
       return save(db, event, fresh, { status: "clarify", reply: `${question}\n${candidates.slice(0, MAX_CHOICE_CANDIDATES).map((t, index) => `${index + 1}. ${clean(t.title, 150)}`).join("\n")}`, choices: taskChoicePoll(token, candidates, now, question) }, candidates.map(t => "t:" + t.id), now);
@@ -2419,7 +2490,7 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
         // turn (Basim hit this for real: خالد's second "انهاء المهمة" came
         // back broken instead of a fresh poll).
         db.prepare("INSERT INTO secretary_task_choice VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(conversation_key) DO UPDATE SET token=excluded.token,kind=excluded.kind,candidate_ids=excluded.candidate_ids,fields_json=excluded.fields_json,original_text=excluded.original_text,source_message_id=excluded.source_message_id,expires_at=excluded.expires_at")
-          .run(key, token, plan.kind, JSON.stringify(candidates.map(t => t.id)), JSON.stringify(fields), event.text, event.messageId, now + CONFIRM_MS);
+          .run(key, token, plan.kind, JSON.stringify(candidates.map(t => t.id)), JSON.stringify(fields), event.text, event.messageId, now + TASK_PICK_MS);
         log(db, freshActor, event, "secretary_task_choice", { summary: "عرض اختيار المهمة قبل التنفيذ", kind: plan.kind, candidateIds: candidates.map(t => t.id) }, now);
         const question = manyTaskQuestion(plan.kind);
           return save(db, event, freshActor, { status: "clarify", reply: `${question}\n${candidates.slice(0, MAX_CHOICE_CANDIDATES).map((t, index) => `${index + 1}. ${clean(t.title, 150)}`).join("\n")}`, choices: taskChoicePoll(token, candidates, now, question) }, candidates.map(t => "t:" + t.id), now);
@@ -2466,7 +2537,7 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
           // above -- a stale unconsumed row for this conversation must be
           // replaced, never collide with the new one.
           db.prepare("INSERT INTO secretary_task_choice VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(conversation_key) DO UPDATE SET token=excluded.token,kind=excluded.kind,candidate_ids=excluded.candidate_ids,fields_json=excluded.fields_json,original_text=excluded.original_text,source_message_id=excluded.source_message_id,expires_at=excluded.expires_at")
-            .run(key, token, command.action, JSON.stringify(candidates.map(t => t.id)), JSON.stringify(command.action === "comment" ? { comment: command.comment } : {}), event.text, event.messageId, now + CONFIRM_MS);
+            .run(key, token, command.action, JSON.stringify(candidates.map(t => t.id)), JSON.stringify(command.action === "comment" ? { comment: command.comment } : {}), event.text, event.messageId, now + TASK_PICK_MS);
           log(db, freshActor, event, "secretary_task_choice", { summary: "عرض اختيار المهمة قبل التنفيذ", kind: command.action, candidateIds: candidates.map(t => t.id) }, now);
           const question = manyTaskQuestion(command.action);
           return save(db, event, freshActor, { status: "clarify", reply: `${question}\n${candidates.slice(0, MAX_CHOICE_CANDIDATES).map((t, index) => `${index + 1}. ${clean(t.title, 150)}`).join("\n")}`, choices: taskChoicePoll(token, candidates, now, question) }, candidates.map(t => "t:" + t.id), now);
@@ -2534,7 +2605,7 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
         // above -- a stale unconsumed row for this conversation must be
         // replaced, never collide with the new one.
         db.prepare("INSERT INTO secretary_task_choice VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(conversation_key) DO UPDATE SET token=excluded.token,kind=excluded.kind,candidate_ids=excluded.candidate_ids,fields_json=excluded.fields_json,original_text=excluded.original_text,source_message_id=excluded.source_message_id,expires_at=excluded.expires_at")
-          .run(key, token, kind, JSON.stringify(candidates.map(t => t.id)), JSON.stringify({}), event.text, event.messageId, now + CONFIRM_MS);
+          .run(key, token, kind, JSON.stringify(candidates.map(t => t.id)), JSON.stringify({}), event.text, event.messageId, now + TASK_PICK_MS);
         log(db, freshActor, event, "secretary_task_choice", { summary: "عرض اختيار المهمة قبل التنفيذ (تخمين احتياطي)", kind, candidateIds: candidates.map(t => t.id) }, now);
         const question = manyTaskQuestion(kind);
           return save(db, event, freshActor, { status: "clarify", reply: `${question}\n${candidates.slice(0, MAX_CHOICE_CANDIDATES).map((t, index) => `${index + 1}. ${clean(t.title, 150)}`).join("\n")}`, choices: taskChoicePoll(token, candidates, now, question) }, candidates.map(t => "t:" + t.id), now);
@@ -2658,7 +2729,28 @@ export function dispatchManagementNotice(db: DatabaseSync, actor: ChatUser, stat
   // place a submit notifies basem -- the block above deliberately excludes
   // it to avoid a second, redundant message for the very same event.
   if (result.notification.action === "submit" && taskId) {
-    enqueueAgentMessage(db, { toUser: "basem", text: notice, choices: taskCloseDecisionPoll(taskId, now) }, now);
+    // A poll is not a durable request. Shadi tapped "\u2705 \u062e\u0644\u0635\u062a \u0627\u0644\u0645\u0647\u0645\u0629" on
+    // "\u0645\u0631\u0627\u0633\u0644\u0629 \u062f\u0648\u0627\u0621 \u062a\u0643 \u0648\u0637\u0644\u0628 API" on 2026-09-16; the poll below reached Basim,
+    // he did not open it within its 24 hours, and nothing was left behind --
+    // no approvals row, so nothing in "\u0634\u0648 \u0645\u0633\u062a\u0646\u064a \u0627\u0639\u062a\u0645\u0627\u062f\u064a", nothing to nudge,
+    // and no way to answer it at all. The task sat in "\u0628\u0627\u0646\u062a\u0638\u0627\u0631 \u0627\u0644\u0627\u0639\u062a\u0645\u0627\u062f"
+    // for five days until he went looking for it. So a submit now files the
+    // same real approval the typed close flow files: it lives fourteen days,
+    // it is listed, it is nudged, and its poll is a convenience on top of a
+    // request that outlives the poll rather than the only way in.
+    //
+    // requestTaskClose is safe to call on a task that is ALREADY in approval
+    // -- it skips the submit it would otherwise perform -- so this records
+    // the request without acting on the task a second time.
+    const pending = db.prepare("SELECT id FROM approvals WHERE entity_id=? AND type='task_close' AND status='pending' LIMIT 1").get(taskId);
+    let filed: { ownerMessage: string; choices: SecretaryChoices } | null = null;
+    if (!pending) {
+      // Filing must never cost the person their own close: if it fails, the
+      // poll below still goes out exactly as it did before.
+      try { filed = requestTaskClose(db, actor, { taskId }, { now }); } catch { filed = null; }
+    }
+    enqueueAgentMessage(db, { toUser: "basem", text: filed ? filed.ownerMessage : notice,
+      choices: filed ? filed.choices : taskCloseDecisionPoll(taskId, now) }, now);
   }
 }
 // On-demand "remind everyone now" broadcast (Basim asking directly, not the

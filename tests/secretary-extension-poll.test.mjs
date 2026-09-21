@@ -10,6 +10,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
+import { CHOICE_CANCEL } from '../lib/secretary-choices.ts';
 import { handleSecretaryEvent, migrateSecretary } from "../lib/secretary-service.ts";
 import { emptySecretaryIntent } from "../lib/secretary-intent.ts";
 import { listApprovals, decideApproval } from "../lib/approvals.ts";
@@ -43,7 +44,7 @@ test("tapping «تمديد التاريخ» offers the three fixed durations ins
   assert.doesNotMatch(asked.reply, /اكتب عدد الأيام|التاريخ الجديد/, "the free-text question is gone for employees");
   const options = asked.choices.options.map(option => option.label).join(" | ");
   assert.match(options, /يوم واحد/); assert.match(options, /يومين/); assert.match(options, /٥ أيام/);
-  assert.equal(asked.choices.options.length, 3, "exactly three durations, no more");
+  assert.equal(asked.choices.options.length, 4, "exactly three durations, plus the way out");
 });
 
 test("a tapped duration counts from today, raises an approval for Basim, and never asks the model", async t => {
@@ -106,7 +107,7 @@ test("Basim gets the same three durations, and confirms his own extension with a
   const asOwner = { senderNumber: "12025550103" };
   const asked = await f.run(undefined, { ...asOwner, ...tap("LGDQ", "LGDEXTEND") }, async () => { throw Error("the duration must never reach the model"); });
   assert.equal(asked.status, "clarify");
-  assert.deepEqual(asked.choices.options.map(o => o.label), ["🟢 يوم واحد", "🟡 يومين", "🟠 ٥ أيام"]);
+  assert.deepEqual(asked.choices.options.map(o => o.label), ["🟢 يوم واحد", "🟡 يومين", "🟠 ٥ أيام", CHOICE_CANCEL]);
 
   const proposed = await f.run(undefined, { ...asOwner, ...tap("EXTQt", "EXTtD1") }, async () => { throw Error("no model"); });
   assert.equal(proposed.status, "confirmation", "his own extension is a confirmation, not a request to himself");

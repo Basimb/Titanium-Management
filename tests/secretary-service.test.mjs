@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
+import { CHOICE_CANCEL, UNIVERSAL_CANCEL_ID } from '../lib/secretary-choices.ts';
 import { handleSecretaryEvent, migrateSecretary, secretaryTaskCard } from '../lib/secretary-service.ts';
 import { emptySecretaryIntent, validateSecretaryIntent, inferSecretaryIntent, searchSecretaryWeb } from '../lib/secretary-intent.ts';
 import { createSecretaryJobs } from '../lib/secretary-jobs.ts';
@@ -259,7 +260,7 @@ test('an employee finishing or commenting on a task does NOT get the standalone 
  // Basim still gets every task update privately (see dispatchManagementNotice)
  // -- confirm that landed for the employee's own submit above, and never
  // fires for Basim's own actions (no self-notice).
- assert.ok(outbox(f.db).some(r=>r.toUser==='basem'&&/📤/.test(r.text)&&/لوحة/.test(r.text)),'Basim gets a private notice of the employee finishing their task');
+ assert.ok(outbox(f.db).some(r=>r.toUser==='basem'&&/انتهت/.test(r.text)&&/لوحة/.test(r.text)),'Basim gets the decision request for the employee finishing their task');
  assert.equal(outbox(f.db).filter(r=>r.toUser==='basem'&&/أوامر المهام السريعة/.test(r.text)).length,0,'Basim never gets the employee-facing legend');
  const admin={senderNumber:'12025550103'};
  const before=outbox(f.db).filter(r=>r.toUser==='basem').length;
@@ -323,7 +324,7 @@ test('Basim can tap موافق/إلغاء instead of typing them, and a stale po
  assert.equal(proposed.status,'confirmation');
  const token=pending(f.db).token,choices=proposed.choices;
  assert.equal(choices.id,`CFM${token}`);
- assert.deepEqual(choices.options.map(o=>o.label),['🟢 موافق','🔴 إلغاء']);
+ assert.deepEqual(choices.options.map(o=>o.label),['🟢 موافق','🔴 إلغاء',CHOICE_CANCEL]);
  assert.equal(choices.options[0].id,`CFM${token}Y`);assert.equal(choices.options[1].id,`CFM${token}N`);
  assert.ok(choices.expiresAt>f.now);
  // Tapping "موافق" behaves exactly like typing "موافق <token>".
@@ -527,6 +528,11 @@ test('history and quoted context share a 6000-character budget without changing 
 test('contextual chat and friendly acknowledgment retain focus but a new topic clears it',async t=>{
  const f=fixture(t);const details={...emptySecretaryIntent('details'),taskId:'t'};
  await f.run(details,{text:'اشرح اللوحة'});
+ // The task card comes back with its own action poll, and since 2026-09-21 an
+ // open poll stops an employee typing at all -- so he taps the way out first,
+ // exactly as he would in the chat. Cancelling the action keeps the subject.
+ const out=await f.run(undefined,{choice:{questionId:'X',optionId:UNIVERSAL_CANCEL_ID}});
+ assert.equal(out.taskId,'t','cancelling an action is not changing the subject');
  const chat={...emptySecretaryIntent('chat','المقصود تجهيز اللوحة ومتابعة المورد.'),taskId:'t'};
  await f.run(chat,{text:'شو يعني؟'},async input=>{assert.equal(input.focusedTaskId,'t');return chat;});
  const ack=await f.run(undefined,{text:'تمام'},async()=>{throw Error('friendly acknowledgment must not invoke model');});
@@ -785,7 +791,7 @@ test('a proactive task-close approval notification carries a tappable poll, and 
  const choices=JSON.parse(row.choicesJson);
  const approvalId=f.db.prepare("SELECT id FROM approvals WHERE type='task_close' AND status='pending'").get().id;
  assert.equal(choices.id,`APR${approvalId}`);
- assert.deepEqual(choices.options.map(o=>o.id),[`APR${approvalId}Y`,`APR${approvalId}N`]);
+ assert.deepEqual(choices.options.map(o=>o.id),[`APR${approvalId}Y`,`APR${approvalId}N`,'NOPEX']);
  assert.equal(choices.expiresAt-f.now,24*60*60_000,'24h is the ceiling the bridge enforces (MAX_POLL_LIFETIME_MS); a shorter one silently drops late taps');
  const admin={senderNumber:'12025550103'};
  const tapped=await f.run(undefined,{...admin,choice:{questionId:choices.id,optionId:`APR${approvalId}Y`}},

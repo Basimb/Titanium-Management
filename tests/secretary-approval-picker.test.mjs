@@ -86,7 +86,7 @@ test('tapping a request in the picker answers with that request and its own deci
   assert.equal(f.modelCalls(), 0, 'a tap must resolve in code');
   assert.match(r.reply, /تحويل عقد الإيجار/);
   assert.equal(r.choices.id, 'APRa2');
-  assert.deepEqual(r.choices.options.map(o => o.id), ['APRa2Y', 'APRa2N']);
+  assert.deepEqual(r.choices.options.map(o => o.id), ['APRa2Y', 'APRa2N', 'NOPEX']);
 });
 
 test('a request decided since the picker was sent says so instead of re-offering it', async t => {

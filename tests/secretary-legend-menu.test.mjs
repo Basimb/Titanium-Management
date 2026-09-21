@@ -13,6 +13,7 @@ import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 import { handleSecretaryEvent, migrateSecretary } from '../lib/secretary-service.ts';
 import { emptySecretaryIntent } from '../lib/secretary-intent.ts';
+import { CHOICE_CANCEL } from '../lib/secretary-choices.ts';
 
 const PROGRESS = '22222222-2222-4222-8222-222222222222';
 const PROGRESS2 = '33333333-3333-4333-8333-333333333333';
@@ -59,7 +60,7 @@ test('the numbered legend menu lists all five commands with their number and col
   assert.match(legend.text, /4️⃣.*تمديد التاريخ/);
   assert.match(legend.text, /5️⃣.*انهاء المهمة/);
   const choices = JSON.parse(legend.choicesJson);
-  assert.deepEqual(choices.options.map(o => o.id), ['LGDADD', 'LGDNOTE', 'LGDTRANSFER', 'LGDEXTEND', 'LGDFINISH']);
+  assert.deepEqual(choices.options.map(o => o.id), ['LGDADD', 'LGDNOTE', 'LGDTRANSFER', 'LGDEXTEND', 'LGDFINISH', 'NOPEX']);
 });
 
 // Basim (2026-09-15): "بس يطلب تمديد اعطيه خيارات يوم - يومين - 5 ايام فقط
@@ -75,7 +76,7 @@ test('tapping LGDEXTEND with exactly one eligible task asks the duration as fixe
   const r = await f.run(undefined, async () => { throw Error('the duration must never reach the model'); }, tap('LGDQ', 'LGDEXTEND'));
   assert.equal(r.status, 'clarify');
   assert.match(r.reply, /لأي مدة بدك تمدد موعد «لوحة»/);
-  assert.deepEqual(r.choices.options.map(o => o.label), ['🟢 يوم واحد', '🟡 يومين', '🟠 ٥ أيام']);
+  assert.deepEqual(r.choices.options.map(o => o.label), ['🟢 يوم واحد', '🟡 يومين', '🟠 ٥ أيام', CHOICE_CANCEL]);
 });
 
 // Basim (2026-09-12): "لما تظهر زي هاي الحالة ما يستخدم ارقام المهام...
@@ -118,10 +119,14 @@ test('a bare digit reply to "how many days" is never hijacked as a main-menu sho
   const designOption = first.choices.options.find(o => o.label.endsWith('تصميم'));
   const tapped = await f.run(undefined, undefined, tap(first.choices.id, designOption.id));
   assert.equal(tapped.taskId, PROGRESS2);
-  let seenText, seenFocus;
-  await f.run('3', async input => { seenText = input.text; seenFocus = input.focusedTaskId; return emptySecretaryIntent('clarify', 'تمام، مددتها.'); });
-  assert.equal(seenText, '3', 'the bare digit must reach the model as-is, never rewritten to a legend command');
-  assert.equal(seenFocus, PROGRESS2, 'must stay focused on the task just picked via the poll, not re-ask which task');
+  // 2026-09-21: the bare digit no longer reaches the model at all. Shadi typed
+  // "5" at an open poll and closed a task with it, so while a poll is waiting
+  // an employee's typing is refused outright and the same poll is put back in
+  // front of them -- "الغي كل الاحتمالات ... لحد ما يختار من القائمة".
+  const typed = await f.run('3', async () => { throw Error('typing must never reach the model while a poll is open'); });
+  assert.match(typed.reply, /اختار من القائمة/);
+  assert.ok(typed.choices, 'the same poll comes back rather than being pointed at');
+  assert.ok(typed.choices.options.some(o => o.label === CHOICE_CANCEL), 'and it always carries the way out');
 });
 
 test('tapping LGDEXTEND with zero eligible tasks resolves deterministically to the "no task" reply, exactly like FINISH/NOTE/TRANSFER, never asking the model', async t => {
@@ -139,7 +144,7 @@ test('typing the bare phrase "تمديد الموعد" resolves exactly like tap
   const r = await f.run('تمديد الموعد', async () => { throw Error('the duration must never reach the model'); });
   assert.equal(r.status, 'clarify');
   assert.match(r.reply, /لأي مدة بدك تمدد موعد «لوحة»/);
-  assert.deepEqual(r.choices.options.map(o => o.label), ['🟢 يوم واحد', '🟡 يومين', '🟠 ٥ أيام']);
+  assert.deepEqual(r.choices.options.map(o => o.label), ['🟢 يوم واحد', '🟡 يومين', '🟠 ٥ أيام', CHOICE_CANCEL]);
 });
 
 test('a bare digit "1".."5" resolves to the matching quick command when the employee has no tasks at all to pick from', async t => {

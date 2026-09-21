@@ -71,27 +71,25 @@ test('close_request ("انهاء المهمة") with two eligible in-progress ta
 // secretary_task_choice (conversation_key is its primary key), which used to
 // collide with the still-unconsumed row from the first attempt and throw,
 // aborting the whole turn instead of just replacing it with a fresh poll.
-test('retyping the same ambiguous command again before tapping the first poll replaces it with a fresh poll instead of crashing', async t => {
+// 2026-09-21: retyping no longer reaches the model at all. Once the poll is
+// up, an employee's typing is refused and the SAME poll comes back -- Basim,
+// after Shadi typed "5" at an open poll and closed the wrong task: "الغي كل
+// الاحتمالات ... لحد ما يختار من القائمة". So the first poll is never stale: it
+// is the only one there is, and it still resolves.
+test('retyping the same ambiguous command again is refused, and the first poll still answers', async t => {
   const f = fixture(t);
-  // Deliberately a fuller sentence, not one of the bare trigger phrases
-  // legendTypedPhraseOption matches (secretary-task-typed-command.test.mjs
-  // covers that deterministic pre-model path) -- this test is specifically
-  // about the MODEL-classified plan still getting re-verified/overridden by
-  // legendCandidates, so it needs the model actually to be asked and to
-  // carry real "details" text through the tap.
   const first = await f.run(closeRequest(A, 'خلصت التنفيذ'), { text: 'خلصت الشغل وبدي اعلمك' });
   assert.ok(first.choices, 'first attempt must offer a poll');
-  const second = await f.run(closeRequest(B, 'خلصت فعلا'), { text: 'خلصت الشغل وبدي اعلمك' });
+  const second = await f.run(async () => { throw Error('typing must never reach the model while a poll is open'); },
+    { text: 'خلصت الشغل وبدي اعلمك مرة تانية' });
   assert.equal(second.status, 'clarify');
-  assert.ok(second.choices, 'retyping the same ambiguous command must still offer a poll, never crash or fall back to plain text');
-  assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM secretary_task_choice').get().n, 1, 'the stale row must be replaced, not duplicated');
-  // The stale first poll must no longer resolve to anything (its row is gone).
-  const staleTap = await f.run(undefined, tap(first.choices.id, first.choices.options[0].id), async () => { throw Error('must not ask the model'); });
-  assert.equal(staleTap.status, 'clarify');
-  assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM approvals').get().n, 0, 'the stale tap must not have applied anything');
-  // The fresh (second) poll must still resolve correctly.
-  const freshTap = await f.run(undefined, tap(second.choices.id, second.choices.options[1].id), async () => { throw Error('must not ask the model'); });
-  assert.equal(freshTap.status, 'applied');
+  assert.match(second.reply, /اختار من القائمة/);
+  assert.deepEqual(second.choices.options.map(o => o.id), first.choices.options.map(o => o.id),
+    'the same poll comes back, not a new one');
+  assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM secretary_task_choice').get().n, 1, 'one live question, never two');
+  assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM approvals').get().n, 0, 'and nothing was acted on');
+  const tapped = await f.run(undefined, tap(first.choices.id, first.choices.options[1].id), async () => { throw Error('must not ask the model'); });
+  assert.equal(tapped.status, 'applied');
   const approval = f.db.prepare("SELECT entity_id AS entityId FROM approvals WHERE type='task_close'").get();
   assert.equal(approval.entityId, B);
 });

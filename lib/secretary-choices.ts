@@ -8,6 +8,22 @@ import type { DatabaseSync } from "node:sqlite";
 export const CHOICE_CANCEL = "✖️ ولا إشي — ألغِ الطلب";
 
 export type SecretaryChoices = { id: string; title: string; options: Array<{ id: string; label: string }>; expiresAt: number };
+// Basim, 2026-09-21, after Shadi typed "5" at an open poll and closed a task
+// he never meant to close: "\u0636\u064a\u0641\u0644\u0647\u0645 \u0642\u0641\u0644 \u0627\u0644\u0627\u062e\u062a\u064a\u0627\u0631\u0627\u062a \u0645\u0627 \u0628\u062f\u064a \u0627\u064a\u0634\u064a \u0628\u0643\u0644 \u0627\u0644\u062d\u0627\u0644\u0627\u062a". Once a poll is open,
+// tapping it is the ONLY way forward -- so every poll, not just the ones that
+// act on a task, has to carry a way out. This id is universal and answered in
+// one place (see the open-poll gate in secretary-service.ts), so a poll whose
+// own parser knows nothing about cancelling still cancels.
+export const UNIVERSAL_CANCEL_ID = "NOPEX";
+const MAX_POLL_OPTIONS = 12;
+/** Appends the universal way out to any poll that does not already carry one. */
+export function withWayOut(choices: SecretaryChoices): SecretaryChoices {
+  if (choices.options.some(option => option.label === CHOICE_CANCEL || option.id === UNIVERSAL_CANCEL_ID)) return choices;
+  // A WhatsApp vote is matched by its LABEL, so the way out must never be
+  // dropped for lack of room -- the last ordinary option gives up its place.
+  const room = choices.options.slice(0, MAX_POLL_OPTIONS - 1);
+  return { ...choices, options: [...room, { id: UNIVERSAL_CANCEL_ID, label: CHOICE_CANCEL }] };
+}
 export type SecretaryChoiceField = "ownerId" | "priority" | "dueDate" | "approvalDecision";
 type Option = { id: string; label: string; value: string | null };
 type Binding = { conversationKey: string; actorId: string; draftVersion: string; catalogHash: string; now: number };

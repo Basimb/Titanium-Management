@@ -100,15 +100,17 @@ test('tapping the deterministic finish poll resolves against the tapped task and
   assert.equal(tapped.taskId, B);
   assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM approvals').get().n, 1);
 });
-test('retyping the same bare phrase again before tapping replaces the stale poll instead of colliding with it', async t => {
+// 2026-09-21: retyping the phrase is refused outright -- once a poll is up,
+// nothing an employee types is read. The first poll is therefore never stale.
+test('retyping the same bare phrase again is refused, and the first poll still answers', async t => {
   const f = fixture(t);
   const first = await f.run({ text: 'انهاء المهمة' });
-  const second = await f.run({ text: 'انهاء المهمة' });
-  assert.equal(second.status, 'clarify'); assert.ok(second.choices);
-  assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM secretary_task_choice').get().n, 1, 'the stale row must be replaced, not duplicated');
-  const staleTap = await f.run(tap(first.choices.id, first.choices.options[0].id), neverAsk);
-  assert.equal(staleTap.status, 'clarify');
-  assert.match(staleTap.reply, /ما عاد صالح/);
+  const second = await f.run({ text: 'انهاء المهمة' }, neverAsk);
+  assert.equal(second.status, 'clarify');
+  assert.match(second.reply, /اختار من القائمة/);
+  assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM secretary_task_choice').get().n, 1, 'one live question, never two');
+  const tapped = await f.run(tap(first.choices.id, first.choices.options[0].id), neverAsk);
+  assert.equal(tapped.status, 'applied', 'the poll he was given still works');
 });
 test('a bare "انهاء المهمة" with exactly one eligible task is rewritten to the equivalent named sentence and still goes through the model', async t => {
   const f = fixture(t, { secondTask: false }); // خالد now owns only A ("لوحة")

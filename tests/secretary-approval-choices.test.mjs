@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
+import { CHOICE_CANCEL } from '../lib/secretary-choices.ts';
 import { handleSecretaryEvent, migrateSecretary } from "../lib/secretary-service.ts";
 import { emptySecretaryIntent } from "../lib/secretary-intent.ts";
 import { listApprovals, requestDeadlineExtension, requestTaskOwnership } from "../lib/approvals.ts";
@@ -45,7 +46,8 @@ test("tap-to-decide: a poll button resolves only the tapped approval, a stale/re
 
   const list = await f.run(emptySecretaryIntent("approvals"), { ...asOwner, text: "شو الطلبات المعلقة؟" });
   assert.ok(list.choices, "owner listing must attach a real tap-to-decide poll");
-  assert.equal(list.choices.options.length, 4, "one ✅/❌ pair per pending request");
+  assert.equal(list.choices.options.length, 5, "one ✅/❌ pair per pending request, plus the universal way out");
+  assert.equal(list.choices.options.at(-1).label, CHOICE_CANCEL);
 
   // Tap the extension request's approve button -- must resolve THAT request
   // only, leaving شادي's ownership request untouched, no ordinal typing needed.
@@ -68,7 +70,7 @@ test("tap-to-decide: a poll button resolves only the tapped approval, a stale/re
 
   // A fresh poll for the one remaining request; tap reject this time.
   const second = await f.run(emptySecretaryIntent("approvals"), { ...asOwner, text: "الطلبات؟" });
-  assert.equal(second.choices.options.length, 2);
+  assert.equal(second.choices.options.length, 3, "the ✅/❌ pair, plus the universal way out");
   const rejectOwnership = second.choices.options.find(o => o.label.includes("❌"));
   const rejected = await f.run(undefined, { ...asOwner, choice: { questionId: second.choices.id, optionId: rejectOwnership.id } });
   assert.equal(rejected.status, "applied");

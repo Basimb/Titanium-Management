@@ -8,6 +8,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
+import { CHOICE_CANCEL } from '../lib/secretary-choices.ts';
 import { handleSecretaryEvent, migrateSecretary } from '../lib/secretary-service.ts';
 import { emptySecretaryIntent } from '../lib/secretary-intent.ts';
 
@@ -65,8 +66,9 @@ test('task_transfer_request with a reason but no colleague named offers a real t
   const r = await f.run(transferPlan({ reason: 'مشغول بمهمة ثانية' }), { text: 'بدي احول اللوحة لأني مشغول بمهمة ثانية' });
   assert.equal(r.status, 'clarify');
   assert.ok(r.choices, 'must offer a real poll, not a plain-text "who exactly" question');
-  assert.deepEqual(new Set(r.choices.options.map(o => o.label)), new Set(['شادي', 'أيمن', 'بدون تحديد - مش مسؤوليتي']));
-  assert.equal(r.choices.options.at(-1).label, 'بدون تحديد - مش مسؤوليتي', 'the decline option must be last');
+  assert.deepEqual(new Set(r.choices.options.map(o => o.label)), new Set(['شادي', 'أيمن', 'بدون تحديد - مش مسؤوليتي', CHOICE_CANCEL]));
+  assert.equal(r.choices.options.at(-1).label, CHOICE_CANCEL, 'the universal way out is always last');
+  assert.equal(r.choices.options.at(-2).label, 'بدون تحديد - مش مسؤوليتي', 'the decline option stays beside it');
   assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM approvals').get().n, 0);
 });
 

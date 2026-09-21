@@ -123,7 +123,9 @@ test('draft changed between preflight and transaction cannot consume against an 
   const f=fixture(t);const r=await f.run(draft({title:'المسودة الأولى'}));const contacts=f.config.contacts;let reads=0;
   // Inject a deterministic concurrent-writer interleaving at transaction reauthentication.
   Object.defineProperty(f.config,'contacts',{get(){
-    if(++reads===2){
+    // One extra read of contacts now happens before this point: the open-poll
+    // gate resolves the actor first (see handleSecretaryEvent).
+    if(++reads===3){
       f.db.prepare('UPDATE secretary_task_intake SET draft_json=?,last_event_key=?').run(JSON.stringify({...saved(f),title:'مسودة أحدث'}),'newer-event');
       const live=f.db.prepare('SELECT draft_json,last_event_key,expires_at FROM secretary_task_intake').get();
       f.db.prepare('UPDATE secretary_choices SET draft_version=?').run(createHash('sha256').update(JSON.stringify(live)).digest('hex'));

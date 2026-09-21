@@ -100,6 +100,18 @@ export function migrateAgentSchema(sqlite: DatabaseSync): void {
       );
       CREATE INDEX IF NOT EXISTS idx_agent_outbox_state ON agent_outbox(state, created_at);
 
+      -- The poll a person currently has open, and has not answered. Basim,
+      -- 2026-09-21, after Shadi typed "5" into a chat that had a poll waiting
+      -- and closed a task with it: "\u0627\u0644\u063a\u064a \u0643\u0644 \u0627\u0644\u0627\u062d\u062a\u0645\u0627\u0644\u0627\u062a ... \u0648\u0636\u0644\u0643 \u0632\u0646 \u0644\u063a\u0627\u064a\u0647 \u0645\u0627
+      -- \u064a\u062e\u062a\u0627\u0631 \u0627\u064a\u0634\u064a". While a row lives here, nothing the person TYPES is read as
+      -- an answer or as anything else; only a tap moves them on.
+      CREATE TABLE IF NOT EXISTS secretary_open_choice (
+        user_id TEXT PRIMARY KEY NOT NULL,
+        choices_json TEXT NOT NULL,
+        expires_at INTEGER NOT NULL,
+        nudges INTEGER DEFAULT 0 NOT NULL
+      );
+
       CREATE TABLE IF NOT EXISTS agent_followups (
         id TEXT PRIMARY KEY NOT NULL,
         kind TEXT NOT NULL,                -- overdue_task | stale_approval | daily_digest
