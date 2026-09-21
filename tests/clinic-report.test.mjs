@@ -28,21 +28,27 @@ const page = (data, marker = '"collected"') =>
   `</body></html>`.replace('COLLECTED', marker);
 
 /** A stand-in for the clinics' site: a login that must really be completed. */
-function site({ data = DATA, financeStatus = 200, loginStatus = 302, token = 'csrf-token' } = {}) {
+function site({ data = DATA, financeStatus = 200, loginStatus = 302, token = 'csrf-token', blade = false } = {}) {
   const seen = [];
   const fetcher = async (url, options = {}) => {
     const path = url.replace(clinic.url, '');
     seen.push({ path, method: options.method || 'GET', cookie: (options.headers || {}).cookie || '' });
     const headers = new Headers();
     if (path === '/login' && (options.method || 'GET') === 'GET') {
-      headers.append('set-cookie', 'XSRF-TOKEN=abc; Path=/');
+      headers.append('set-cookie', `XSRF-TOKEN=${encodeURIComponent(token)}; Path=/`);
       headers.append('set-cookie', 'clinic_session=s1; Path=/; HttpOnly');
-      return new Response(`<form method="post"><input type="hidden" name="_token" value="${token}"></form>`, { status: 200, headers });
+      // The real site is a Vue front end: its sign-in page ships no HTML form
+      // and no _token input, only the XSRF cookie above. `blade` puts the old
+      // Blade-style form back, so both shapes stay covered.
+      return new Response(blade ? `<form method="post"><input type="hidden" name="_token" value="${token}"></form>` : '<div id="app"></div>',
+        { status: 200, headers });
     }
     if (path === '/login') {
       const body = new URLSearchParams(options.body);
-      if (body.get('_token') !== token || body.get('email') !== clinic.email || body.get('password') !== clinic.password) {
-        return new Response('<form></form>', { status: 200 });
+      const sentToken = body.get('_token') || (options.headers || {})['x-xsrf-token'];
+      if (sentToken !== token) return new Response('', { status: 419 });
+      if (body.get('email') !== clinic.email || body.get('password') !== clinic.password) {
+        return new Response(JSON.stringify({ errors: {} }), { status: 422 });
       }
       headers.append('set-cookie', 'clinic_session=authed; Path=/; HttpOnly');
       headers.set('location', '/dashboard');
@@ -74,9 +80,21 @@ test('the numbers are the system\'s own, read as JSON rather than off the screen
 
 test('a wrong password is a failure, never an empty day', async () => {
   const { fetcher } = site();
-  // The site answers a bad login by rendering the form again (200, no redirect).
   await assert.rejects(() => openClinicSession({ ...clinic, password: 'wrong' }, fetcher),
     error => error instanceof ClinicError && error.message === 'clinic_login_rejected');
+});
+
+// 2026-09-21: the first version looked for a hidden _token input and gave up
+// when it found none -- the site's sign-in page is a Vue app and ships no HTML
+// form at all. The token is in the XSRF cookie; both shapes work now.
+test('a sign-in page with no HTML form still signs in, from the XSRF cookie', async () => {
+  for (const blade of [false, true]) {
+    const { fetcher, seen } = site({ blade });
+    const session = await openClinicSession(clinic, fetcher);
+    assert.equal((await session.finance('2026-09-21', '2026-09-21')).net, 759, `blade=${blade}`);
+    const post = seen.find(call => call.method === 'POST');
+    assert.ok(post, 'the login is really performed either way');
+  }
 });
 
 test('a page we did not really reach is a failure, never a day with no money in it', async () => {

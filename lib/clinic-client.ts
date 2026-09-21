@@ -108,33 +108,58 @@ export async function openClinicSession(config: ClinicConfig, fetcher: Fetcher =
     return response;
   };
 
+  // Laravel's CSRF token travels two ways, and this site uses the second one:
+  // a Blade form carries it in a hidden _token input, while a Vue front end
+  // (which this is -- its login page ships no HTML form at all) carries it in
+  // the XSRF-TOKEN cookie and echoes it back as a header. Read the form's copy
+  // when there is one, fall back to the cookie, and send both.
   const page = await get("/login");
-  if (!page.ok) throw new ClinicError("clinic_login_unreachable");
+  if (!page.ok && page.status < 300) throw new ClinicError("clinic_login_unreachable");
   const html = await page.text();
-  // Laravel's CSRF token travels twice: in the form and in the XSRF cookie.
-  // The form's copy is the one the POST must echo back.
-  const token = html.match(/name="_token"\s+value="([^"]+)"/)?.[1] ?? html.match(/value="([^"]+)"\s+name="_token"/)?.[1];
+  const formToken = html.match(/name="_token"\s+value="([^"]+)"/)?.[1] ?? html.match(/value="([^"]+)"\s+name="_token"/)?.[1];
+  const cookieToken = cookies.get("XSRF-TOKEN");
+  const token = formToken ?? (cookieToken ? decodeURIComponent(cookieToken) : undefined);
   if (!token) throw new ClinicError("clinic_login_form_changed");
 
   let signIn: Response;
   try {
     signIn = await fetcher(`${config.url}/login`, {
       method: "POST",
-      headers: { "content-type": "application/x-www-form-urlencoded", cookie: cookies.header(), "accept-language": "ar" },
+      headers: {
+        "content-type": "application/x-www-form-urlencoded",
+        accept: "application/json, text/html",
+        "x-requested-with": "XMLHttpRequest",
+        "x-xsrf-token": token,
+        cookie: cookies.header(), "accept-language": "ar",
+      },
       body: new URLSearchParams({ _token: token, email: config.email, password: config.password }).toString(),
       redirect: "manual", signal: AbortSignal.timeout(25_000),
     });
   } catch { throw new ClinicError("clinic_unreachable"); }
   cookies.absorb(signIn);
-  // A successful Laravel login redirects; a failed one renders the form again.
-  if (signIn.status < 300 || signIn.status >= 400) throw new ClinicError("clinic_login_rejected");
+  // 419 is the token; 422 is the credentials. Anything else is judged by
+  // whether a protected page actually answers below -- a front end can sign
+  // someone in with a 200 as readily as with a redirect, so the status alone
+  // is not the test.
+  if (signIn.status === 419) throw new ClinicError("clinic_login_csrf");
+  if (signIn.status === 422 || signIn.status === 401) throw new ClinicError("clinic_login_rejected");
+  if (signIn.status >= 500) throw new ClinicError("clinic_login_unreachable");
+  // A redirect after POST /login is Laravel's own "you are in"; anything else
+  // is unproven until a protected page answers.
+  const signedIn = signIn.status >= 300 && signIn.status < 400;
 
   return {
     async finance(from: string, until: string) {
       for (const value of [from, until]) if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) throw new ClinicError("clinic_date_invalid");
       const response = await get(`/reports/finance?from=${from}&to=${until}`);
       if (!response.ok) throw new ClinicError("clinic_report_unreachable");
-      const data = island(await response.text(), '"collected"');
+      // A login that did not really take lands us back on the sign-in page,
+      // which ships no report island: that is the real test of the login, not
+      // the status code it answered with.
+      const body = await response.text();
+      let data: Record<string, unknown>;
+      try { data = island(body, '"collected"'); }
+      catch { throw new ClinicError(signedIn ? "clinic_report_unreadable" : "clinic_login_rejected"); }
       const summary = (data.summary ?? {}) as Record<string, unknown>;
       return {
         from, until, currency: TEXT(data.currency, 12) || "JOD",
