@@ -13,6 +13,7 @@ import { randomBytes } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 import { migrateManagementActions } from "./management-actions.ts";
 import { openOdooSession, formatAmount, DEFAULT_BRANCH_NAMES, type OdooConfig, type SalesSummary, type InvoiceSales, type ShortageItem, type BranchShortages, type LocationSales, type PurchaseSummary } from "./odoo-client.ts";
+import { branchShortageMessages, packLabel, NO_SHORTAGES } from "./odoo-shortage-text.ts";
 
 // 2026-09-12, Basim: "بدي هذا التقرير كل يوم الساعه 12:01 صباحا يروح للجروب
 // بدون موافقتي ويكون تاريخ اليوم اللي قبله" -- the daily report is this exact
@@ -162,34 +163,6 @@ function weeklyText(sales: SalesSummary, invoiced: InvoiceSales, shortages: Shor
   return clean(lines.join("\n"));
 }
 
-// Basim, 2026-09-20, on the packs-with-decimals view: "اكتب فوق الصنف الصنف
-// وفوق الاعداد المتوفر الان". Two lines per item -- an English product name
-// and an Arabic quantity on ONE line are laid out by WhatsApp's own bidi
-// rules and come out scrambled -- and the quantity in packs, never pieces.
-const packLabel = (packs: number): string => {
-  if (!Number.isFinite(packs) || packs <= 0) return "صفر";
-  const rounded = Math.round(packs * 100) / 100;
-  return Number.isInteger(rounded) ? String(rounded) : String(rounded).replace(/0+$/, "");
-};
-
-// WhatsApp swallows anything past a few thousand characters, and a silently
-// cut list is the exact failure this whole change is undoing -- so a branch
-// with more items than one message holds becomes two messages, not a stump.
-const ITEMS_PER_MESSAGE = 40;
-
-function shortagesText(branchName: string, items: ShortageItem[], part: number, parts: number): string {
-  const header = parts > 1 ? `📦 *نواقص ${branchName}* (${part}/${parts})` : `📦 *نواقص ${branchName}*`;
-  const lines = [header, "_رح تخلص خلال أسبوع — العدد بالعلبة_", ""];
-  const offset = (part - 1) * ITEMS_PER_MESSAGE;
-  items.forEach((item, index) => {
-    lines.push(`*${offset + index + 1}.* ${clean(item.name)}`, `المتوفر: *${packLabel(item.packs)}*`, "");
-  });
-  return clean(lines.join("\n"));
-}
-
-function shortagesFooter(total: number, out: number): string {
-  return ["━━━━━━━━━━━━━", `📋 المجموع: ${total} صنف${out ? ` — منهم ${out} نافد` : ""}`].join("\n");
-}
 
 function purchasesText(summary: PurchaseSummary, sinceDate: string, untilDate: string, currencyLabel?: string): string {
   const net = summary.purchaseAmount - summary.returnAmount;
@@ -243,22 +216,8 @@ async function buildReportMessagesFresh(config: OdooReportConfig, kind: Kind, at
   if (kind === "odoo_shortages") {
     const names = { ...DEFAULT_BRANCH_NAMES, ...config.branchNames };
     const branches = await session.branchShortages({ maxDaysLeft: 7, at });
-    if (!branches.length) return [{ entityId: null, text: "📦 ما في صنف متحرّك رح يخلص خلال أسبوع بأي فرع." }];
-    const messages: ReportMessage[] = [];
-    for (const branch of branches) {
-      const label = names[branch.code] ? `فرع ${names[branch.code]}` : branch.location;
-      const out = branch.items.filter(item => item.packs <= 0).length;
-      const parts = Math.max(1, Math.ceil(branch.items.length / ITEMS_PER_MESSAGE));
-      for (let part = 1; part <= parts; part += 1) {
-        const slice = branch.items.slice((part - 1) * ITEMS_PER_MESSAGE, part * ITEMS_PER_MESSAGE);
-        const body = shortagesText(label, slice, part, parts);
-        messages.push({
-          entityId: parts > 1 ? `${branch.code}#${part}` : branch.code,
-          text: part === parts ? `${body}${shortagesFooter(branch.items.length, out)}` : body,
-        });
-      }
-    }
-    return messages;
+    if (!branches.length) return [{ entityId: null, text: NO_SHORTAGES }];
+    return branchShortageMessages(branches, names);
   }
   return [{ entityId: null, text: await buildReportBody(config, session, kind, at) }];
 }

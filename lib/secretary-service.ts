@@ -572,6 +572,19 @@ function forgetPendingWork(db: DatabaseSync, conversationKey: string, userId: st
   clearSecretaryChoices(db, conversationKey);
   clearOpenChoice(db, userId);
 }
+/**
+ * A shortage answer is a list per branch, not one message carrying four -- see
+ * lib/odoo-shortage-text.ts. The first message is the reply; the rest are
+ * queued to the same place the question came from, so a question asked in the
+ * group is answered in the group and one asked privately stays private.
+ */
+function odooAnswer(db: DatabaseSync, event: Event, asking: ChatUser, answer: string | string[], now: number): string {
+  if (typeof answer === "string") return answer;
+  const [first, ...rest] = answer;
+  const toUser = event.groupId ? "group" : asking.id;
+  for (const text of rest) enqueueAgentMessage(db, { toUser, text }, now);
+  return first ?? "";
+}
 function lookup(db: DatabaseSync, event: Event, actor: ChatUser, state: Snapshot): Result | null {
   const row = db.prepare("SELECT payload_hash,actor_id,result_json,scope_json FROM secretary_events WHERE event_key=?").get(eventKey(event)) as { payload_hash: string; actor_id: string; result_json: string; scope_json: string } | undefined;
   if (!row) return null;
@@ -1304,7 +1317,7 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
   // Basim (2026-09-17): "بدي اسالو لايف ويجاوب". Present only when the pharmacy
   // system is configured; absent, every question below simply is not one, and
   // the message goes to the ordinary secretary untouched.
-  askOdoo?: (match: OdooQuestionMatch, at: number) => Promise<string>;
+  askOdoo?: (match: OdooQuestionMatch, at: number) => Promise<string | string[]>;
   // The clinics are a different business on a different system. A question
   // that names one is answered from THAT system, and is checked before the
   // pharmacy's matcher so "مبيعات العيادات اليوم" can never be answered with
@@ -1403,8 +1416,9 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
         const duplicate = lookup(db, event, asking, state);
         if (duplicate) return duplicate;
         try {
-          const reply = await dependencies.askOdoo(question, now);
-          return transaction(db, () => save(db, event, asking, { status: "summary", reply }, [], now));
+          const answer = await dependencies.askOdoo(question, now);
+          return transaction(db, () => save(db, event, asking,
+            { status: "summary", reply: odooAnswer(db, event, asking, answer, now) }, [], now));
         } catch {
           // The pharmacy system being unreachable is not the person's problem to
           // debug, and it must never swallow their message silently.
@@ -1423,8 +1437,9 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
         question = dependencies.classifyOdoo ? await dependencies.classifyOdoo(event.text) : null;
         if (question) {
           try {
-            const reply = await dependencies.askOdoo(question, now);
-            return transaction(db, () => save(db, event, asking, { status: "summary", reply }, [], now));
+            const answer = await dependencies.askOdoo(question, now);
+            return transaction(db, () => save(db, event, asking,
+              { status: "summary", reply: odooAnswer(db, event, asking, answer, now) }, [], now));
           } catch {
             return transaction(db, () => save(db, event, asking, { status: "clarify",
               reply: "ما قدرت أوصل لنظام الصيدلية هلأ. جرّب بعد شوي." }, [], now));

@@ -12,6 +12,7 @@
  * the honest answer -- never an invented figure.
  */
 import { openOdooSession, formatAmount, DEFAULT_BRANCH_NAMES, type OdooConfig, type ShortageItem } from "./odoo-client.ts";
+import { branchShortageMessages, NO_SHORTAGES } from "./odoo-shortage-text.ts";
 
 export type OdooQuestionKind =
   | "sales_today" | "sales_yesterday" | "sales_week" | "sales_month"
@@ -233,13 +234,13 @@ export type OdooAnswerConfig = { odoo: OdooConfig; currencyLabel?: string; expir
 // with a number from a noticeably different moment. The key carries the day
 // label, so the answer is never reused across midnight.
 const ANSWER_TTL_MS = 60_000;
-const answerCache = new Map<string, { text: string; at: number }>();
+const answerCache = new Map<string, { text: string | string[]; at: number }>();
 
 /** Test seam: forget every cached answer, so a test starts from a clean slate. */
 export function forgetOdooAnswers(): void { answerCache.clear(); }
 
 /** Answers one matched question. Throws OdooError if the system is unreachable. */
-export async function answerOdooQuestion(match: OdooQuestionMatch, config: OdooAnswerConfig, at: number): Promise<string> {
+export async function answerOdooQuestion(match: OdooQuestionMatch, config: OdooAnswerConfig, at: number): Promise<string | string[]> {
   const key = `${config.odoo.url}|${config.odoo.db}|${match.kind}|${match.branch ?? ""}|${dateLabel(at)}`;
   const cached = answerCache.get(key);
   if (cached && at - cached.at >= 0 && at - cached.at < ANSWER_TTL_MS) return cached.text;
@@ -267,15 +268,7 @@ export async function answerOdooQuestion(match: OdooQuestionMatch, config: OdooA
 // the quantity in PACKS, decimals and all, under a fixed Arabic label: a pack
 // and a bit is 1.09, and an item the branch no longer has is صفر, which is the
 // most urgent line on the list rather than a missing one.
-function packLabel(packs: number): string {
-  if (!Number.isFinite(packs) || packs <= 0) return "صفر";
-  const rounded = Math.round(packs * 100) / 100;
-  return Number.isInteger(rounded) ? String(rounded) : String(rounded).replace(/0+$/, "");
-}
-function shortageLines(item: ShortageItem, index: number): string[] {
-  return [`*${index + 1}.* ${item.name}`, `المتوفر: *${packLabel(item.packs)}*`, ""];
-}
-async function freshAnswer(match: OdooQuestionMatch, config: OdooAnswerConfig, at: number): Promise<string> {
+async function freshAnswer(match: OdooQuestionMatch, config: OdooAnswerConfig, at: number): Promise<string | string[]> {
   if (match.kind === "help") return HELP_REPLY;
   const session = await openOdooSession(config.odoo, config.fetcher);
   const currency = config.currencyLabel;
@@ -424,15 +417,9 @@ async function freshAnswer(match: OdooQuestionMatch, config: OdooAnswerConfig, a
   // hard `limit: 15` cut whatever was left without saying so. Basim,
   // 2026-09-20: "شيل حد ال 15 وارسل كل النواقص لكل فرع".
   const branches = await session.branchShortages({ maxDaysLeft: 7, at });
-  const total = branches.reduce((sum, branch) => sum + branch.items.length, 0);
-  if (!total) return "📦 ما في صنف متحرّك رح يخلص خلال أسبوع.";
+  if (!branches.reduce((sum, branch) => sum + branch.items.length, 0)) return NO_SHORTAGES;
   const names = { ...DEFAULT_BRANCH_NAMES, ...config.branchNames };
-  const lines = ["📦 *رح تخلص خلال أسبوع*", "_العدد بالعلبة_", ""];
-  for (const branch of branches) {
-    const label = names[branch.code] ? `فرع ${names[branch.code]}` : branch.location;
-    lines.push(`*${label} — ${branch.items.length} صنف*`, "");
-    lines.push(...branch.items.flatMap((item, index) => shortageLines(item, index)));
-  }
-  lines.push("━━━━━━━━━━━━━", `📋 المجموع: ${total} صنف`);
-  return lines.join("\n");
+  // A message per branch, exactly as the 9am report sends it -- see
+  // lib/odoo-shortage-text.ts for why neither side formats this itself.
+  return branchShortageMessages(branches, names).map(message => message.text);
 }

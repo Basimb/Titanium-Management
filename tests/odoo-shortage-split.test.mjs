@@ -106,9 +106,11 @@ test("the name and the measurement never share a line", async () => {
       fetcher: pharmacy([[1, "PANTENE PRO-V OIL REPLACEMENT 275 ML", "600321", 1, 2],
         [2, "SYRINGE (Pack)", "500111", 1, 1], [3, "SYRINGE (تجزئة)", "500111", 5, 0.1]],
         { 1: 300, 3: 600 }) }, Date.now());
-  const lines = reply.split("\n");
+  // One message per branch since 2026-09-22; this fixture has a single branch.
+  assert.ok(Array.isArray(reply), "the answer arrives as a message per branch");
+  const lines = reply.join("\n").split("\n");
   const named = lines.findIndex(line => line.includes("PANTENE"));
-  assert.ok(named > 0, reply);
+  assert.ok(named > 0, String(reply));
   assert.match(lines[named], /^\*\d+\.\* PANTENE/, "the English name stands alone on its line");
   assert.doesNotMatch(lines[named], /المتوفر|علبة/, "no Arabic beside it");
   assert.match(lines[named + 1], /^المتوفر: \*1\*$/, "the Arabic measurement stands alone too");

@@ -197,3 +197,34 @@ test('a pharmacy system that cannot be reached says so instead of swallowing the
   assert.equal(r.status, 'clarify');
   assert.match(r.reply, /ما قدرت أوصل لنظام الصيدلية/);
 });
+
+// 2026-09-22. The 9am report was changed to a message per branch; the live
+// answer was not, and kept sending all four branches in one message. Basim,
+// reading it: "ياعمري قلتلك الف مره كل فرع برساله لحال". An answer that
+// arrives as several messages is now delivered as several messages.
+test('a per-branch answer is delivered as one message per branch', async t => {
+  const f = fixture(t, { askOdoo: async () => ['نواقص الناعور', 'نواقص صافوط', 'نواقص دابوق'] });
+  const r = await f.run({ text: 'شو ناقص من المخزون', groupId: '12345@g.us' });
+  assert.equal(r.status, 'summary');
+  assert.equal(r.reply, 'نواقص الناعور', 'the first branch is the reply itself');
+  const queued = f.db.prepare("SELECT to_user,text FROM agent_outbox ORDER BY rowid").all();
+  assert.deepEqual(queued.map(row => row.text), ['نواقص صافوط', 'نواقص دابوق'],
+    'and the rest follow as their own messages, none of them merged');
+  assert.deepEqual([...new Set(queued.map(row => row.to_user))], ['group'],
+    'a question asked in the group is answered in the group');
+});
+
+// The same answer asked privately must not spill into the group.
+test('the follow-up messages go where the question came from', async t => {
+  const f = fixture(t, { askOdoo: async () => ['أول', 'ثاني'] });
+  await f.run({ text: 'شو ناقص من المخزون' });
+  const queued = f.db.prepare("SELECT to_user FROM agent_outbox").all();
+  assert.deepEqual(queued.map(row => row.to_user), ['member'], 'private stays private');
+});
+
+// A one-message answer is untouched: nothing is queued behind it.
+test('an ordinary single answer queues nothing', async t => {
+  const f = fixture(t, { askOdoo: async () => '📊 مبيعات اليوم: 1,000.00' });
+  await f.run({ text: 'شو مبيعات اليوم؟' });
+  assert.equal(f.db.prepare("SELECT COUNT(*) c FROM agent_outbox").get().c, 0);
+});

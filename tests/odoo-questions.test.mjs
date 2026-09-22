@@ -147,8 +147,14 @@ test("what is running out is what the shelf runs out of, not what sits under a u
       { id: 3, name: "صنف ما بيتحرك", barcode: "b3", standard_price: 1 },
     ],
   });
-  const text = await answerOdooQuestion(matchOdooQuestion("شو ناقص من المخزون"), { odoo, fetcher }, AT);
-  assert.match(text, /فرع الناعور — 1 صنف/, "the branch owns its own list");
+  // 2026-09-22: a message PER BRANCH, the same shape the 9am report sends --
+  // one message carrying every branch is the thing this replaced.
+  const messages = await answerOdooQuestion(matchOdooQuestion("شو ناقص من المخزون"), { odoo, fetcher }, AT);
+  assert.ok(Array.isArray(messages), "one message per branch, never one for all of them");
+  assert.equal(messages.length, 1, "one branch had a shortage, so one message");
+  const text = messages[0];
+  assert.match(text, /📦 \*نواقص فرع الناعور\*/, "the branch owns its own message");
+  assert.match(text, /📋 المجموع: 1 صنف/, "and its own total, not the company's");
   assert.match(text, /\*1\.\* بانادول\nالمتوفر: \*2\*/);
   assert.doesNotMatch(text, /كريم نادر/, "two units that last forty days is not a shortage");
   assert.doesNotMatch(text, /ما بيتحرك/, "stock that never moves is never running out");
