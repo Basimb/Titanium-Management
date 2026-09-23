@@ -1386,6 +1386,21 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
   // lib/odoo-questions.ts) and nothing else, so a figure in the reply was read
   // from Odoo, never composed. Anything it does not recognise falls straight
   // through and is handled exactly as before.
+  // The team group is one-way for REPLIES: nothing the secretary says there is
+  // ever a reaction to a message, unless that message calls it by name
+  // ("يا سكرتير..."). Basim, 2026-09-23: "لا اي ايشي ما يحكي بالجروب الا اذا
+  // انحكا سكرتير فقط".
+  //
+  // This sits above everything that can produce a reply -- the pharmacy and
+  // clinic question blocks below among them. It used to sit under them, so a
+  // question about stock or money was answered in the group with nobody having
+  // addressed the secretary at all; that is how the shortages list landed there
+  // on 2026-09-22 with Basim never having asked.
+  //
+  // Scheduled reports and task notices are NOT replies and do not pass through
+  // here: they keep going to the group on their own timetable, as he confirmed
+  // in the same breath ("التقارير التلقائيه لا مالها دخل").
+  if (event.groupId !== null && !isAddressedToSecretary(event.text)) return { status: "denied", reply: "" };
   if (dependencies.askClinic && event.choice === undefined && !event.replyToMessageId && event.inputKind !== "voice") {
     const clinicQuestion = matchClinicQuestion(event.text);
     if (clinicQuestion) {
@@ -1487,7 +1502,6 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
   // -- which already has its own per-action/per-actor rules for group origin
   // (task drafting and message_team/announce_group all stay
   // private-chat-only regardless).
-  if (event.groupId !== null && !isAddressedToSecretary(event.text)) return { status: "denied", reply: "" };
   const initial = stateFor(db, actor); const previous = lookup(db, event, actor, initial); if (previous) return previous;
   const key = conversation(event, actor); const initialHash = fingerprint(initial);
   const profileCommand = personalMemoryCommand(event.text);

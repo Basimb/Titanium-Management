@@ -72,6 +72,7 @@ async function main() {
         groupId: [...config.allowedGroups][0] ?? null,
         currencyLabel: process.env.ODOO_CURRENCY_LABEL || undefined,
         dailyHour: process.env.ODOO_REPORT_DAILY_HOUR ? Number(process.env.ODOO_REPORT_DAILY_HOUR) : undefined,
+        dailyMinute: process.env.ODOO_REPORT_DAILY_MINUTE ? Number(process.env.ODOO_REPORT_DAILY_MINUTE) : undefined,
         weeklyDay: process.env.ODOO_REPORT_WEEKLY_DAY ? Number(process.env.ODOO_REPORT_WEEKLY_DAY) : undefined,
         weeklyHour: process.env.ODOO_REPORT_WEEKLY_HOUR ? Number(process.env.ODOO_REPORT_WEEKLY_HOUR) : undefined,
         purchasesWeeklyHour: process.env.ODOO_REPORT_PURCHASES_WEEKLY_HOUR ? Number(process.env.ODOO_REPORT_PURCHASES_WEEKLY_HOUR) : undefined,
@@ -97,6 +98,7 @@ async function main() {
         toOwner: process.env.CLINIC_REPORT_OWNER === '1',
         currencyLabel: process.env.CLINIC_CURRENCY_LABEL || process.env.ODOO_CURRENCY_LABEL || undefined,
         dailyHour: process.env.CLINIC_REPORT_HOUR ? Number(process.env.CLINIC_REPORT_HOUR) : undefined,
+        dailyMinute: process.env.CLINIC_REPORT_MINUTE ? Number(process.env.CLINIC_REPORT_MINUTE) : undefined,
       }) });
     }
   }

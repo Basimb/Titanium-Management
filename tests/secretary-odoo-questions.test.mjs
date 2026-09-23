@@ -204,7 +204,9 @@ test('a pharmacy system that cannot be reached says so instead of swallowing the
 // arrives as several messages is now delivered as several messages.
 test('a per-branch answer is delivered as one message per branch', async t => {
   const f = fixture(t, { askOdoo: async () => ['نواقص الناعور', 'نواقص صافوط', 'نواقص دابوق'] });
-  const r = await f.run({ text: 'شو ناقص من المخزون', groupId: '12345@g.us' });
+  // In the group the secretary answers only when called by name -- see the
+  // silence test below.
+  const r = await f.run({ text: 'يا سكرتير شو ناقص من المخزون', groupId: '12345@g.us' });
   assert.equal(r.status, 'summary');
   assert.equal(r.reply, 'نواقص الناعور', 'the first branch is the reply itself');
   const queued = f.db.prepare("SELECT to_user,text FROM agent_outbox ORDER BY rowid").all();
@@ -227,4 +229,29 @@ test('an ordinary single answer queues nothing', async t => {
   const f = fixture(t, { askOdoo: async () => '📊 مبيعات اليوم: 1,000.00' });
   await f.run({ text: 'شو مبيعات اليوم؟' });
   assert.equal(f.db.prepare("SELECT COUNT(*) c FROM agent_outbox").get().c, 0);
+});
+
+// Basim, 2026-09-23: "لا اي ايشي ما يحكي بالجروب الا اذا انحكا سكرتير فقط".
+// A pharmacy question used to be answered BEFORE this gate was reached, so the
+// group got shortage lists and sales figures nobody had asked the secretary
+// for. Now a group message that does not name it gets no answer of any kind --
+// and the pharmacy's system is never even touched.
+test('in the group, a pharmacy question nobody addressed gets no answer at all', async t => {
+  let asked = 0;
+  const f = fixture(t, { askOdoo: async () => { asked += 1; return 'مبيعات'; } });
+  const r = await f.run({ text: 'شو مبيعات اليوم؟', groupId: '12345@g.us' });
+  assert.equal(r.status, 'denied');
+  assert.equal(r.reply, '', 'silence, not an explanation of why it is silent');
+  assert.equal(asked, 0, 'and Odoo is never asked on the group\'s behalf');
+  assert.equal(f.modelCalls(), 0);
+  assert.equal(f.db.prepare("SELECT COUNT(*) c FROM agent_outbox").get().c, 0, 'nothing queued either');
+});
+
+// The same question in a private chat is answered exactly as before: the gate
+// is about the group, not about the question.
+test('the same question in a private chat is answered as before', async t => {
+  const f = fixture(t, { askOdoo: async () => 'مبيعات اليوم: 1,000.00' });
+  const r = await f.run({ text: 'شو مبيعات اليوم؟' });
+  assert.equal(r.status, 'summary');
+  assert.match(r.reply, /1,000\.00/);
 });

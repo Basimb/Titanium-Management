@@ -20,7 +20,11 @@ export type ClinicReportConfig = {
   ownerNumber?: string;
   toOwner?: boolean; // DM Basim as well as the group; default false (group only)
   currencyLabel?: string;
-  dailyHour?: number; // local hour the report goes out; default 0 (the 12:0x slot)
+  dailyHour?: number; // local hour the report goes out; default 0
+  // Minute precision, for the same reason as the pharmacy's daily report --
+  // see dailyMinute in lib/odoo-reports.ts. The clinics go a minute behind the
+  // pharmacy so the two land in the order Basim asked for.
+  dailyMinute?: number; // local minute the report may first go out; default 0
   timezoneOffsetMinutes?: number; // default 180 (Amman, UTC+3)
   maxDoctors?: number; // default 8
   fetcher?: typeof fetch;
@@ -38,7 +42,7 @@ const money = (value: number, label?: string) => {
 };
 function localParts(at: number, offsetMinutes: number) {
   const shifted = new Date(at + offsetMinutes * 60_000);
-  return { hour: shifted.getUTCHours() };
+  return { hour: shifted.getUTCHours(), minute: shifted.getUTCMinutes() };
 }
 function startOfLocalDay(at: number, offsetMinutes: number): number {
   const shifted = new Date(at + offsetMinutes * 60_000);
@@ -78,7 +82,10 @@ async function planClinicReport(db: DatabaseSync, config: ClinicReportConfig, at
   migrateManagementActions(db);
   if (!config.enabled) return [];
   const offset = config.timezoneOffsetMinutes ?? 180;
-  if (localParts(at, offset).hour !== (config.dailyHour ?? 0)) return [];
+  const { hour, minute } = localParts(at, offset);
+  if (hour !== (config.dailyHour ?? 0)) return [];
+  const wanted = config.dailyMinute;
+  if (Number.isInteger(wanted) && wanted! >= 0 && wanted! <= 59 && minute < wanted!) return [];
   const targets: Array<{ targetUser: string; to: string }> = [];
   if (config.groupId) targets.push({ targetUser: "group", to: config.groupId });
   if (config.toOwner && config.ownerNumber) targets.push({ targetUser: "owner", to: `${config.ownerNumber}@s.whatsapp.net` });

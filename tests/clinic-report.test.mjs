@@ -228,3 +228,24 @@ test('the cookie\'s token is sent as a header and never as the form field', asyn
   assert.match(post.headers['x-xsrf-token'], /^enc\(/,
     'the cookie copy travels in the header, where it gets decrypted');
 });
+
+// The clinics go a minute behind the pharmacy, so the two land in the order
+// Basim asked for. Same rule as the pharmacy's: the minute opens the slot and
+// the rest of the hour stays open.
+test("the clinics report waits for its own minute", async t => {
+  const at = (hour, minute) => Date.UTC(2026, 8, 22, hour, minute, 0);
+  const build = (db, now) => createClinicReportJobs({
+    db, now: () => now,
+    config: { enabled: true, clinic, groupId: '1@g.us', timezoneOffsetMinutes: 0,
+      dailyHour: 0, dailyMinute: 16, fetcher: site().fetcher },
+  });
+  assert.deepEqual(
+    await build(fixture(t), at(0, 15)).deliverNext(async () => assert.fail('too early')),
+    { status: 'idle' }, 'a minute before its slot, the clinics are not even contacted');
+  let sent = 0;
+  await build(fixture(t), at(0, 16)).deliverNext(async () => { sent += 1; });
+  assert.equal(sent, 1);
+  sent = 0;
+  await build(fixture(t), at(0, 55)).deliverNext(async () => { sent += 1; });
+  assert.equal(sent, 1, 'late still sends');
+});

@@ -30,7 +30,14 @@ export type OdooReportConfig = {
   groupId: string | null;
   currencyLabel?: string; // e.g. "دينار"; omitted if not configured
   branchNames?: Record<string, string>; // Odoo location code -> Arabic branch name, merged over DEFAULT_BRANCH_NAMES
-  dailyHour?: number; // local hour (0-23) the daily report goes out; default 0 (12:01am slot)
+  dailyHour?: number; // local hour (0-23) the daily report goes out; default 0
+  // Basim, 2026-09-23: "تقرير مبيعات الصيدليه ما عم يوصل بموعدو... خليه الساعه
+  // 12:15 صباحا... بيكونو اقفلو". Until then the schedule knew only the hour,
+  // so "midnight" meant any drain inside 00:00-00:59 and the report drifted.
+  // With a minute set, the slot opens at that minute and stays open for the
+  // rest of the hour -- a bridge that was down at 00:15 still sends at 00:20,
+  // because a late report is worth more than none.
+  dailyMinute?: number; // local minute (0-59) the daily report may first go out; default 0
   weeklyDay?: number; // 0=Sunday..6=Saturday; default 6 (Saturday) -- shared by both weekly reports below
   weeklyHour?: number; // local hour the weekly sales report goes out; default 20
   // 2026-09-12, Basim: "بدي تجهزلي تقرير مشتريات... ومرتجعات... وتنشرو للجروب
@@ -80,8 +87,11 @@ const clean = (value: string) => value.replace(new RegExp("[\\x00-\\x09\\x0b-\\x
 
 function localParts(at: number, offsetMinutes: number) {
   const shifted = new Date(at + offsetMinutes * 60_000);
-  return { hour: shifted.getUTCHours(), day: shifted.getUTCDay() };
+  return { hour: shifted.getUTCHours(), minute: shifted.getUTCMinutes(), day: shifted.getUTCDay() };
 }
+/** A minute outside 0-59, or no minute at all, means "any time this hour". */
+const minuteReached = (minute: number, configured?: number) =>
+  !Number.isInteger(configured) || configured! < 0 || configured! > 59 || minute >= configured!;
 // Basim (2026-09-16), seeing the daily figures: "هذه المبيعات مش يومي ياخي".
 // The daily report used to read a ROLLING 24 hours ending at the moment it
 // was sent, while labelling itself with yesterday's date. At the default
@@ -258,14 +268,14 @@ async function planOdooReports(db: DatabaseSync, config: OdooReportConfig, at: n
   migrateManagementActions(db);
   if (!config.enabled) return [];
   const offset = config.timezoneOffsetMinutes ?? 180;
-  const { hour, day } = localParts(at, offset);
+  const { hour, minute, day } = localParts(at, offset);
   const routingFor = (candidate: Kind): ReportRouting => ({ ...DEFAULT_ROUTING[candidate], ...(config.routing?.[candidate] ?? {}) });
   let kind: Kind | null = null;
   if (day === (config.weeklyDay ?? 6) && hour === (config.purchasesWeeklyHour ?? 19)) kind = "odoo_purchases_weekly";
   else if (day === (config.weeklyDay ?? 6) && hour === (config.weeklyHour ?? 20)) kind = "odoo_weekly";
   // Daily sales first: if the two are configured to the same hour, the one
   // that was asked for by name wins the slot rather than the newer default.
-  else if (hour === (config.dailyHour ?? 0)) kind = "odoo_daily";
+  else if (hour === (config.dailyHour ?? 0) && minuteReached(minute, config.dailyMinute)) kind = "odoo_daily";
   else if (hour === (config.shortagesHour ?? 9)) kind = "odoo_shortages";
   if (!kind) return [];
   const routing = routingFor(kind);

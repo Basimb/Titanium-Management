@@ -9,7 +9,7 @@ export const SETTINGS_KEYS = new Set(['TEAM_CHAT_ENABLED', 'TEAM_CHAT_SHARED_KEY
   'WHATSAPP_LOGIN_SECRET', 'WHATSAPP_LOGIN_DATABASE', 'WHATSAPP_LOGIN_ORIGIN',
   'SECRETARY_ENABLED', 'SECRETARY_WEB_ENABLED', 'SECRETARY_VOICE_ENABLED', 'SECRETARY_FOLLOWUP_ENABLED', 'TITANIUM_PUBLIC_URL', 'DASHBOARD_READONLY',
   'ODOO_REPORT_ENABLED', 'ODOO_URL', 'ODOO_DB', 'ODOO_USERNAME', 'ODOO_API_KEY', 'ODOO_LOW_STOCK_THRESHOLD', 'ODOO_CURRENCY_LABEL',
-  'ODOO_REPORT_DAILY_HOUR', 'ODOO_REPORT_WEEKLY_DAY', 'ODOO_REPORT_WEEKLY_HOUR', 'ODOO_REPORT_PURCHASES_WEEKLY_HOUR',
+  'ODOO_REPORT_DAILY_HOUR', 'ODOO_REPORT_DAILY_MINUTE', 'ODOO_REPORT_WEEKLY_DAY', 'ODOO_REPORT_WEEKLY_HOUR', 'ODOO_REPORT_PURCHASES_WEEKLY_HOUR',
   // Read by the dashboard half (lib/team-chat-settings.ts) rather than by this
   // launcher, but they live in the SAME settings file, and an unknown key here
   // makes readPrivateConfig throw -- which pauses the whole bridge behind the
@@ -20,7 +20,7 @@ export const SETTINGS_KEYS = new Set(['TEAM_CHAT_ENABLED', 'TEAM_CHAT_SHARED_KEY
   // These two lists are one list; the launcher test checks them against each
   // other, because a key the dashboard accepts and this file does not pauses
   // the whole bridge on the next read.
-  'CLINIC_URL', 'CLINIC_EMAIL', 'CLINIC_PASSWORD', 'CLINIC_REPORT_ENABLED', 'CLINIC_REPORT_HOUR',
+  'CLINIC_URL', 'CLINIC_EMAIL', 'CLINIC_PASSWORD', 'CLINIC_REPORT_ENABLED', 'CLINIC_REPORT_HOUR', 'CLINIC_REPORT_MINUTE',
   'CLINIC_REPORT_OWNER', 'CLINIC_CURRENCY_LABEL', 'CLINIC_QUESTIONS_ENABLED']);
 const MAX_BYTES = 32_768;
 const SERVICE_DIRECTORY = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -167,6 +167,7 @@ export function bridgeChildEnvironment(settings, env, pair, serviceDirectory = S
     const currency = odoo('ODOO_CURRENCY_LABEL');
     if (typeof currency === 'string' && currency.length <= 20 && !/[\r\n]/.test(currency)) childEnv.ODOO_CURRENCY_LABEL = currency;
     if (/^([0-9]|1[0-9]|2[0-3])$/.test(odoo('ODOO_REPORT_DAILY_HOUR') || '')) childEnv.ODOO_REPORT_DAILY_HOUR = odoo('ODOO_REPORT_DAILY_HOUR');
+    if (/^([0-9]|[1-5][0-9])$/.test(odoo('ODOO_REPORT_DAILY_MINUTE') || '')) childEnv.ODOO_REPORT_DAILY_MINUTE = odoo('ODOO_REPORT_DAILY_MINUTE');
     if (/^[0-6]$/.test(odoo('ODOO_REPORT_WEEKLY_DAY') || '')) childEnv.ODOO_REPORT_WEEKLY_DAY = odoo('ODOO_REPORT_WEEKLY_DAY');
     if (/^([0-9]|1[0-9]|2[0-3])$/.test(odoo('ODOO_REPORT_WEEKLY_HOUR') || '')) childEnv.ODOO_REPORT_WEEKLY_HOUR = odoo('ODOO_REPORT_WEEKLY_HOUR');
     if (/^([0-9]|1[0-9]|2[0-3])$/.test(odoo('ODOO_REPORT_PURCHASES_WEEKLY_HOUR') || '')) childEnv.ODOO_REPORT_PURCHASES_WEEKLY_HOUR = odoo('ODOO_REPORT_PURCHASES_WEEKLY_HOUR');
@@ -209,6 +210,7 @@ export function bridgeChildEnvironment(settings, env, pair, serviceDirectory = S
     childEnv.CLINIC_EMAIL = clinicEmail;
     childEnv.CLINIC_PASSWORD = clinicPassword;
     if (/^([0-9]|1[0-9]|2[0-3])$/.test(clinic('CLINIC_REPORT_HOUR') || '')) childEnv.CLINIC_REPORT_HOUR = clinic('CLINIC_REPORT_HOUR');
+    if (/^([0-9]|[1-5][0-9])$/.test(clinic('CLINIC_REPORT_MINUTE') || '')) childEnv.CLINIC_REPORT_MINUTE = clinic('CLINIC_REPORT_MINUTE');
     if (clinic('CLINIC_REPORT_OWNER') === '1') childEnv.CLINIC_REPORT_OWNER = '1';
     if (clinic('CLINIC_QUESTIONS_ENABLED') === '0') childEnv.CLINIC_QUESTIONS_ENABLED = '0';
     const currency = clinic('CLINIC_CURRENCY_LABEL');

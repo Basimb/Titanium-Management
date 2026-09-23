@@ -361,3 +361,40 @@ test("a manual send does not swallow the next day's report", async t => {
   // is under 24 hours after a send that happened at 01:00.
   assert.equal((await jobsAt(at(0, 3)).deliverNext(send)).status, "sent");
 });
+
+// Basim, 2026-09-23: "تقرير مبيعات الصيجليه ما عم يوصل بموعدو خليه الساعه
+// 12:15 صباحا". The schedule knew only the hour, so "midnight" was any drain
+// between 00:00 and 00:59 and the report wandered. A minute opens the slot;
+// the rest of the hour stays open, because a report five minutes late still
+// tells him what yesterday sold and a missed one tells him nothing.
+test("the daily report waits for its minute, then stays sendable for the hour", async t => {
+  const amman = (hour, minute) => Date.UTC(2026, 8, 17, hour - 3, minute, 0);
+  const build = (db, at) => createOdooReportJobs({
+    db, now: () => at,
+    config: {
+      enabled: true, odoo, groupId: "123@g.us", dailyHour: 0, dailyMinute: 15,
+      routing: { odoo_daily: { group: true, owner: false } },
+      fetcher: async (url, options) => {
+        const body = JSON.parse(options.body);
+        if (body.params.service === "common") return { ok: true, json: async () => ({ result: 1 }) };
+        return { ok: true, json: async () => ({ result: [{ location_id: [1, "NAOOR/Stock"], amount_total: 100, __count: 2 }] }) };
+      },
+    },
+  });
+  // 00:14 -- the hour is right, the minute is not.
+  assert.deepEqual(
+    await build(fixture(t), amman(0, 14)).deliverNext(async () => assert.fail("too early")),
+    { status: "idle" });
+  // 00:15 exactly.
+  let sent = 0;
+  await build(fixture(t), amman(0, 15)).deliverNext(async () => { sent += 1; });
+  assert.equal(sent, 1, "the slot opens on the minute");
+  // 00:40 -- a bridge that was down at 00:15 must still send, not skip the day.
+  sent = 0;
+  await build(fixture(t), amman(0, 40)).deliverNext(async () => { sent += 1; });
+  assert.equal(sent, 1, "late is not a reason to send nothing");
+  // And the hour still governs: 01:15 is a different hour entirely.
+  assert.deepEqual(
+    await build(fixture(t), amman(1, 15)).deliverNext(async () => assert.fail("wrong hour")),
+    { status: "idle" });
+});
