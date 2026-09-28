@@ -15,7 +15,7 @@ function withDeadline(work) {
 }
 
 // Dependency injection allows lifecycle tests without initializing a real socket.
-export function createBridgeRuntime({ config, store, auth, makeWASocket, jidNormalizedUser,
+export function createBridgeRuntime({ config, store, auth, makeWASocket, waVersion, jidNormalizedUser,
   makeCacheableSignalKeyStore, DisconnectReason, logger, onStop = () => {}, output = console,
   now = Date.now, timers = { setTimeout, clearTimeout, setInterval, clearInterval }, fetcher = fetch,
   control, isActiveNumber = () => false, secretaryJobs, secretaryOutbox, agentFollowups, odooReportJobs, clinicReportJobs, transcribeVoice,
@@ -146,6 +146,11 @@ export function createBridgeRuntime({ config, store, auth, makeWASocket, jidNorm
     restarting = false;
     const current = makeWASocket({
       auth: { creds: auth.state.creds, keys: makeCacheableSignalKeyStore(auth.state.keys, logger) },
+      // The current WhatsApp protocol version, fetched at startup (see main.mjs).
+      // Omitting it lets an aged-out pinned version reach the server, which then
+      // answers 401 on connect before pairing can begin. undefined falls back to
+      // the library default, so a failed fetch never blocks startup.
+      ...(waVersion ? { version: waVersion } : {}),
       logger, markOnlineOnConnect: false, syncFullHistory: false,
       shouldSyncHistoryMessage: () => false,
       getMessage: async key => privateTransport?.isTracked(key?.id)

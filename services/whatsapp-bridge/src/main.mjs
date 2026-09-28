@@ -26,7 +26,17 @@ async function main() {
   }
   const config = loadConfig(process.env, path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..'));
   const { default: makeWASocket, BufferJSON, initAuthCreds, proto, jidNormalizedUser, makeCacheableSignalKeyStore, DisconnectReason, downloadContentFromMessage,
-    generateWAMessageContent, generateWAMessage, decryptPollVote, normalizeMessageContent } = await import('baileys');
+    generateWAMessageContent, generateWAMessage, decryptPollVote, normalizeMessageContent, fetchLatestBaileysVersion } = await import('baileys');
+  // WhatsApp refuses a client whose protocol version it no longer accepts, and
+  // the refusal is a 401 on connect -- BEFORE any pairing code is issued, which
+  // is exactly the symptom that stranded the bridge (2026-09-28: fresh number,
+  // registered=false, no creds ever written, an hour's wait no help). The
+  // version baked into a pinned baileys ages out; fetching the current one at
+  // startup keeps the handshake acceptable. A fetch failure must not strand the
+  // bridge, so fall back to the library's built-in version.
+  let waVersion;
+  try { waVersion = (await fetchLatestBaileysVersion()).version; }
+  catch { waVersion = undefined; }
   const { default: pino } = await import('pino');
   const logger = pino({ level: 'silent' });
   process.umask(0o077);
@@ -103,7 +113,7 @@ async function main() {
     }
   }
   const runtime = createBridgeRuntime({
-    config, store, auth, makeWASocket, jidNormalizedUser, makeCacheableSignalKeyStore, DisconnectReason, logger,
+    config, store, auth, makeWASocket, waVersion, jidNormalizedUser, makeCacheableSignalKeyStore, DisconnectReason, logger,
     control, isActiveNumber, secretaryJobs, secretaryOutbox, agentFollowups, odooReportJobs, clinicReportJobs, proto, generateWAMessageContent, generateWAMessage, decryptPollVote, normalizeMessageContent,
     ...(config.voiceEnabled ? { transcribeVoice: createVoiceTranscriber({ apiKey: process.env.OPENAI_API_KEY, downloadContent: downloadContentFromMessage }) } : {}),
     onStop: code => { process.exitCode = code === 'service_shutdown' ? 0 : 78; },
