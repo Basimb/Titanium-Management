@@ -73,7 +73,10 @@ const DEFAULT_ROUTING: Record<Kind, ReportRouting> = {
   odoo_daily: { enabled: true, group: true, owner: false },
   odoo_weekly: { enabled: false, group: false, owner: false },
   odoo_purchases_weekly: { enabled: false, group: false, owner: false },
-  odoo_shortages: { enabled: true, group: true, owner: false },
+  // Basim, 2026-09-29: "وقف ارسال النواقص على الجروب خلاص ... ما احنا محتاجين
+  // نرسل نواقص على الجروب". Off by default; the report and its per-branch
+  // formatting stay intact, so turning it back on is this one line.
+  odoo_shortages: { enabled: false, group: false, owner: false },
 };
 type Planned = { id: string; kind: Kind; targetUser: string; entityId: string | null; to: string; text: string };
 

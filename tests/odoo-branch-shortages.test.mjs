@@ -84,7 +84,8 @@ const AT = Date.UTC(1970, 0, 2, 9, 0, 0); // 09:00, the shortages slot, at offse
 
 const jobsFor = (db, branches, products, at = AT) => createOdooReportJobs({
   db, now: () => at,
-  config: { enabled: true, odoo, ownerNumber: "962790000000", groupId: "1@g.us",
+  // Off by default since 2026-09-29; these tests cover it switched on.
+  config: { enabled: true, odoo, ownerNumber: "962790000000", groupId: "1@g.us", routing: { odoo_shortages: { enabled: true, group: true, owner: false } }, 
     timezoneOffsetMinutes: 0, fetcher: pharmacy(branches, products) },
 });
 
@@ -156,7 +157,7 @@ test("the pharmacy's catalogue is read once for the batch, not once a second", a
   const underlying = pharmacy(branches, PRODUCTS);
   const jobs = createOdooReportJobs({
     db, now: () => AT,
-    config: { enabled: true, odoo, ownerNumber: "962790000000", groupId: "1@g.us", timezoneOffsetMinutes: 0,
+    config: { enabled: true, odoo, ownerNumber: "962790000000", groupId: "1@g.us", timezoneOffsetMinutes: 0, routing: { odoo_shortages: { enabled: true, group: true, owner: false } }, 
       fetcher: async (url, options) => {
         if (JSON.parse(options.body).params.args?.[3] === "stock.quant") scans += 1;
         return underlying(url, options);
@@ -164,4 +165,16 @@ test("the pharmacy's catalogue is read once for the batch, not once a second", a
   });
   for (let i = 0; i < 8; i += 1) await jobs.deliverNext(async () => ({}));
   assert.equal(scans, 2, "two branches, read once each, however many times the queue is drained");
+});
+
+// Basim, 2026-09-29: "وقف ارسال النواقص على الجروب خلاص". With no routing set,
+// the 9am slot sends nothing and never touches the pharmacy's system.
+test("by default the shortages report is off: nothing goes to the group", async t => {
+  const db = fixture(t);
+  const jobs = createOdooReportJobs({
+    db, now: () => AT,
+    config: { enabled: true, odoo, ownerNumber: "962790000000", groupId: "1@g.us", timezoneOffsetMinutes: 0,
+      fetcher: async () => assert.fail("must not reach Odoo for a report that is off") },
+  });
+  assert.deepEqual(await jobs.deliverNext(async () => assert.fail("nothing to send")), { status: "idle" });
 });
