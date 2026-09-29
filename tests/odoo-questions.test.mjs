@@ -183,13 +183,15 @@ test("asking the same thing again inside the minute answers without touching the
   const { fetcher, calls } = fetcherFor({ "pos.order": () => [{ location_id: [1, "NAOOR/Stock"], amount_total: 500, __count: 20 }] });
   const match = matchOdooQuestion("شو مبيعات اليوم؟");
   const first = await answerOdooQuestion(match, { odoo, fetcher }, AT);
-  assert.equal(calls.length, 1);
+  // Branch totals and the cash/card/insurance split: two reads per answer.
+  const perAnswer = calls.length;
+  assert.equal(perAnswer, 2);
   const again = await answerOdooQuestion(match, { odoo, fetcher }, AT + 30_000);
   assert.equal(again, first);
-  assert.equal(calls.length, 1, "a repeat inside the window must not ask Odoo again");
+  assert.equal(calls.length, perAnswer, "a repeat inside the window must not ask Odoo again");
   // Past the window the number is fetched fresh, because he acts on it.
   await answerOdooQuestion(match, { odoo, fetcher }, AT + 61_000);
-  assert.equal(calls.length, 2);
+  assert.equal(calls.length, 2 * perAnswer);
 });
 
 test("a different question is never answered from another question's cache", async () => {
@@ -407,4 +409,21 @@ test("a day with no sales in any shift says so instead of three zeroes", async (
   const { fetcher } = fetcherFor({ "pos.order": () => [] });
   const reply = await answerOdooQuestion(matchOdooQuestion("شفتات امبارح"), { odoo, fetcher }, AT);
   assert.match(reply, /ما في مبيعات مسجّلة/);
+});
+
+// Basim, 2026-09-29: asking the secretary for the sales gives the same shape
+// as the nightly report -- total and count, then cash · card · insurance.
+test("asked for the sales, the secretary splits each branch into cash, card and insurance", async () => {
+  const { fetcher } = fetcherFor({
+    "pos.order": () => [{ session_id: [7, "POS/7"], location_id: [8, "NAOOR/Stock"], amount_total: 500, __count: 20 }],
+    "pos.payment": () => [
+      { session_id: [7, "POS/7"], payment_method_id: [1, "Cash"], amount: 200 },
+      { session_id: [7, "POS/7"], payment_method_id: [2, "Credit card"], amount: 250 },
+      { session_id: [7, "POS/7"], payment_method_id: [3, "Insurance"], amount: 50 },
+    ],
+  });
+  const reply = await answerOdooQuestion(matchOdooQuestion("مبيعات أمس"), { odoo, fetcher }, AT);
+  assert.match(reply, /\*الناعور — 500\.00.* \(20 حركة\)\*/);
+  assert.match(reply, /كاش 200\.00 · بطاقة 250\.00 · تأمين 50\.00/);
+  assert.doesNotMatch(reply, /ذمم/);
 });

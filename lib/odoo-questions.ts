@@ -11,7 +11,7 @@
  * set matches nothing and falls through to the ordinary secretary, which is
  * the honest answer -- never an invented figure.
  */
-import { openOdooSession, formatAmount, DEFAULT_BRANCH_NAMES, type OdooConfig, type ShortageItem } from "./odoo-client.ts";
+import { openOdooSession, formatAmount, paymentSplitLine, DEFAULT_BRANCH_NAMES, type OdooConfig, type ShortageItem } from "./odoo-client.ts";
 import { branchShortageMessages, NO_SHORTAGES } from "./odoo-shortage-text.ts";
 
 export type OdooQuestionKind =
@@ -284,7 +284,9 @@ async function freshAnswer(match: OdooQuestionMatch, config: OdooAnswerConfig, a
         : match.kind === "sales_week"
           ? [weekFrom, at, `📊 *مبيعات آخر ٧ أيام* (من ${dateLabel(weekFrom)} إلى ${dateLabel(at)})`]
           : [startOfLocalMonth(at), at, `📊 *مبيعات الشهر* (من ${dateLabel(startOfLocalMonth(at))})`];
-    const rows = await session.salesByLocation(new Date(from).toISOString(), new Date(to).toISOString());
+    // Same shape as the nightly report (Basim, 2026-09-29): each branch's
+    // total and count, then cash · card · insurance under it.
+    const rows = await session.branchDaySales(new Date(from).toISOString(), new Date(to).toISOString());
     const picked = match.branch ? rows.filter(row => row.location.split("/")[0]?.toUpperCase() === match.branch) : rows;
     if (!picked.length) return `${heading}\n\nما في مبيعات مسجّلة${match.branch ? ` لفرع ${BRANCH_NAMES[match.branch]}` : ""} لهاي الفترة.`;
     const total = picked.reduce((sum, row) => sum + row.totalAmount, 0);
@@ -292,10 +294,12 @@ async function freshAnswer(match: OdooQuestionMatch, config: OdooAnswerConfig, a
     const ranked = [...picked].sort((a, b) => b.totalAmount - a.totalAmount);
     const lines = [heading, ""];
     ranked.forEach((row, index) => {
-      const pct = total > 0 ? (row.totalAmount / total) * 100 : 0;
-      lines.push(`${COLORS[index % COLORS.length]} *${branchLabel(row.location)}* — ${money(row.totalAmount, currency)} (${pct.toFixed(1)}%)`);
+      lines.push(`${COLORS[index % COLORS.length]} *${branchLabel(row.location)} — ${money(row.totalAmount, currency)} (${row.orderCount} حركة)*`);
+      const split = paymentSplitLine(row.payments);
+      if (split) lines.push(split);
+      lines.push("");
     });
-    lines.push("", "━━━━━━━━━━━━━", `💰 *الإجمالي*: ${money(total, currency)} من ${orders} عملية`);
+    lines.push("━━━━━━━━━━━━━", `💰 *الإجمالي: ${money(total, currency)} — ${orders} حركة*`);
     return lines.join("\n");
   }
   if (match.kind.startsWith("shifts_")) {

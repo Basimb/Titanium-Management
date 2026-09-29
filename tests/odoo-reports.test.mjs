@@ -32,11 +32,14 @@ function odooFetcher({ orderCount = 5, totalAmount = 250.5, byLocation = null, a
       result = shelf.filter(item => item.sold).map((item, index) => ({ product_id: [index + 1, item.name], qty: item.sold }));
     } else if (model === "product.product" && method === "search_read") {
       result = shelf.map((item, index) => ({ id: index + 1, name: item.name, qty_available: item.qty }));
+    } else if (model === "pos.payment" && method === "read_group") {
+      result = (byLocation ?? []).flatMap((row, index) => Object.entries(row.payments ?? {})
+        .map(([name, amount]) => ({ session_id: [index + 1, `POS/${index + 1}`], payment_method_id: [index + 1, name], amount, __count: 1 })));
     } else if (method === "read_group") {
       const groupBy = body.params.args[5][2];
       const negative = body.params.args[5][0].some(clause => clause[0] === "amount_total" && clause[1] === "<");
       result = groupBy && groupBy.length
-        ? (byLocation ?? []).map((row, index) => ({ location_id: [index + 1, row.location], amount_total: row.totalAmount, __count: row.orderCount }))
+        ? (byLocation ?? []).map((row, index) => ({ session_id: [index + 1, `POS/${index + 1}`], location_id: [index + 1, row.location], amount_total: row.totalAmount, __count: row.orderCount }))
         : negative ? [{ amount_total: 0, __count: 0 }] : [{ amount_total: totalAmount, __count: orderCount }];
     } else result = activeProducts;
     return { ok: true, json: async () => ({ result }) };
@@ -85,36 +88,45 @@ test("at the daily slot, sends the branch report to the group and then goes idle
   assert.deepEqual(second, { status: "idle" });
 });
 
-// 2026-09-12, Basim: "طلعلي بيع امبارح بالفرع واعملي فورم او صيغه حلوه للفرع
-// حط جنب كل فرع لون... ومنها بتعطيني نسبة الفرع لكل فرع وللمجموع" -- the exact
-// per-branch, colored, ranked-with-percentages format he approved by hand is
-// now what the automated daily report sends every night.
-test("the daily report text ranks branches by amount, colors each, shows its share of the total, and labels the day that just ended", async t => {
+// 2026-09-29, Basim, approving the example built from the 28th: "حطهم جنب
+// بعض كاش ... بطاقة ... تأمين ... فوق اسم الفرع ... جنب ... عدد الحركات".
+test("the daily report gives each branch its total and count, then cash, card and insurance side by side", async t => {
   const db = fixture(t);
   let text;
   const byLocation = [
-    { location: "JUMRK/Stock", orderCount: 16, totalAmount: 83.43 },
-    { location: "NAOOR/Stock", orderCount: 177, totalAmount: 1863.71 },
-    { location: "SAFOT/Stock", orderCount: 58, totalAmount: 467.9 },
-    { location: "DABOQ/Stock", orderCount: 17, totalAmount: 127.61 },
+    { location: "JUMRK/Stock", orderCount: 16, totalAmount: 83.43, payments: { Cash: 50, "Credit card": 33.43, Insurance: 0 } },
+    { location: "NAOOR/Stock", orderCount: 177, totalAmount: 1863.71, payments: { Cash: 500, "Credit card": 1200, Insurance: 100, "Customer Account": 63.71 } },
+    { location: "SAFOT/Stock", orderCount: 58, totalAmount: 467.9, payments: { Cash: 244.15, "Credit card": 169.45, Insurance: 54.3 } },
   ];
   const jobs = createOdooReportJobs({ db, now: () => DAILY_AT, config: {
     enabled: true, odoo, ownerNumber: "", groupId: "1@g.us", timezoneOffsetMinutes: 0,
     fetcher: odooFetcher({ byLocation }),
   } });
   await jobs.deliverNext(async message => { text = message.text; return {}; });
-  assert.match(text, /📊 \*تقرير المبيعات اليومي بالفرع\*/);
   // DAILY_AT is 1970-01-02T00:00Z; the report covers the day that just ended, 1970-01-01.
-  assert.match(text, /📅 1970-01-01/);
+  assert.match(text, /📊 \*تقرير المبيعات اليومي — 1970-01-01\*/);
   const lines = text.split("\n");
-  assert.equal(lines.findIndex(l => l.includes("الناعور")) < lines.findIndex(l => l.includes("صافوط")), true, "largest branch (الناعور) must rank above صافوط");
-  assert.equal(lines.findIndex(l => l.includes("صافوط")) < lines.findIndex(l => l.includes("دابوق")), true);
-  assert.equal(lines.findIndex(l => l.includes("دابوق")) < lines.findIndex(l => l.includes("الجمرك")), true);
-  assert.match(text, /🟢 \*الناعور\* — 1,863\.71 \(73\.3%\)/);
-  assert.match(text, /🔵 \*صافوط\* — 467\.90 \(18\.4%\)/);
-  assert.match(text, /🟡 \*دابوق\* — 127\.61 \(5\.0%\)/);
-  assert.match(text, /🔴 \*الجمرك\* — 83\.43 \(3\.3%\)/);
-  assert.match(text, /💰 \*الإجمالي\*: 2,542\.65/);
+  const at = name => lines.findIndex(l => l.includes(name));
+  assert.ok(at("الناعور") < at("صافوط") && at("صافوط") < at("الجمرك"), "ranked by amount");
+  assert.equal(lines[at("الناعور")], "🟢 *الناعور — 1,863.71 (177 حركة)*");
+  assert.equal(lines[at("الناعور") + 1], "كاش 500.00 · بطاقة 1,200.00 · تأمين 100.00 · ذمم 63.71");
+  assert.equal(lines[at("صافوط") + 1], "كاش 244.15 · بطاقة 169.45 · تأمين 54.30", "no ذمم when there were none");
+  assert.equal(lines[at("الجمرك") + 1], "كاش 50.00 · بطاقة 33.43 · تأمين 0.00");
+  assert.match(text, /💰 \*الإجمالي: 2,415\.04 — 251 حركة\*/);
+});
+
+test("if Odoo will not give the payment split, the branch totals still go out", async t => {
+  const db = fixture(t);
+  let text;
+  const base = odooFetcher({ byLocation: [{ location: "NAOOR/Stock", orderCount: 5, totalAmount: 20 }] });
+  const jobs = createOdooReportJobs({ db, now: () => DAILY_AT, config: {
+    enabled: true, odoo, ownerNumber: "", groupId: "1@g.us", timezoneOffsetMinutes: 0,
+    fetcher: async (url, options) => JSON.parse(options.body).params.args?.[3] === "pos.payment"
+      ? { ok: true, json: async () => ({ error: { message: "Access denied" } }) } : base(url, options),
+  } });
+  await jobs.deliverNext(async message => { text = message.text; return {}; });
+  assert.match(text, /\*الناعور — 20\.00 \(5 حركة\)\*/);
+  assert.doesNotMatch(text, /كاش/);
 });
 
 test("a day with no branch sales still sends an honest empty report instead of an empty body", async t => {
@@ -126,7 +138,7 @@ test("a day with no branch sales still sends an honest empty report instead of a
   } });
   await jobs.deliverNext(async message => { text = message.text; return {}; });
   assert.match(text, /لا توجد مبيعات مسجّلة لهذا اليوم/);
-  assert.match(text, /💰 \*الإجمالي\*: 0\.00/);
+  assert.match(text, /💰 \*الإجمالي: 0\.00 — 0 حركة\*/);
 });
 
 test("at the weekly slot, the report names what will run out and how soon", async t => {

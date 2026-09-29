@@ -126,6 +126,30 @@ export type ShortageItem = { name: string; qty: number; packs: number; perDay: n
 // shelf of it reads as "in stock" and is never ordered for Dabouq.
 export type BranchShortages = { code: string; location: string; items: ShortageItem[] };
 export type LocationSales = { location: string; orderCount: number; totalAmount: number };
+// Basim, 2026-09-29, on the nightly report: under each branch, how much came
+// in as cash, card and insurance, side by side. "ذمم" is Odoo's Customer
+// Account method -- sold on the customer's tab -- and only shows when used.
+export type PaymentKind = "cash" | "card" | "insurance" | "account" | "other";
+export type BranchDaySales = LocationSales & { payments: Record<PaymentKind, number> | null };
+const PAYMENT_LABELS: Array<[PaymentKind, string, boolean]> = [
+  ["cash", "كاش", true], ["card", "بطاقة", true], ["insurance", "تأمين", true], ["account", "ذمم", false], ["other", "أخرى", false],
+];
+/** "كاش X · بطاقة Y · تأمين Z" -- ذمم and أخرى only when there were any. */
+export function paymentSplitLine(payments: BranchDaySales["payments"]): string | null {
+  if (!payments) return null;
+  return PAYMENT_LABELS
+    .filter(([key, , always]) => always || Math.abs(payments[key]) >= 0.0005)
+    .map(([key, label]) => `${label} ${formatAmount(payments[key])}`)
+    .join(" · ");
+}
+export function paymentKind(methodName: string): PaymentKind {
+  const name = methodName.toLowerCase();
+  if (/cash|كاش|نقد/.test(name)) return "cash";
+  if (/card|visa|master|بطاق|فيزا|شبكة/.test(name)) return "card";
+  if (/insur|تأمين|تامين/.test(name)) return "insurance";
+  if (/account|ذمم|آجل|اجل/.test(name)) return "account";
+  return "other";
+}
 // Basim (2026-09-17): the three shifts the branches run -- 08:00-16:00,
 // 16:00-24:00, and 00:00-08:00, all Amman time. Each belongs to the calendar
 // day it falls in, so Wednesday's night shift is the small hours of Wednesday
@@ -227,6 +251,8 @@ export type OdooSession = {
   salesSummary(sinceIso: string, untilIso: string): Promise<SalesSummary>;
   invoiceSales(sinceIso: string, untilIso: string): Promise<InvoiceSales>;
   salesByLocation(sinceIso: string, untilIso: string): Promise<LocationSales[]>;
+  /** Per branch as salesByLocation, plus what came in by payment method. */
+  branchDaySales(sinceIso: string, untilIso: string): Promise<BranchDaySales[]>;
   /** Any window, split into the three shifts by local clock time. */
   salesByShift(sinceMs: number, untilMs: number, offsetMinutes?: number): Promise<ShiftSales[]>;
   purchaseSummary(sinceIso: string, untilIso: string): Promise<PurchaseSummary>;
@@ -320,6 +346,40 @@ export async function openOdooSession(config: OdooConfig, fetcher: Fetcher = fet
       return { invoiceCount: row ? groupCount(row) : 0, totalAmount: Number(row?.amount_total ?? 0) };
     },
     salesByLocation: locationSales,
+    async branchDaySales(sinceIso, untilIso) {
+      const states = ["paid", "done", "invoiced"];
+      const domain = [["date_order", ">=", sinceIso], ["date_order", "<", untilIso], ["state", "in", states]];
+      // A payment carries its till session, not the shelf it sold from, so the
+      // orders are grouped by session AND location: that is both the branch
+      // totals and the map from a session to its branch, in one read.
+      const orderGroups = (await execute("pos.order", "read_group", [domain, ["amount_total"], ["session_id", "location_id"]], { lazy: false })) as Array<Record<string, unknown>> | undefined;
+      const branches = new Map<string, BranchDaySales>();
+      const branchOfSession = new Map<number, string>();
+      for (const row of Array.isArray(orderGroups) ? orderGroups : []) {
+        const location = Array.isArray(row.location_id) && typeof row.location_id[1] === "string" ? row.location_id[1] : "?";
+        const entry = branches.get(location) ?? { location, orderCount: 0, totalAmount: 0, payments: null };
+        entry.orderCount += groupCount(row);
+        entry.totalAmount += Number(row.amount_total ?? 0);
+        branches.set(location, entry);
+        if (Array.isArray(row.session_id) && typeof row.session_id[0] === "number") branchOfSession.set(row.session_id[0], location);
+      }
+      // The split is an extra; if Odoo refuses it, the totals still go out.
+      try {
+        const paymentDomain = [["pos_order_id.date_order", ">=", sinceIso], ["pos_order_id.date_order", "<", untilIso], ["pos_order_id.state", "in", states]];
+        const paymentGroups = (await execute("pos.payment", "read_group", [paymentDomain, ["amount"], ["session_id", "payment_method_id"]], { lazy: false })) as Array<Record<string, unknown>> | undefined;
+        for (const row of Array.isArray(paymentGroups) ? paymentGroups : []) {
+          const sessionId = Array.isArray(row.session_id) ? Number(row.session_id[0]) : NaN;
+          const entry = branches.get(branchOfSession.get(sessionId) ?? "");
+          if (!entry) continue;
+          const method = Array.isArray(row.payment_method_id) ? String(row.payment_method_id[1] ?? "") : "";
+          entry.payments ??= { cash: 0, card: 0, insurance: 0, account: 0, other: 0 };
+          entry.payments[paymentKind(method)] += Number(row.amount ?? 0);
+        }
+      } catch (error) {
+        if (!(error instanceof OdooError)) throw error;
+      }
+      return [...branches.values()];
+    },
     async salesByShift(sinceMs, untilMs, offsetMinutes = 180) {
       // A shift is contiguous within one day, but "the morning shift this
       // month" is thirty separate stretches. Rather than thirty reads, the

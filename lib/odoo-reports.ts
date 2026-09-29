@@ -12,7 +12,7 @@
 import { randomBytes } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 import { migrateManagementActions } from "./management-actions.ts";
-import { openOdooSession, formatAmount, DEFAULT_BRANCH_NAMES, type OdooConfig, type SalesSummary, type InvoiceSales, type ShortageItem, type BranchShortages, type LocationSales, type PurchaseSummary } from "./odoo-client.ts";
+import { openOdooSession, formatAmount, paymentSplitLine, DEFAULT_BRANCH_NAMES, type OdooConfig, type SalesSummary, type InvoiceSales, type ShortageItem, type BranchShortages, type BranchDaySales, type PurchaseSummary } from "./odoo-client.ts";
 import { branchShortageMessages, packLabel, NO_SHORTAGES } from "./odoo-shortage-text.ts";
 
 // 2026-09-12, Basim: "بدي هذا التقرير كل يوم الساعه 12:01 صباحا يروح للجروب
@@ -134,18 +134,24 @@ function branchLabel(location: string, names: Record<string, string>): string {
   return (code && names[code]) || location;
 }
 
-function dailyText(byLocation: LocationSales[], dateLabel: string, currencyLabel: string | undefined, branchNames: Record<string, string> | undefined): string {
+// Basim, 2026-09-29, approving the example: each branch's total with its
+// number of sales beside it, and under it one line -- cash, card, insurance
+// side by side, ذمم only when there were any.
+function dailyText(byLocation: BranchDaySales[], dateLabel: string, currencyLabel: string | undefined, branchNames: Record<string, string> | undefined): string {
   const names = { ...DEFAULT_BRANCH_NAMES, ...branchNames };
   const total = byLocation.reduce((sum, row) => sum + row.totalAmount, 0);
+  const orders = byLocation.reduce((sum, row) => sum + row.orderCount, 0);
   const ranked = [...byLocation].sort((a, b) => b.totalAmount - a.totalAmount);
-  const lines = [`📊 *تقرير المبيعات اليومي بالفرع*`, `📅 ${dateLabel}`, ""];
+  const lines = [`📊 *تقرير المبيعات اليومي — ${dateLabel}*`, ""];
   ranked.forEach((row, index) => {
-    const pct = total > 0 ? (row.totalAmount / total) * 100 : 0;
     const color = BRANCH_COLORS[index % BRANCH_COLORS.length];
-    lines.push(`${color} *${clean(branchLabel(row.location, names))}* — ${money(row.totalAmount, currencyLabel)} (${pct.toFixed(1)}%)`);
+    lines.push(`${color} *${clean(branchLabel(row.location, names))} — ${money(row.totalAmount, currencyLabel)} (${row.orderCount} حركة)*`);
+    const split = paymentSplitLine(row.payments);
+    if (split) lines.push(split);
+    lines.push("");
   });
-  if (!ranked.length) lines.push("لا توجد مبيعات مسجّلة لهذا اليوم.");
-  lines.push("", "━━━━━━━━━━━━━", `💰 *الإجمالي*: ${money(total, currencyLabel)}`);
+  if (!ranked.length) lines.push("لا توجد مبيعات مسجّلة لهذا اليوم.", "");
+  lines.push("━━━━━━━━━━━━━", `💰 *الإجمالي: ${money(total, currencyLabel)} — ${orders} حركة*`);
   return clean(lines.join("\n"));
 }
 
@@ -241,7 +247,7 @@ async function buildReportBody(config: OdooReportConfig, session: Awaited<Return
     const dayStart = startOfLocalDay(at, offset) - DAY;
     const since = new Date(dayStart).toISOString();
     const until = new Date(dayStart + DAY).toISOString();
-    const byLocation = await session.salesByLocation(since, until);
+    const byLocation = await session.branchDaySales(since, until);
     return dailyText(byLocation, localDateLabel(dayStart, offset), config.currencyLabel, config.branchNames);
   }
   if (kind === "odoo_purchases_weekly") {
