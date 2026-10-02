@@ -147,3 +147,30 @@ test('approving a task closes exactly that task, with nothing else closing along
   assert.ok(f.db.prepare('SELECT archived_at FROM tasks WHERE id=?').get(created.id).archived_at);
   assert.equal(f.db.prepare("SELECT status FROM tasks WHERE id='existing'").get().status,'progress','a sibling task is untouched');
 });
+
+// Basim, 2026-10-02: the morning profit-problems list goes to the group and
+// tells Dr. Shadi to send "1" in private and write the task -- "ما حتقتبس له
+// الاسعار من الجروب". A price task opened after it carries the list.
+test('a price task opened after the profit-problems list carries the list',async t=>{
+  const f=fixture(t);
+  const { recordPriceIssues } = await import('../lib/price-issues.ts');
+  const items='1. FOSAVANCE 4 TAB — بيع 6.54 · كلفة 6.82 · خسارة 4.2%\n2. PARAVIN VIALS — بيع 1.68 · كلفة 1.68 · ربح 0.2%';
+  recordPriceIssues(f.db,'2026-10-01',items,f.now-60_000);
+  const result=await f.run(draft({title:'تعديل أسعار الأصناف',priority:'yellow',dueDate:'unscheduled'}),{senderNumber:'12025550102',text:'ضيف مهمة تعديل أسعار الأصناف'});
+  const request=outbox(f).find(row=>row.toUser==='basem'&&/يقترح فتح مهمة/.test(row.text));
+  assert.ok(request,'filed for Basim: '+JSON.stringify({reply:result.reply,outbox:outbox(f)}));
+  assert.match(request.text,/FOSAVANCE 4 TAB — بيع 6\.54/);
+  assert.match(request.text,/مبيعات 2026-10-01/);
+});
+
+test('a task about something else, or a list too old, carries nothing',async t=>{
+  const f=fixture(t);
+  const { recordPriceIssues } = await import('../lib/price-issues.ts');
+  recordPriceIssues(f.db,'2026-10-01','1. FOSAVANCE 4 TAB',f.now-60_000);
+  await f.run(draft({title:'ترتيب الرفوف',priority:'yellow',dueDate:'unscheduled'}),{senderNumber:'12025550102',text:'ضيف مهمة ترتيب الرفوف'});
+  assert.doesNotMatch(outbox(f).map(row=>row.text).join('\n'),/FOSAVANCE/);
+  f.tick(37*60*60_000);
+  await f.run(draft({title:'تعديل أسعار',priority:'yellow',dueDate:'unscheduled'}),{senderNumber:'12025550102',text:'ضيف مهمة تعديل أسعار'});
+  assert.equal(outbox(f).filter(row=>row.toUser==='basem'&&/يقترح فتح مهمة/.test(row.text)).length,2,'both were filed');
+  assert.doesNotMatch(outbox(f).map(row=>row.text).join('\n'),/FOSAVANCE/,'a day and a half later the list is stale');
+});

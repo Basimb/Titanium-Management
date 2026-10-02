@@ -3,6 +3,7 @@ import type { DatabaseSync } from "node:sqlite";
 import { executeManagementAction, getManagementSnapshot, ManagementActionError, migrateManagementActions, resolveManagementActor, type ManagementActor, type ManagementResult, type ManagementTask } from "./management-actions.ts";
 import { can, isOwner, type PermissionActor } from "./permissions.ts";
 import type { SecretaryChoices } from "./secretary-choices.ts";
+import { withPriceIssues } from "./price-issues.ts";
 
 export type ApprovalType = "deadline_extension" | "priority_change" | "task_close" | "task_ownership" | "task_transfer" | "task_create" | "tasks_create" | "rule" | "policy";
 export type ApprovalStatus = "pending" | "approved" | "rejected" | "expired";
@@ -261,7 +262,9 @@ export function requestTaskCreate(db: DatabaseSync, claimed: ManagementActor, in
   const actor = resolveManagementActor(db, claimed);
   const snapshot = getManagementSnapshot(db, actor);
   const title = text(input.title, "اسم المهمة", 240);
-  const details = text(input.details, "التفاصيل", 10_000, true);
+  // A price task asked for after the morning profit-problems list carries
+  // that list: the private chat never saw the group message (price-issues.ts).
+  const details = text(withPriceIssues(db, title, input.details ?? null, now(options)) ?? undefined, "التفاصيل", 10_000, true);
   if (!["red", "yellow", "green"].includes(input.priority)) return fail(400, "invalid_priority", "حدد أولوية المهمة");
   const dueDate = input.dueDate ? dateOnly(input.dueDate, "الموعد") : null;
   const ownerId = input.ownerId ?? actor.id;
@@ -430,7 +433,10 @@ export function decideApproval(db: DatabaseSync, claimed: ManagementActor, input
 /** "وافق على تمديد خالد" → find the single matching pending request; null when ambiguous. */
 export function findPendingApproval(db: DatabaseSync, claimed: ManagementActor, hint: { type?: ApprovalType | null; requesterName?: string | null; text?: string | null }): { approval: Approval | null; candidates: Approval[] } {
   const pending = listApprovals(db, claimed, { status: "pending", limit: 200 });
-  const normalize = (value: string) => value.normalize("NFKC").replace(/[\u064b-\u065f\u0670\u0640]/g, "").replace(/[أإآ]/g, "ا").replace(/ة/g, "ه").toLowerCase();
+  // Tashkeel (U+064B-U+065F), superscript alef (U+0670) and tatweel (U+0640),
+  // built from code points so the source stays plain ASCII here.
+  const marks = new RegExp(`[${String.fromCharCode(0x064b)}-${String.fromCharCode(0x065f)}${String.fromCharCode(0x0670)}${String.fromCharCode(0x0640)}]`, "g");
+  const normalize = (value: string) => value.normalize("NFKC").replace(marks, "").replace(/[أإآ]/g, "ا").replace(/ة/g, "ه").toLowerCase();
   let candidates = pending;
   if (hint.type) candidates = candidates.filter(approval => approval.type === hint.type);
   if (hint.requesterName) { const name = normalize(hint.requesterName); candidates = candidates.filter(approval => normalize(approval.requestedByName).includes(name)); }

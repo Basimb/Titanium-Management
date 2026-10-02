@@ -142,6 +142,11 @@ export function paymentSplitLine(payments: BranchDaySales["payments"]): string |
     .map(([key, label]) => `${label} ${formatAmount(payments[key])}`)
     .join(" · ");
 }
+// Basim, 2026-10-02: "شوفلي نسبة الربح اتغيرت" -- and then the items sold at a
+// loss, as a standing morning job for the secretary. Sales are before tax (price_subtotal) and the
+// cost is what Odoo booked on the line (total_cost), the same pair Odoo's own
+// margin uses.
+export type ProductMargin = { name: string; sales: number; cost: number; qty: number };
 export function paymentKind(methodName: string): PaymentKind {
   const name = methodName.toLowerCase();
   if (/cash|كاش|نقد/.test(name)) return "cash";
@@ -253,6 +258,8 @@ export type OdooSession = {
   salesByLocation(sinceIso: string, untilIso: string): Promise<LocationSales[]>;
   /** Per branch as salesByLocation, plus what came in by payment method. */
   branchDaySales(sinceIso: string, untilIso: string): Promise<BranchDaySales[]>;
+  /** Sales before tax and booked cost, per product, for orders in the window. */
+  productMargins(sinceIso: string, untilIso: string): Promise<ProductMargin[]>;
   /** Any window, split into the three shifts by local clock time. */
   salesByShift(sinceMs: number, untilMs: number, offsetMinutes?: number): Promise<ShiftSales[]>;
   purchaseSummary(sinceIso: string, untilIso: string): Promise<PurchaseSummary>;
@@ -346,6 +353,14 @@ export async function openOdooSession(config: OdooConfig, fetcher: Fetcher = fet
       return { invoiceCount: row ? groupCount(row) : 0, totalAmount: Number(row?.amount_total ?? 0) };
     },
     salesByLocation: locationSales,
+    async productMargins(sinceIso, untilIso) {
+      const domain = [["order_id.date_order", ">=", sinceIso], ["order_id.date_order", "<", untilIso], ["order_id.state", "in", ["paid", "done", "invoiced"]]];
+      const rows = await page("pos.order.line", "read_group", [domain, ["price_subtotal", "total_cost", "qty"], ["product_id"]], { lazy: false });
+      return rows.map(row => ({
+        name: Array.isArray(row.product_id) ? String(row.product_id[1] ?? "?") : "?",
+        sales: Number(row.price_subtotal ?? 0), cost: Number(row.total_cost ?? 0), qty: Number(row.qty ?? 0),
+      }));
+    },
     async branchDaySales(sinceIso, untilIso) {
       const states = ["paid", "done", "invoiced"];
       const domain = [["date_order", ">=", sinceIso], ["date_order", "<", untilIso], ["state", "in", states]];

@@ -12,7 +12,8 @@
 import { randomBytes } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 import { migrateManagementActions } from "./management-actions.ts";
-import { openOdooSession, formatAmount, paymentSplitLine, DEFAULT_BRANCH_NAMES, type OdooConfig, type SalesSummary, type InvoiceSales, type ShortageItem, type BranchShortages, type BranchDaySales, type PurchaseSummary } from "./odoo-client.ts";
+import { openOdooSession, formatAmount, paymentSplitLine, DEFAULT_BRANCH_NAMES, type OdooConfig, type SalesSummary, type InvoiceSales, type ShortageItem, type BranchShortages, type BranchDaySales, type ProductMargin, type PurchaseSummary } from "./odoo-client.ts";
+import { recordPriceIssues } from "./price-issues.ts";
 import { branchShortageMessages, packLabel, NO_SHORTAGES } from "./odoo-shortage-text.ts";
 
 // 2026-09-12, Basim: "بدي هذا التقرير كل يوم الساعه 12:01 صباحا يروح للجروب
@@ -50,6 +51,9 @@ export type OdooReportConfig = {
   // he saw it, "كل رساله لحال" per branch. One message per branch, every
   // morning, group only.
   shortagesHour?: number; // local hour the daily shortages report goes out; default 9
+  // Basim, 2026-10-02: items sold at a loss or near it, every morning --
+  // "على الجروب", "10:00 الصبح". Nothing is sent on a day with none.
+  marginHour?: number; // local hour the profit-problems list goes out; default 10
   timezoneOffsetMinutes?: number; // default 180 (Amman/Riyadh, UTC+3)
   // Basim (2026-09-17): "مبيعات يومي بالفرع كل يوم ١٢ منتصف الليل الجروب بس
   // والغي الثاني لغاية ما اقولك" -- who each report goes to, and whether it
@@ -61,7 +65,7 @@ export type OdooReportConfig = {
   fetcher?: typeof fetch; // injected in tests; defaults to the global fetch
 };
 
-type Kind = "odoo_daily" | "odoo_weekly" | "odoo_purchases_weekly" | "odoo_shortages";
+type Kind = "odoo_daily" | "odoo_weekly" | "odoo_purchases_weekly" | "odoo_shortages" | "odoo_margin";
 export type ReportRouting = { enabled: boolean; group: boolean; owner: boolean };
 // Basim, 2026-09-17: "مبيعات يومي بالفرع كل يوم ١٢ منتصف الليل الجروب بس
 // والغي الثاني لغاية ما اقولك" -- daily sales per branch, midnight, group only;
@@ -77,8 +81,9 @@ const DEFAULT_ROUTING: Record<Kind, ReportRouting> = {
   // نرسل نواقص على الجروب". Off by default; the report and its per-branch
   // formatting stay intact, so turning it back on is this one line.
   odoo_shortages: { enabled: false, group: false, owner: false },
+  odoo_margin: { enabled: true, group: true, owner: false },
 };
-type Planned = { id: string; kind: Kind; targetUser: string; entityId: string | null; to: string; text: string };
+type Planned = { id: string; kind: Kind; targetUser: string; entityId: string | null; to: string; text: string; priceIssues?: { day: string; items: string } };
 
 const DAY = 24 * 60 * 60_000;
 const newMessageId = () => "3EB0" + randomBytes(18).toString("hex").toUpperCase();
@@ -155,6 +160,60 @@ function dailyText(byLocation: BranchDaySales[], dateLabel: string, currencyLabe
   return clean(lines.join("\n"));
 }
 
+// Basim, 2026-10-02, on the morning profit job: "ما بدي تقرير الصبح بدي هذول
+// الاصناف ... ودي لي وين مشاكل الربح". Not a margin report -- only the items
+// that need fixing: sold yesterday at a loss or close to it, which means the
+// sale price is stale or the cost moved on the last purchase. A day with none
+// sends nothing at all.
+const NEAR_LOSS = 5; // %
+const pctOf = (sales: number, cost: number) => sales > 0 ? ((sales - cost) / sales) * 100 : 0;
+const MAX_LISTED = 30;
+
+// Wording is Basim's own, 2026-10-02: a morning greeting to the team, the
+// list, then Dr. Shadi -- whose job pricing is -- asked whether he wants it as
+// a task (a private "1" is already the secretary's "add a task" shortcut) or
+// will fix it himself, and reminded that a reply in the group needs the word
+// سكرتير, the only thing that makes the secretary answer there.
+function marginProblemsText(products: ProductMargin[], dateLabel: string): { text: string; items: string } | null {
+  // A line with no booked cost is unknown, not free: it is left out rather
+  // than reported as a problem it may not be.
+  const losing = products.filter(row => row.sales > 0 && row.cost > 0 && pctOf(row.sales, row.cost) < NEAR_LOSS)
+    .sort((a, b) => pctOf(a.sales, a.cost) - pctOf(b.sales, b.cost));
+  if (!losing.length) return null;
+  const noun = losing.length === 1 ? "صنف" : losing.length <= 10 ? "أصناف" : "صنف";
+  const lines = [
+    "صباح الخير فريق عمل تيتانيوم الجبّار ☀️",
+    "بعرض عليكم مشاكل البيع والنِّسب القليلة عشان تتأكدوا من الأسعار والكلفة، يعطيكم العافية.",
+    "",
+    `⚠️ *مبيعات ${dateLabel} — ${losing.length} ${noun}:*`,
+    "",
+  ];
+  losing.slice(0, MAX_LISTED).forEach((row, index) => {
+    const margin = pctOf(row.sales, row.cost);
+    // Basim: "حط له الوان ... راد وورا خضره" -- worst at the top in red,
+    // easing down to green for the ones only just under the line.
+    const color = margin < 0 ? "🔴" : margin < 2 ? "🟠" : margin < 4 ? "🟡" : "🟢";
+    lines.push(`${color} *${index + 1}.* ${clean(row.name)}`,
+      `بيع ${formatAmount(row.sales)} · كلفة ${formatAmount(row.cost)} · ${margin < 0 ? `خسارة ${Math.abs(margin).toFixed(1)}%` : `ربح ${margin.toFixed(1)}%`}`, "");
+  });
+  if (losing.length > MAX_LISTED) lines.push(`و${losing.length - MAX_LISTED} صنف ثاني.`, "");
+  lines.push(
+    "━━━━━━━━━━━━━",
+    "د. شادي، هاي مسؤوليتك 👆",
+    "بتحب أحطلك ياها مهمة، ولا رح تعالجهم فوراً؟",
+    "إذا بدك ياها مهمة: ابعتلي على الخاص رقم *1* واكتب المهمة عن تعديل الأسعار، وأنا بجهزلك المهمة كاملة. شكراً إلك 🙏",
+    "",
+    "_وإذا بدك ترد عليّ بالجروب، الرجاء تذكر كلمة *سكرتير* بالرسالة عشان أفهم إنها موجهة إلي._",
+  );
+  const items = losing.map((row, index) => {
+    const margin = pctOf(row.sales, row.cost);
+    // Two lines, as in the group message: an English name and Arabic figures
+    // on one line are reordered by WhatsApp's bidi rules into nonsense.
+    return `${index + 1}. ${clean(row.name)}\nبيع ${formatAmount(row.sales)} · كلفة ${formatAmount(row.cost)} · ${margin < 0 ? `خسارة ${Math.abs(margin).toFixed(1)}%` : `ربح ${margin.toFixed(1)}%`}`;
+  }).join("\n");
+  return { text: clean(lines.join("\n")), items };
+}
+
 function weeklyText(sales: SalesSummary, invoiced: InvoiceSales, shortages: ShortageItem[],
   activeProducts: number, sinceLabel: string, untilLabel: string, currencyLabel?: string): string {
   // The basket is sales over SALES, not over sales plus refunds -- counting a
@@ -200,7 +259,9 @@ function purchasesText(summary: PurchaseSummary, sinceDate: string, untilDate: s
 // One report can be several messages: the shortages report sends one per
 // branch (and splits a long branch), every other kind sends exactly one.
 // entityId is what keeps them apart in the dedup table.
-type ReportMessage = { entityId: string | null; text: string };
+// priceIssues rides along with the profit-problems list so that, once sent,
+// the secretary can attach it to a price task (see price-issues.ts).
+type ReportMessage = { entityId: string | null; text: string; priceIssues?: { day: string; items: string } };
 
 // The bridge drains its queues once a SECOND. A one-message report is asked
 // for once and then skipped by the cheap dedup check above, but the per-branch
@@ -224,6 +285,7 @@ async function buildReportMessages(db: DatabaseSync, config: OdooReportConfig, k
     messages = [{ entityId: null, text: kind === "odoo_daily" ? "📊 تعذر جلب تقرير المبيعات اليومي من نظام الصيدلية الآن."
       : kind === "odoo_purchases_weekly" ? "🧾 تعذر جلب تقرير المشتريات من نظام الصيدلية الآن."
       : kind === "odoo_shortages" ? "📦 تعذر جلب تقرير النواقص من نظام الصيدلية الآن."
+      : kind === "odoo_margin" ? "⚠️ تعذر جلب مشاكل الربح من نظام الصيدلية الآن."
       : "📈 تعذر جلب التقرير الأسبوعي من نظام الصيدلية الآن." }];
   }
   messageCache.set(db, { key, messages });
@@ -237,6 +299,14 @@ async function buildReportMessagesFresh(config: OdooReportConfig, kind: Kind, at
     const branches = await session.branchShortages({ maxDaysLeft: 7, at });
     if (!branches.length) return [{ entityId: null, text: NO_SHORTAGES }];
     return branchShortageMessages(branches, names);
+  }
+  if (kind === "odoo_margin") {
+    const offset = config.timezoneOffsetMinutes ?? 180;
+    const dayStart = startOfLocalDay(at, offset) - DAY;
+    const products = await session.productMargins(new Date(dayStart).toISOString(), new Date(dayStart + DAY).toISOString());
+    const day = localDateLabel(dayStart, offset);
+    const problems = marginProblemsText(products, day);
+    return problems ? [{ entityId: null, text: problems.text, priceIssues: { day, items: problems.items } }] : [];
   }
   return [{ entityId: null, text: await buildReportBody(config, session, kind, at) }];
 }
@@ -286,6 +356,7 @@ async function planOdooReports(db: DatabaseSync, config: OdooReportConfig, at: n
   // that was asked for by name wins the slot rather than the newer default.
   else if (hour === (config.dailyHour ?? 0) && minuteReached(minute, config.dailyMinute)) kind = "odoo_daily";
   else if (hour === (config.shortagesHour ?? 9)) kind = "odoo_shortages";
+  else if (hour === (config.marginHour ?? 10)) kind = "odoo_margin";
   if (!kind) return [];
   const routing = routingFor(kind);
   // A switched-off report costs nothing: no targets, and -- just as important
@@ -295,7 +366,7 @@ async function planOdooReports(db: DatabaseSync, config: OdooReportConfig, at: n
   // Keyed to the report's own local day, not to a rolling window. A rolling
   // ~24h meant a manual test send swallowed the next scheduled report --
   // which is exactly what happened to Basim on 2026-09-16.
-  const daily = kind === "odoo_daily" || kind === "odoo_shortages";
+  const daily = kind === "odoo_daily" || kind === "odoo_shortages" || kind === "odoo_margin";
   const dedupSince = daily ? startOfLocalDay(at, offset) : at - (7 * DAY - 5 * 60_000);
   const targets: Array<{ targetUser: string; to: string }> = [];
   if (routing.group && config.groupId) targets.push({ targetUser: "group", to: config.groupId });
@@ -312,7 +383,7 @@ async function planOdooReports(db: DatabaseSync, config: OdooReportConfig, at: n
     for (const message of messages) {
       if (alreadySent(db, kind as Kind, target.targetUser, message.entityId, dedupSince)) continue;
       planned.push({ id: randomBytes(8).toString("hex"), kind: kind as Kind, targetUser: target.targetUser,
-        entityId: message.entityId, to: target.to, text: message.text });
+        entityId: message.entityId, to: target.to, text: message.text, ...(message.priceIssues ? { priceIssues: message.priceIssues } : {}) });
     }
   }
   return planned;
@@ -336,6 +407,7 @@ export function createOdooReportJobs({ db, config, now = Date.now }: { db: Datab
           await Promise.race([send({ to: plan.to, text: plan.text, messageId: newMessageId(), signal: controller.signal }),
             new Promise<never>((_, reject) => { timeout = setTimeout(() => { controller.abort(); reject(new Error("delivery_uncertain")); }, 15_000); })]);
           db.prepare("UPDATE agent_followups SET response='sent' WHERE id=?").run(plan.id);
+          if (plan.priceIssues) recordPriceIssues(db, plan.priceIssues.day, plan.priceIssues.items, at);
           return { status: "sent" as const };
         } catch { db.prepare("UPDATE agent_followups SET response='failed' WHERE id=?").run(plan.id); return { status: "failed" as const }; }
         finally { clearTimeout(timeout); }

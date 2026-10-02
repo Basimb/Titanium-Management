@@ -410,3 +410,62 @@ test("the daily report waits for its minute, then stays sendable for the hour", 
     await build(fixture(t), amman(1, 15)).deliverNext(async () => assert.fail("wrong hour")),
     { status: "idle" });
 });
+
+// Basim, 2026-10-02: "ما بدي تقرير الصبح بدي هذول الاصناف ... ودي لي وين
+// مشاكل الربح". At 10:00, only the items sold at a loss or near it -- and on a
+// day with none, nothing at all.
+const MARGIN_AT = Date.UTC(1970, 0, 2, 10, 0, 0);
+function marginFetcher(lines) {
+  return async (url, options) => {
+    const body = JSON.parse(options.body);
+    if (body.params.service === "common") return { ok: true, json: async () => ({ result: 1 }) };
+    const [, , , model, method, , kwargs] = body.params.args;
+    const result = model === "pos.order.line" && method === "read_group" && !(kwargs.offset || 0)
+      ? lines.map(([name, sales, cost], index) => ({ product_id: [index + 1, name], price_subtotal: sales, total_cost: cost, qty: 1 }))
+      : [];
+    return { ok: true, json: async () => ({ result }) };
+  };
+}
+
+test("at 10:00 the group gets only the items sold at a loss or near it, worst first", async t => {
+  const db = fixture(t);
+  const sent = [];
+  const jobs = createOdooReportJobs({ db, now: () => MARGIN_AT, config: {
+    enabled: true, odoo, ownerNumber: "962790000000", groupId: "1@g.us", timezoneOffsetMinutes: 0,
+    fetcher: marginFetcher([
+      ["OZEMPIC 1MG/3ML", 163.824, 139.682],
+      ["FOSAVANCE 4 TAB", 6.544, 6.817],
+      ["SEROXAT 12.5MG 30 TAB", 9.183, 9.068],
+      ["AIWIBI BABAY DIAPERS (6) 36 PCS", 13.793, 13.421],
+      ["NO COST ITEM", 5, 0],
+    ]),
+  } });
+  await jobs.deliverNext(async message => { sent.push(message); return {}; });
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].to, "1@g.us");
+  const text = sent[0].text;
+  assert.match(text, /صباح الخير فريق عمل تيتانيوم/);
+  assert.match(text, /مبيعات 1970-01-01 — 3 أصناف/);
+  assert.match(text, /رقم \*1\*/, "Dr. Shadi is told a private 1 opens a task");
+  assert.match(text, /سكرتير/, "and that a group reply must name the secretary");
+  assert.ok(text.indexOf("FOSAVANCE") < text.indexOf("SEROXAT") && text.indexOf("SEROXAT") < text.indexOf("AIWIBI"), "worst first");
+  assert.match(text, /بيع 6\.54 · كلفة 6\.82 · خسارة 4\.2%/);
+  assert.match(text, /د\. شادي/, "addressed to Dr. Shadi, as a heads-up");
+  assert.doesNotMatch(text, /OZEMPIC/, "a thin but healthy margin is not a problem");
+  assert.doesNotMatch(text, /NO COST ITEM/, "an item with no booked cost is unknown, not a problem");
+  assert.deepEqual(await jobs.deliverNext(async () => assert.fail("once a day")), { status: "idle" });
+  // Kept for the secretary, so a price task opened in private carries the list.
+  const { latestPriceIssues } = await import("../lib/price-issues.ts");
+  const kept = latestPriceIssues(db, MARGIN_AT + 60_000);
+  assert.equal(kept.day, "1970-01-01");
+  assert.match(kept.items, /^1\. FOSAVANCE 4 TAB\nبيع 6\.54 · كلفة 6\.82 · خسارة 4\.2%/);
+});
+
+test("a day with nothing sold at a loss sends nothing", async t => {
+  const db = fixture(t);
+  const jobs = createOdooReportJobs({ db, now: () => MARGIN_AT, config: {
+    enabled: true, odoo, ownerNumber: "", groupId: "1@g.us", timezoneOffsetMinutes: 0,
+    fetcher: marginFetcher([["OZEMPIC 1MG/3ML", 163.824, 139.682]]),
+  } });
+  assert.deepEqual(await jobs.deliverNext(async () => assert.fail("nothing to report")), { status: "idle" });
+});
