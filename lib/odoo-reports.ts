@@ -58,6 +58,7 @@ export type OdooReportConfig = {
   // Basim, 2026-10-03: a small shelf check per branch every night -- "الجروب",
   // "الليل 10". See lib/cycle-count.ts.
   cycleCountHour?: number; // local hour the nightly count list goes out; default 22
+  cycleCountMinute?: number; // local minute it may first go out; default 30 (Basim: "خليها ١٠ ونص")
   timezoneOffsetMinutes?: number; // default 180 (Amman/Riyadh, UTC+3)
   // Basim (2026-09-17): "مبيعات يومي بالفرع كل يوم ١٢ منتصف الليل الجروب بس
   // والغي الثاني لغاية ما اقولك" -- who each report goes to, and whether it
@@ -394,7 +395,7 @@ async function planOdooReports(db: DatabaseSync, config: OdooReportConfig, at: n
   else if (hour === (config.dailyHour ?? 0) && minuteReached(minute, config.dailyMinute)) kind = "odoo_daily";
   else if (hour === (config.shortagesHour ?? 9)) kind = "odoo_shortages";
   else if (hour === (config.marginHour ?? 10)) kind = "odoo_margin";
-  else if (hour === (config.cycleCountHour ?? 22)) kind = "odoo_cycle_count";
+  else if (hour === (config.cycleCountHour ?? 22) && minuteReached(minute, config.cycleCountMinute ?? 30)) kind = "odoo_cycle_count";
   if (!kind) return [];
   const routing = routingFor(kind);
   // A switched-off report costs nothing: no targets, and -- just as important

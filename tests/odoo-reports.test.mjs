@@ -530,7 +530,7 @@ test("the morning message names each line sold below its card price, with who an
 // Basim, 2026-10-03, after LAMISIL CREAM sat in the system at Naoor with an
 // empty shelf: every night at 10, ten items per branch to look for -- a little
 // stock in the system, no sale there for months, and demand for it.
-const COUNT_AT = Date.UTC(1972, 5, 1, 22, 0, 0);
+const COUNT_AT = Date.UTC(1972, 5, 1, 22, 30, 0);
 function countFetcher() {
   return async (url, options) => {
     const body = JSON.parse(options.body);
@@ -564,13 +564,15 @@ function countFetcher() {
   };
 }
 
-test("at 22:00 each branch gets its own short shelf-check list, never repeated for weeks", async t => {
+test("at 22:30 each branch gets its own short shelf-check list, never repeated for weeks", async t => {
   const db = fixture(t);
   const sent = [];
-  let at = COUNT_AT;
+  let at = COUNT_AT - 20 * 60_000;
   const jobs = createOdooReportJobs({ db, now: () => at, config: {
     enabled: true, odoo, ownerNumber: "", groupId: "1@g.us", timezoneOffsetMinutes: 0, fetcher: countFetcher(),
   } });
+  assert.deepEqual(await jobs.deliverNext(async () => assert.fail("not before half past ten")), { status: "idle" });
+  at = COUNT_AT;
   while ((await jobs.deliverNext(async message => { sent.push(message); return {}; })).status === "sent");
   assert.equal(sent.length, 1, "Safot has nothing suspect: no message for it");
   const text = sent[0].text;
