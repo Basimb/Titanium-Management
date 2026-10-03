@@ -306,7 +306,9 @@ async function buildReportMessagesFresh(config: OdooReportConfig, kind: Kind, at
     const products = await session.productMargins(new Date(dayStart).toISOString(), new Date(dayStart + DAY).toISOString());
     const day = localDateLabel(dayStart, offset);
     const problems = marginProblemsText(products, day);
-    return problems ? [{ entityId: null, text: problems.text, priceIssues: { day, items: problems.items } }] : [];
+    // Basim, 2026-10-03: on a clean day say so, so the group knows it checked.
+    return problems ? [{ entityId: null, text: problems.text, priceIssues: { day, items: problems.items } }]
+      : [{ entityId: null, text: "✅ ما في مشاكل ربح امبارح" }];
   }
   return [{ entityId: null, text: await buildReportBody(config, session, kind, at) }];
 }

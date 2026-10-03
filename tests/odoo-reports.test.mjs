@@ -461,11 +461,16 @@ test("at 10:00 the group gets only the items sold at a loss or near it, worst fi
   assert.match(kept.items, /^1\. FOSAVANCE 4 TAB\nبيع 6\.54 · كلفة 6\.82 · خسارة 4\.2%/);
 });
 
-test("a day with nothing sold at a loss sends nothing", async t => {
+test("a day with nothing sold at a loss sends one short all-clear", async t => {
   const db = fixture(t);
+  const sent = [];
   const jobs = createOdooReportJobs({ db, now: () => MARGIN_AT, config: {
     enabled: true, odoo, ownerNumber: "", groupId: "1@g.us", timezoneOffsetMinutes: 0,
     fetcher: marginFetcher([["OZEMPIC 1MG/3ML", 163.824, 139.682]]),
   } });
-  assert.deepEqual(await jobs.deliverNext(async () => assert.fail("nothing to report")), { status: "idle" });
+  await jobs.deliverNext(async message => { sent.push(message); return {}; });
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].to, "1@g.us");
+  assert.equal(sent[0].text, "✅ ما في مشاكل ربح امبارح");
+  assert.deepEqual(await jobs.deliverNext(async () => assert.fail("once a day")), { status: "idle" });
 });
