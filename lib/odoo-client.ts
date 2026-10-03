@@ -125,6 +125,13 @@ export type ShortageItem = { name: string; qty: number; packs: number; perDay: n
 // the shortages that matter: an item at zero in Dabouq while Naoor holds a
 // shelf of it reads as "in stock" and is never ordered for Dabouq.
 export type BranchShortages = { code: string; location: string; items: ShortageItem[] };
+// Basim, 2026-10-03, on LAMISIL CREAM: one piece in the system at Naoor and an
+// empty shelf, untouched for a year and a half. A suspect is an item the
+// system says a branch holds a little of, that the branch has not sold for a
+// while, although there is demand for it -- it still sells at another branch,
+// or it used to sell here. Those are the shelves most likely to be empty.
+export type CountSuspect = { productId: number; name: string; barcode: string | null; systemQty: number; soldElsewhere: number; soldHereBefore: number };
+export type BranchCountSuspects = { code: string; location: string; locationId: number; items: CountSuspect[] };
 export type LocationSales = { location: string; orderCount: number; totalAmount: number };
 // Basim, 2026-09-29, on the nightly report: under each branch, how much came
 // in as cash, card and insurance, side by side. "ذمم" is Odoo's Customer
@@ -275,6 +282,8 @@ export type OdooSession = {
   shortages(options?: { windowDays?: number; maxDaysLeft?: number; limit?: number; at?: number }): Promise<ShortageItem[]>;
   /** The same reckoning, run separately against each branch's own shelf. */
   branchShortages(options?: { windowDays?: number; maxDaysLeft?: number; at?: number }): Promise<BranchShortages[]>;
+  /** Per branch, the items most likely missing from the shelf. See CountSuspect. */
+  branchCountSuspects(options?: { quietDays?: number; historyDays?: number; maxQty?: number; at?: number }): Promise<BranchCountSuspects[]>;
   activeProductCount(): Promise<number>;
   expirySummary(withinDays: number, at?: number): Promise<ExpirySummary>;
   openPayables(): Promise<PayablesSummary>;
@@ -322,6 +331,34 @@ export async function openOdooSession(config: OdooConfig, fetcher: Fetcher = fet
       const location = Array.isArray(locationId) && typeof locationId[1] === "string" ? locationId[1] : "?";
       return { location, orderCount: groupCount(row, "location_id"), totalAmount: Number(row.amount_total ?? 0) };
     });
+  };
+
+  // Every branch the tills sell from, keyed by its stock location: a branch is
+  // a till (pos.config) pointing, through its operation type, at the shelf it
+  // sells out of. Shared by the shortages report and the nightly count list.
+  const posBranches = async (): Promise<Map<number, { location: string; configIds: number[] }>> => {
+    // Two tills can share one shelf -- Naoor runs two -- so the location, not
+    // the till, is the branch.
+    const configs = await page("pos.config", "search_read", [[], ["name", "picking_type_id"]]);
+    const typeIds = [...new Set(configs.map(row => Array.isArray(row.picking_type_id) ? Number(row.picking_type_id[0]) : null)
+      .filter((id): id is number => typeof id === "number" && Number.isFinite(id)))];
+    if (!typeIds.length) return new Map();
+    const types = await page("stock.picking.type", "search_read", [[["id", "in", typeIds]], ["default_location_src_id"]]);
+    const sourceByType = new Map<number, [number, string]>();
+    for (const row of types) {
+      const source = row.default_location_src_id;
+      if (Array.isArray(source) && typeof source[0] === "number") sourceByType.set(Number(row.id), [source[0], String(source[1] ?? "?")]);
+    }
+    const branches = new Map<number, { location: string; configIds: number[] }>();
+    for (const row of configs) {
+      const typeId = Array.isArray(row.picking_type_id) ? Number(row.picking_type_id[0]) : null;
+      const source = typeId === null ? undefined : sourceByType.get(typeId);
+      if (!source) continue;
+      const entry = branches.get(source[0]) ?? { location: source[1], configIds: [] };
+      entry.configIds.push(Number(row.id));
+      branches.set(source[0], entry);
+    }
+    return branches;
   };
 
   return {
@@ -616,28 +653,7 @@ export async function openOdooSession(config: OdooConfig, fetcher: Fetcher = fet
     // branch it was 46, and the 30 it hid were all real.
     async branchShortages({ windowDays = 60, maxDaysLeft = 7, at = Date.now() } = {}) {
       const since = new Date(at - windowDays * 86_400_000).toISOString().slice(0, 19).replace("T", " ");
-      // A branch is a till (pos.config) pointing, through its operation type,
-      // at the stock location it sells out of. Two tills can share one shelf
-      // -- Naoor runs two -- so the location, not the till, is the branch.
-      const configs = await page("pos.config", "search_read", [[], ["name", "picking_type_id"]]);
-      const typeIds = [...new Set(configs.map(row => Array.isArray(row.picking_type_id) ? Number(row.picking_type_id[0]) : null)
-        .filter((id): id is number => typeof id === "number" && Number.isFinite(id)))];
-      if (!typeIds.length) return [];
-      const types = await page("stock.picking.type", "search_read", [[["id", "in", typeIds]], ["default_location_src_id"]]);
-      const sourceByType = new Map<number, [number, string]>();
-      for (const row of types) {
-        const source = row.default_location_src_id;
-        if (Array.isArray(source) && typeof source[0] === "number") sourceByType.set(Number(row.id), [source[0], String(source[1] ?? "?")]);
-      }
-      const branches = new Map<number, { location: string; configIds: number[] }>();
-      for (const row of configs) {
-        const typeId = Array.isArray(row.picking_type_id) ? Number(row.picking_type_id[0]) : null;
-        const source = typeId === null ? undefined : sourceByType.get(typeId);
-        if (!source) continue;
-        const entry = branches.get(source[0]) ?? { location: source[1], configIds: [] };
-        entry.configIds.push(Number(row.id));
-        branches.set(source[0], entry);
-      }
+      const branches = await posBranches();
       if (!branches.size) return [];
 
       // Stock comes from the quants at that location, not from qty_available,
@@ -701,6 +717,76 @@ export async function openOdooSession(config: OdooConfig, fetcher: Fetcher = fet
       }
       // Worst branch first: the one with most to order is the one to read.
       return out.sort((a, b) => b.items.length - a.items.length);
+    },
+
+    async branchCountSuspects({ quietDays = 90, historyDays = 730, maxQty = 3, at = Date.now() } = {}) {
+      const stamp = (ms: number) => new Date(ms).toISOString().slice(0, 19).replace("T", " ");
+      const quietSince = stamp(at - quietDays * 86_400_000), historySince = stamp(at - historyDays * 86_400_000);
+      const branches = await posBranches();
+      if (!branches.size) return [];
+      const states = ["paid", "done", "invoiced"];
+      const soldQty = async (configIds: number[], domain: unknown[]) => {
+        const rows = await page("pos.order.line", "read_group",
+          [[["order_id.config_id", "in", configIds], ["order_id.state", "in", states], ["qty", ">", 0], ...domain], ["qty"], ["product_id"]], { lazy: false });
+        const sold = new Map<number, number>();
+        for (const row of rows) {
+          const product = row.product_id;
+          if (Array.isArray(product) && typeof product[0] === "number") sold.set(product[0], (sold.get(product[0]) ?? 0) + Number(row.qty ?? 0));
+        }
+        return sold;
+      };
+      const stockBy = new Map<number, Map<number, number>>();
+      const recentBy = new Map<number, Map<number, number>>();
+      const beforeBy = new Map<number, Map<number, number>>();
+      for (const [locationId, branch] of branches) {
+        const quants = await page("stock.quant", "read_group", [[["location_id", "=", locationId]], ["quantity"], ["product_id"]], { lazy: false });
+        const stock = new Map<number, number>();
+        for (const row of quants) {
+          const product = row.product_id;
+          if (Array.isArray(product) && typeof product[0] === "number") stock.set(product[0], (stock.get(product[0]) ?? 0) + Number(row.quantity ?? 0));
+        }
+        stockBy.set(locationId, stock);
+        recentBy.set(locationId, await soldQty(branch.configIds, [["order_id.date_order", ">=", quietSince]]));
+        beforeBy.set(locationId, await soldQty(branch.configIds, [["order_id.date_order", ">=", historySince], ["order_id.date_order", "<", quietSince]]));
+      }
+      const picked = new Map<number, Array<{ productId: number; systemQty: number; soldElsewhere: number; soldHereBefore: number }>>();
+      const ids = new Set<number>();
+      for (const [locationId, stock] of stockBy) {
+        const recent = recentBy.get(locationId) ?? new Map();
+        const before = beforeBy.get(locationId) ?? new Map();
+        const rows: Array<{ productId: number; systemQty: number; soldElsewhere: number; soldHereBefore: number }> = [];
+        for (const [productId, qty] of stock) {
+          if (!(qty > 0 && qty <= maxQty) || (recent.get(productId) ?? 0) > 0) continue;
+          let soldElsewhere = 0;
+          for (const [other, sold] of recentBy) if (other !== locationId) soldElsewhere += sold.get(productId) ?? 0;
+          const soldHereBefore = before.get(productId) ?? 0;
+          // Demand, or it is just a slow item sitting where it should.
+          if (soldElsewhere <= 0 && soldHereBefore < 2) continue;
+          rows.push({ productId, systemQty: qty, soldElsewhere, soldHereBefore });
+          ids.add(productId);
+        }
+        picked.set(locationId, rows);
+      }
+      const meta = new Map<number, { name: string; barcode: string | null }>();
+      const all = [...ids];
+      for (let start = 0; start < all.length; start += 1000) {
+        const rows = await page("product.product", "search_read",
+          [[["id", "in", all.slice(start, start + 1000)], ["sale_ok", "=", true], ["active", "=", true]], ["name", "barcode"]], { order: "id asc" });
+        for (const row of rows) meta.set(Number(row.id), {
+          name: String(row.name ?? "?"),
+          barcode: typeof row.barcode === "string" && row.barcode.trim() ? row.barcode.trim() : null,
+        });
+      }
+      const out: BranchCountSuspects[] = [];
+      for (const [locationId, branch] of branches) {
+        // Most demand first: the empty shelf a customer is likeliest to ask at.
+        const items = (picked.get(locationId) ?? []).flatMap(row => {
+          const info = meta.get(row.productId);
+          return info ? [{ ...row, name: info.name, barcode: info.barcode }] : [];
+        }).sort((a, b) => (b.soldElsewhere + b.soldHereBefore) - (a.soldElsewhere + a.soldHereBefore) || a.productId - b.productId);
+        out.push({ code: branch.location.split("/")[0]?.trim().toUpperCase() || branch.location, location: branch.location, locationId, items });
+      }
+      return out;
     },
 
     async activeProductCount() {

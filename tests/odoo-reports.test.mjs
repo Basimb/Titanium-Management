@@ -526,3 +526,66 @@ test("the morning message names each line sold below its card price, with who an
   const { latestPriceIssues } = await import("../lib/price-issues.ts");
   assert.equal(latestPriceIssues(db, MARGIN_AT + 60_000), null, "nothing for a price task to carry");
 });
+
+// Basim, 2026-10-03, after LAMISIL CREAM sat in the system at Naoor with an
+// empty shelf: every night at 10, ten items per branch to look for -- a little
+// stock in the system, no sale there for months, and demand for it.
+const COUNT_AT = Date.UTC(1972, 5, 1, 22, 0, 0);
+function countFetcher() {
+  return async (url, options) => {
+    const body = JSON.parse(options.body);
+    if (body.params.service === "common") return { ok: true, json: async () => ({ result: 1 }) };
+    const [, , , model, method, args, kwargs] = body.params.args;
+    let result = [];
+    if (!(kwargs.offset || 0)) {
+      if (model === "pos.config") result = [{ id: 1, name: "Naoor POS", picking_type_id: [11, "x"] }, { id: 2, name: "Safot POS", picking_type_id: [12, "x"] }];
+      if (model === "stock.picking.type") result = [{ id: 11, default_location_src_id: [8, "NAOOR/Stock"] }, { id: 12, default_location_src_id: [20, "SAFOT/Stock"] }];
+      if (model === "stock.quant" && method === "read_group") {
+        const location = args[0][0][2];
+        result = location === 8
+          ? [[29706, 1], [500, 2], [600, 1], [700, 1], [800, 40]].map(([id, quantity]) => ({ product_id: [id, "x"], quantity }))
+          : [[29706, 0], [600, 5]].map(([id, quantity]) => ({ product_id: [id, "x"], quantity }));
+      }
+      if (model === "pos.order.line" && method === "read_group") {
+        const configs = args[0][0][2];
+        const before = args[0].some(term => term[0] === "order_id.date_order" && term[1] === "<");
+        const naoor = configs.includes(1);
+        // LAMISIL sold at Naoor long ago; 500 sold at Safot lately; 600 sells
+        // at Naoor still; 700 never sold anywhere; 800 has a full shelf.
+        const rows = naoor ? (before ? [[29706, 3], [800, 9]] : [[600, 2]]) : (before ? [] : [[500, 4]]);
+        result = rows.map(([id, qty]) => ({ product_id: [id, "x"], qty }));
+      }
+      if (model === "product.product" && method === "search_read") {
+        const names = { 29706: "LAMISIL CREAM 15G", 500: "FUCIDIN CREAM", 600: "PANADOL", 700: "SLOW ITEM", 800: "FULL SHELF" };
+        result = args[0][0][2].map(id => ({ id, name: names[id], barcode: id === 29706 ? "6251613000701" : false }));
+      }
+    }
+    return { ok: true, json: async () => ({ result }) };
+  };
+}
+
+test("at 22:00 each branch gets its own short shelf-check list, never repeated for weeks", async t => {
+  const db = fixture(t);
+  const sent = [];
+  let at = COUNT_AT;
+  const jobs = createOdooReportJobs({ db, now: () => at, config: {
+    enabled: true, odoo, ownerNumber: "", groupId: "1@g.us", timezoneOffsetMinutes: 0, fetcher: countFetcher(),
+  } });
+  while ((await jobs.deliverNext(async message => { sent.push(message); return {}; })).status === "sent");
+  assert.equal(sent.length, 1, "Safot has nothing suspect: no message for it");
+  const text = sent[0].text;
+  assert.equal(sent[0].to, "1@g.us");
+  assert.match(text, /جرد الليلة — فرع الناعور/);
+  assert.match(text, /LAMISIL CREAM 15G/, "used to sell here, still on the books");
+  assert.match(text, /FUCIDIN CREAM/, "sells at another branch");
+  assert.match(text, /باركود: 6251613000701/);
+  assert.ok(text.indexOf("FUCIDIN") < text.indexOf("LAMISIL"), "most demand first");
+  assert.doesNotMatch(text, /PANADOL/, "still selling here: the shelf is not in doubt");
+  assert.doesNotMatch(text, /SLOW ITEM/, "no demand anywhere: just a slow item");
+  assert.doesNotMatch(text, /FULL SHELF/, "too much stock to be a phantom piece");
+  // The next night the same suspects are not listed again.
+  at = COUNT_AT + 86_400_000;
+  const next = [];
+  while ((await jobs.deliverNext(async message => { next.push(message); return {}; })).status === "sent");
+  assert.equal(next.length, 0);
+});

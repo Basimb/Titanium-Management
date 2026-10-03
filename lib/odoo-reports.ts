@@ -14,6 +14,7 @@ import type { DatabaseSync } from "node:sqlite";
 import { migrateManagementActions } from "./management-actions.ts";
 import { openOdooSession, formatAmount, paymentSplitLine, DEFAULT_BRANCH_NAMES, type OdooConfig, type SalesSummary, type InvoiceSales, type ShortageItem, type BranchShortages, type BranchDaySales, type ProductMargin, type UnderListSale, type PurchaseSummary } from "./odoo-client.ts";
 import { recordPriceIssues } from "./price-issues.ts";
+import { cycleCountMessages, recordListed } from "./cycle-count.ts";
 import { branchShortageMessages, packLabel, NO_SHORTAGES } from "./odoo-shortage-text.ts";
 
 // 2026-09-12, Basim: "بدي هذا التقرير كل يوم الساعه 12:01 صباحا يروح للجروب
@@ -54,6 +55,9 @@ export type OdooReportConfig = {
   // Basim, 2026-10-02: items sold at a loss or near it, every morning --
   // "على الجروب", "10:00 الصبح". Nothing is sent on a day with none.
   marginHour?: number; // local hour the profit-problems list goes out; default 10
+  // Basim, 2026-10-03: a small shelf check per branch every night -- "الجروب",
+  // "الليل 10". See lib/cycle-count.ts.
+  cycleCountHour?: number; // local hour the nightly count list goes out; default 22
   timezoneOffsetMinutes?: number; // default 180 (Amman/Riyadh, UTC+3)
   // Basim (2026-09-17): "مبيعات يومي بالفرع كل يوم ١٢ منتصف الليل الجروب بس
   // والغي الثاني لغاية ما اقولك" -- who each report goes to, and whether it
@@ -65,7 +69,7 @@ export type OdooReportConfig = {
   fetcher?: typeof fetch; // injected in tests; defaults to the global fetch
 };
 
-type Kind = "odoo_daily" | "odoo_weekly" | "odoo_purchases_weekly" | "odoo_shortages" | "odoo_margin";
+type Kind = "odoo_daily" | "odoo_weekly" | "odoo_purchases_weekly" | "odoo_shortages" | "odoo_margin" | "odoo_cycle_count";
 export type ReportRouting = { enabled: boolean; group: boolean; owner: boolean };
 // Basim, 2026-09-17: "مبيعات يومي بالفرع كل يوم ١٢ منتصف الليل الجروب بس
 // والغي الثاني لغاية ما اقولك" -- daily sales per branch, midnight, group only;
@@ -82,8 +86,10 @@ const DEFAULT_ROUTING: Record<Kind, ReportRouting> = {
   // formatting stay intact, so turning it back on is this one line.
   odoo_shortages: { enabled: false, group: false, owner: false },
   odoo_margin: { enabled: true, group: true, owner: false },
+  odoo_cycle_count: { enabled: true, group: true, owner: false },
 };
-type Planned = { id: string; kind: Kind; targetUser: string; entityId: string | null; to: string; text: string; priceIssues?: { day: string; items: string } };
+type CountItems = { locationId: number; productIds: number[] };
+type Planned = { id: string; kind: Kind; targetUser: string; entityId: string | null; to: string; text: string; priceIssues?: { day: string; items: string }; countItems?: CountItems };
 
 const DAY = 24 * 60 * 60_000;
 const newMessageId = () => "3EB0" + randomBytes(18).toString("hex").toUpperCase();
@@ -285,7 +291,7 @@ function purchasesText(summary: PurchaseSummary, sinceDate: string, untilDate: s
 // entityId is what keeps them apart in the dedup table.
 // priceIssues rides along with the profit-problems list so that, once sent,
 // the secretary can attach it to a price task (see price-issues.ts).
-type ReportMessage = { entityId: string | null; text: string; priceIssues?: { day: string; items: string } };
+type ReportMessage = { entityId: string | null; text: string; priceIssues?: { day: string; items: string }; countItems?: CountItems };
 
 // The bridge drains its queues once a SECOND. A one-message report is asked
 // for once and then skipped by the cheap dedup check above, but the per-branch
@@ -301,7 +307,7 @@ async function buildReportMessages(db: DatabaseSync, config: OdooReportConfig, k
   const cached = messageCache.get(db);
   if (cached && cached.key === key) return cached.messages;
   let messages: ReportMessage[];
-  try { messages = await buildReportMessagesFresh(config, kind, at); }
+  try { messages = await buildReportMessagesFresh(db, config, kind, at); }
   catch {
     // The failure is cached with everything else: the message below is about
     // to be sent and deduped for the day, so retrying the scan every second
@@ -310,14 +316,20 @@ async function buildReportMessages(db: DatabaseSync, config: OdooReportConfig, k
       : kind === "odoo_purchases_weekly" ? "🧾 تعذر جلب تقرير المشتريات من نظام الصيدلية الآن."
       : kind === "odoo_shortages" ? "📦 تعذر جلب تقرير النواقص من نظام الصيدلية الآن."
       : kind === "odoo_margin" ? "⚠️ تعذر جلب مشاكل الربح من نظام الصيدلية الآن."
+      : kind === "odoo_cycle_count" ? "🔎 تعذر جلب قائمة جرد الليلة من نظام الصيدلية الآن."
       : "📈 تعذر جلب التقرير الأسبوعي من نظام الصيدلية الآن." }];
   }
   messageCache.set(db, { key, messages });
   return messages;
 }
 
-async function buildReportMessagesFresh(config: OdooReportConfig, kind: Kind, at: number): Promise<ReportMessage[]> {
+async function buildReportMessagesFresh(db: DatabaseSync, config: OdooReportConfig, kind: Kind, at: number): Promise<ReportMessage[]> {
   const session = await openOdooSession(config.odoo, config.fetcher);
+  if (kind === "odoo_cycle_count") {
+    // Nothing to check is nothing to send: no "all clear" for a list the
+    // staff did not ask for.
+    return cycleCountMessages(db, await session.branchCountSuspects({ at }), { ...DEFAULT_BRANCH_NAMES, ...config.branchNames }, at);
+  }
   if (kind === "odoo_shortages") {
     const names = { ...DEFAULT_BRANCH_NAMES, ...config.branchNames };
     const branches = await session.branchShortages({ maxDaysLeft: 7, at });
@@ -382,6 +394,7 @@ async function planOdooReports(db: DatabaseSync, config: OdooReportConfig, at: n
   else if (hour === (config.dailyHour ?? 0) && minuteReached(minute, config.dailyMinute)) kind = "odoo_daily";
   else if (hour === (config.shortagesHour ?? 9)) kind = "odoo_shortages";
   else if (hour === (config.marginHour ?? 10)) kind = "odoo_margin";
+  else if (hour === (config.cycleCountHour ?? 22)) kind = "odoo_cycle_count";
   if (!kind) return [];
   const routing = routingFor(kind);
   // A switched-off report costs nothing: no targets, and -- just as important
@@ -391,7 +404,7 @@ async function planOdooReports(db: DatabaseSync, config: OdooReportConfig, at: n
   // Keyed to the report's own local day, not to a rolling window. A rolling
   // ~24h meant a manual test send swallowed the next scheduled report --
   // which is exactly what happened to Basim on 2026-09-16.
-  const daily = kind === "odoo_daily" || kind === "odoo_shortages" || kind === "odoo_margin";
+  const daily = kind === "odoo_daily" || kind === "odoo_shortages" || kind === "odoo_margin" || kind === "odoo_cycle_count";
   const dedupSince = daily ? startOfLocalDay(at, offset) : at - (7 * DAY - 5 * 60_000);
   const targets: Array<{ targetUser: string; to: string }> = [];
   if (routing.group && config.groupId) targets.push({ targetUser: "group", to: config.groupId });
@@ -401,14 +414,15 @@ async function planOdooReports(db: DatabaseSync, config: OdooReportConfig, at: n
   // today's report, the pharmacy's system is never touched at all. The
   // shortages report has no single id to check here, so it goes on to the
   // per-message check below.
-  if (kind !== "odoo_shortages" && targets.every(target => alreadySent(db, kind as Kind, target.targetUser, null, dedupSince))) return [];
+  if (kind !== "odoo_shortages" && kind !== "odoo_cycle_count" && targets.every(target => alreadySent(db, kind as Kind, target.targetUser, null, dedupSince))) return [];
   const messages = await buildReportMessages(db, config, kind, at);
   const planned: Planned[] = [];
   for (const target of targets) {
     for (const message of messages) {
       if (alreadySent(db, kind as Kind, target.targetUser, message.entityId, dedupSince)) continue;
       planned.push({ id: randomBytes(8).toString("hex"), kind: kind as Kind, targetUser: target.targetUser,
-        entityId: message.entityId, to: target.to, text: message.text, ...(message.priceIssues ? { priceIssues: message.priceIssues } : {}) });
+        entityId: message.entityId, to: target.to, text: message.text, ...(message.priceIssues ? { priceIssues: message.priceIssues } : {}),
+        ...(message.countItems ? { countItems: message.countItems } : {}) });
     }
   }
   return planned;
@@ -433,6 +447,7 @@ export function createOdooReportJobs({ db, config, now = Date.now }: { db: Datab
             new Promise<never>((_, reject) => { timeout = setTimeout(() => { controller.abort(); reject(new Error("delivery_uncertain")); }, 15_000); })]);
           db.prepare("UPDATE agent_followups SET response='sent' WHERE id=?").run(plan.id);
           if (plan.priceIssues) recordPriceIssues(db, plan.priceIssues.day, plan.priceIssues.items, at);
+          if (plan.countItems) recordListed(db, plan.countItems.locationId, plan.countItems.productIds, at);
           return { status: "sent" as const };
         } catch { db.prepare("UPDATE agent_followups SET response='failed' WHERE id=?").run(plan.id); return { status: "failed" as const }; }
         finally { clearTimeout(timeout); }

@@ -12,7 +12,7 @@
  */
 import type { BranchShortages, ShortageItem } from "./odoo-client.ts";
 
-const clean = (value: string) =>
+export const clean = (value: string) =>
   value.replace(new RegExp("[\\x00-\\x09\\x0b-\\x1f\\u202a-\\u202e\\u2066-\\u2069]", "g"), " ").slice(0, 4000);
 
 // Basim, 2026-09-20, on the packs-with-decimals view: "اكتب فوق الصنف الصنف
