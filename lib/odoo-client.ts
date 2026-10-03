@@ -147,6 +147,12 @@ export function paymentSplitLine(payments: BranchDaySales["payments"]): string |
 // cost is what Odoo booked on the line (total_cost), the same pair Odoo's own
 // margin uses.
 export type ProductMargin = { name: string; sales: number; cost: number; qty: number };
+// Basim, 2026-10-03: "بدي يتاكد انه كل صنف باع ... حسب قائمته". Every till
+// sells on one price list whose price is the item card's own, so a line rung
+// up below the card (or below a fixed price on that list) means the cashier
+// typed the price by hand. The discount field is left out on purpose: he
+// asked for the hand-typed prices only.
+export type UnderListSale = { name: string; listPrice: number; soldPrice: number; qty: number; order: string; employee: string };
 export function paymentKind(methodName: string): PaymentKind {
   const name = methodName.toLowerCase();
   if (/cash|كاش|نقد/.test(name)) return "cash";
@@ -260,6 +266,8 @@ export type OdooSession = {
   branchDaySales(sinceIso: string, untilIso: string): Promise<BranchDaySales[]>;
   /** Sales before tax and booked cost, per product, for orders in the window. */
   productMargins(sinceIso: string, untilIso: string): Promise<ProductMargin[]>;
+  /** Lines sold below the item card's price (or its price list's fixed price). */
+  underListSales(sinceIso: string, untilIso: string): Promise<UnderListSale[]>;
   /** Any window, split into the three shifts by local clock time. */
   salesByShift(sinceMs: number, untilMs: number, offsetMinutes?: number): Promise<ShiftSales[]>;
   purchaseSummary(sinceIso: string, untilIso: string): Promise<PurchaseSummary>;
@@ -360,6 +368,53 @@ export async function openOdooSession(config: OdooConfig, fetcher: Fetcher = fet
         name: Array.isArray(row.product_id) ? String(row.product_id[1] ?? "?") : "?",
         sales: Number(row.price_subtotal ?? 0), cost: Number(row.total_cost ?? 0), qty: Number(row.qty ?? 0),
       }));
+    },
+    async underListSales(sinceIso, untilIso) {
+      const idOf = (value: unknown) => Array.isArray(value) ? Number(value[0]) : typeof value === "number" ? value : 0;
+      const nameOf = (value: unknown) => Array.isArray(value) ? String(value[1] ?? "") : "";
+      const domain = [["order_id.date_order", ">=", sinceIso], ["order_id.date_order", "<", untilIso],
+        ["order_id.state", "in", ["paid", "done", "invoiced"]], ["qty", ">", 0], ["price_unit", ">", 0]];
+      const lines = await page("pos.order.line", "search_read", [domain, ["product_id", "price_unit", "qty", "order_id", "product_uom_id"]], { order: "id asc" });
+      if (!lines.length) return [];
+      const productIds = [...new Set(lines.map(line => idOf(line.product_id)).filter(Boolean))];
+      const orderIds = [...new Set(lines.map(line => idOf(line.order_id)).filter(Boolean))];
+      const [products, orders] = await Promise.all([
+        page("product.product", "search_read", [[["id", "in", productIds]], ["lst_price", "product_tmpl_id", "uom_id"]], { context: { active_test: false } }),
+        page("pos.order", "search_read", [[["id", "in", orderIds]], ["pricelist_id", "employee_id", "user_id"]]),
+      ]);
+      const product = new Map(products.map(row => [Number(row.id), row]));
+      const order = new Map(orders.map(row => [Number(row.id), row]));
+      // A fixed price on the order's own list is also a legitimate price: the
+      // lowest one counts, so a list rule never reads as a hand-typed price.
+      const pricelistIds = [...new Set(orders.map(row => idOf(row.pricelist_id)).filter(Boolean))];
+      const items = pricelistIds.length ? await page("product.pricelist.item", "search_read",
+        [[["pricelist_id", "in", pricelistIds], ["compute_price", "=", "fixed"], ["applied_on", "in", ["1_product", "0_product_variant"]]],
+          ["pricelist_id", "applied_on", "product_tmpl_id", "product_id", "fixed_price"]]) : [];
+      const fixed = new Map<string, number>();
+      for (const item of items) {
+        const key = item.applied_on === "0_product_variant"
+          ? `${idOf(item.pricelist_id)}|p${idOf(item.product_id)}` : `${idOf(item.pricelist_id)}|t${idOf(item.product_tmpl_id)}`;
+        const price = Number(item.fixed_price ?? 0);
+        if (price > 0) fixed.set(key, Math.min(price, fixed.get(key) ?? Infinity));
+      }
+      const out: UnderListSale[] = [];
+      for (const line of lines) {
+        const card = product.get(idOf(line.product_id));
+        const sale = order.get(idOf(line.order_id));
+        if (!card || !sale) continue;
+        // A line in another unit (a box sold as strips) has a price on another
+        // scale: not comparable, so not reported.
+        if (idOf(line.product_uom_id) && idOf(card.uom_id) && idOf(line.product_uom_id) !== idOf(card.uom_id)) continue;
+        const pricelist = idOf(sale.pricelist_id);
+        const listPrice = Math.min(Number(card.lst_price ?? 0),
+          fixed.get(`${pricelist}|p${idOf(line.product_id)}`) ?? Infinity, fixed.get(`${pricelist}|t${idOf(card.product_tmpl_id)}`) ?? Infinity);
+        const soldPrice = Number(line.price_unit ?? 0);
+        // Half a fils of slack for rounding on retail splits.
+        if (!(listPrice > 0) || soldPrice >= listPrice - 0.0005) continue;
+        out.push({ name: nameOf(line.product_id) || "?", listPrice, soldPrice, qty: Number(line.qty ?? 0),
+          order: nameOf(line.order_id).replace(/^POS Order +/i, ""), employee: nameOf(sale.employee_id) || nameOf(sale.user_id) || "?" });
+      }
+      return out;
     },
     async branchDaySales(sinceIso, untilIso) {
       const states = ["paid", "done", "invoiced"];

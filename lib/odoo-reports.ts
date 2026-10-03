@@ -12,7 +12,7 @@
 import { randomBytes } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 import { migrateManagementActions } from "./management-actions.ts";
-import { openOdooSession, formatAmount, paymentSplitLine, DEFAULT_BRANCH_NAMES, type OdooConfig, type SalesSummary, type InvoiceSales, type ShortageItem, type BranchShortages, type BranchDaySales, type ProductMargin, type PurchaseSummary } from "./odoo-client.ts";
+import { openOdooSession, formatAmount, paymentSplitLine, DEFAULT_BRANCH_NAMES, type OdooConfig, type SalesSummary, type InvoiceSales, type ShortageItem, type BranchShortages, type BranchDaySales, type ProductMargin, type UnderListSale, type PurchaseSummary } from "./odoo-client.ts";
 import { recordPriceIssues } from "./price-issues.ts";
 import { branchShortageMessages, packLabel, NO_SHORTAGES } from "./odoo-shortage-text.ts";
 
@@ -174,30 +174,54 @@ const MAX_LISTED = 30;
 // a task (a private "1" is already the secretary's "add a task" shortcut) or
 // will fix it himself, and reminded that a reply in the group needs the word
 // سكرتير, the only thing that makes the secretary answer there.
-function marginProblemsText(products: ProductMargin[], dateLabel: string): { text: string; items: string } | null {
+const PROFIT_CLEAN = "✅ ما في مشاكل ربح امبارح";
+const LIST_CLEAN = "✅ وكل الأصناف انباعت بسعر بطاقتها";
+const MAX_UNDER_LISTED = 15;
+const price3 = (value: number) => value.toFixed(3);
+
+function marginProblems(products: ProductMargin[]): ProductMargin[] {
   // A line with no booked cost is unknown, not free: it is left out rather
   // than reported as a problem it may not be.
-  const losing = products.filter(row => row.sales > 0 && row.cost > 0 && pctOf(row.sales, row.cost) < NEAR_LOSS)
+  return products.filter(row => row.sales > 0 && row.cost > 0 && pctOf(row.sales, row.cost) < NEAR_LOSS)
     .sort((a, b) => pctOf(a.sales, a.cost) - pctOf(b.sales, b.cost));
-  if (!losing.length) return null;
-  const noun = losing.length === 1 ? "صنف" : losing.length <= 10 ? "أصناف" : "صنف";
+}
+
+// One morning message: the profit problems (Dr. Shadi's) and the lines rung
+// up below the item card (the cashiers'). A clean day still says so -- Basim,
+// 2026-10-03: "✅ ما في مشاكل ربح امبارح" -- so the group knows it checked.
+function morningPriceText(products: ProductMargin[], underList: UnderListSale[], dateLabel: string): { text: string; items: string | null } {
+  const losing = marginProblems(products);
+  if (!losing.length && !underList.length) return { text: `${PROFIT_CLEAN}\n${LIST_CLEAN}`, items: null };
   const lines = [
     "صباح الخير فريق عمل تيتانيوم الجبّار ☀️",
     "بعرض عليكم مشاكل البيع والنِّسب القليلة عشان تتأكدوا من الأسعار والكلفة، يعطيكم العافية.",
     "",
-    `⚠️ *مبيعات ${dateLabel} — ${losing.length} ${noun}:*`,
-    "",
   ];
-  losing.slice(0, MAX_LISTED).forEach((row, index) => {
-    const margin = pctOf(row.sales, row.cost);
-    // Basim: "حط له الوان ... راد وورا خضره" -- worst at the top in red,
-    // easing down to green for the ones only just under the line.
-    const color = margin < 0 ? "🔴" : margin < 2 ? "🟠" : margin < 4 ? "🟡" : "🟢";
-    lines.push(`${color} *${index + 1}.* ${clean(row.name)}`,
-      `بيع ${formatAmount(row.sales)} · كلفة ${formatAmount(row.cost)} · ${margin < 0 ? `خسارة ${Math.abs(margin).toFixed(1)}%` : `ربح ${margin.toFixed(1)}%`}`, "");
-  });
-  if (losing.length > MAX_LISTED) lines.push(`و${losing.length - MAX_LISTED} صنف ثاني.`, "");
-  lines.push(
+  if (losing.length) {
+    const noun = losing.length === 1 ? "صنف" : losing.length <= 10 ? "أصناف" : "صنف";
+    lines.push(`⚠️ *مبيعات ${dateLabel} — ${losing.length} ${noun}:*`, "");
+    losing.slice(0, MAX_LISTED).forEach((row, index) => {
+      const margin = pctOf(row.sales, row.cost);
+      // Basim: "حط له الوان ... راد وورا خضره" -- worst at the top in red,
+      // easing down to green for the ones only just under the line.
+      const color = margin < 0 ? "🔴" : margin < 2 ? "🟠" : margin < 4 ? "🟡" : "🟢";
+      lines.push(`${color} *${index + 1}.* ${clean(row.name)}`,
+        `بيع ${formatAmount(row.sales)} · كلفة ${formatAmount(row.cost)} · ${margin < 0 ? `خسارة ${Math.abs(margin).toFixed(1)}%` : `ربح ${margin.toFixed(1)}%`}`, "");
+    });
+    if (losing.length > MAX_LISTED) lines.push(`و${losing.length - MAX_LISTED} صنف ثاني.`, "");
+  } else lines.push(PROFIT_CLEAN, "");
+  if (underList.length) {
+    lines.push(`🏷️ *انباعت بأقل من سعر البطاقة — ${underList.length} بند:*`, "");
+    underList.slice(0, MAX_UNDER_LISTED).forEach((row, index) => {
+      // Name, prices and who/where each on their own line, for the same bidi
+      // reason as above.
+      lines.push(`*${index + 1}.* ${clean(row.name)}`,
+        `البطاقة ${price3(row.listPrice)} · انباع ${price3(row.soldPrice)} × ${row.qty}`,
+        `${clean(row.employee)} · ${clean(row.order)}`, "");
+    });
+    if (underList.length > MAX_UNDER_LISTED) lines.push(`و${underList.length - MAX_UNDER_LISTED} بند ثاني.`, "");
+  } else lines.push(LIST_CLEAN, "");
+  if (losing.length) lines.push(
     "━━━━━━━━━━━━━",
     "د. شادي، هاي مسؤوليتك 👆",
     "بتحب أحطلك ياها مهمة، ولا رح تعالجهم فوراً؟",
@@ -205,13 +229,13 @@ function marginProblemsText(products: ProductMargin[], dateLabel: string): { tex
     "",
     "_وإذا بدك ترد عليّ بالجروب، الرجاء تذكر كلمة *سكرتير* بالرسالة عشان أفهم إنها موجهة إلي._",
   );
-  const items = losing.map((row, index) => {
+  const items = losing.length ? losing.map((row, index) => {
     const margin = pctOf(row.sales, row.cost);
     // Two lines, as in the group message: an English name and Arabic figures
     // on one line are reordered by WhatsApp's bidi rules into nonsense.
     return `${index + 1}. ${clean(row.name)}\nبيع ${formatAmount(row.sales)} · كلفة ${formatAmount(row.cost)} · ${margin < 0 ? `خسارة ${Math.abs(margin).toFixed(1)}%` : `ربح ${margin.toFixed(1)}%`}`;
-  }).join("\n");
-  return { text: clean(lines.join("\n")), items };
+  }).join("\n") : null;
+  return { text: clean(lines.join("\n").trim()), items };
 }
 
 function weeklyText(sales: SalesSummary, invoiced: InvoiceSales, shortages: ShortageItem[],
@@ -303,12 +327,11 @@ async function buildReportMessagesFresh(config: OdooReportConfig, kind: Kind, at
   if (kind === "odoo_margin") {
     const offset = config.timezoneOffsetMinutes ?? 180;
     const dayStart = startOfLocalDay(at, offset) - DAY;
-    const products = await session.productMargins(new Date(dayStart).toISOString(), new Date(dayStart + DAY).toISOString());
+    const since = new Date(dayStart).toISOString(), until = new Date(dayStart + DAY).toISOString();
+    const [products, underList] = await Promise.all([session.productMargins(since, until), session.underListSales(since, until)]);
     const day = localDateLabel(dayStart, offset);
-    const problems = marginProblemsText(products, day);
-    // Basim, 2026-10-03: on a clean day say so, so the group knows it checked.
-    return problems ? [{ entityId: null, text: problems.text, priceIssues: { day, items: problems.items } }]
-      : [{ entityId: null, text: "✅ ما في مشاكل ربح امبارح" }];
+    const morning = morningPriceText(products, underList, day);
+    return [{ entityId: null, text: morning.text, ...(morning.items ? { priceIssues: { day, items: morning.items } } : {}) }];
   }
   return [{ entityId: null, text: await buildReportBody(config, session, kind, at) }];
 }

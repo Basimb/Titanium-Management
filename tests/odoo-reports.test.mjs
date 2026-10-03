@@ -471,6 +471,58 @@ test("a day with nothing sold at a loss sends one short all-clear", async t => {
   await jobs.deliverNext(async message => { sent.push(message); return {}; });
   assert.equal(sent.length, 1);
   assert.equal(sent[0].to, "1@g.us");
-  assert.equal(sent[0].text, "✅ ما في مشاكل ربح امبارح");
+  assert.equal(sent[0].text, "✅ ما في مشاكل ربح امبارح\n✅ وكل الأصناف انباعت بسعر بطاقتها");
   assert.deepEqual(await jobs.deliverNext(async () => assert.fail("once a day")), { status: "idle" });
+});
+
+// Basim, 2026-10-03: "بدي يتاكد انه كل صنف باع ... حسب قائمته" -- a line rung
+// up below the item card's price is a hand-typed price; the discount field is
+// not his question here.
+function underListFetcher() {
+  return async (url, options) => {
+    const body = JSON.parse(options.body);
+    if (body.params.service === "common") return { ok: true, json: async () => ({ result: 1 }) };
+    const [, , , model, method, args, kwargs] = body.params.args;
+    let result = [];
+    if (!(kwargs.offset || 0) && method === "search_read") {
+      if (model === "pos.order.line") result = [
+        { id: 1, product_id: [38610, "MUCOSOLVAN SYRUP 100ML"], price_unit: 3, qty: 1, order_id: [187619, "POS Order Naoor Pharmacy POS /47697"], product_uom_id: [1, "Units"] },
+        { id: 2, product_id: [38610, "MUCOSOLVAN SYRUP 100ML"], price_unit: 3.21, qty: 2, order_id: [187682, "Naoor Pharmacy PC 1 POS /69945"], product_uom_id: [1, "Units"] },
+        { id: 3, product_id: [59666, "URIAGE DEODORANT"], price_unit: 9.95, qty: 1, order_id: [187682, "Naoor Pharmacy PC 1 POS /69945"], product_uom_id: [1, "Units"] },
+        { id: 4, product_id: [84424, "PANADOL ADVANCE 500MG 96 TAB (تجزئة)"], price_unit: 0.461, qty: 2, order_id: [187682, "Naoor Pharmacy PC 1 POS /69945"], product_uom_id: [1, "Units"] },
+      ];
+      if (model === "product.product") result = [
+        { id: 38610, lst_price: 3.21, product_tmpl_id: [1, "x"], uom_id: [1, "Units"] },
+        { id: 59666, lst_price: 12.5, product_tmpl_id: [59666, "x"], uom_id: [1, "Units"] },
+        { id: 84424, lst_price: 0.461, product_tmpl_id: [3, "x"], uom_id: [1, "Units"] },
+      ].filter(row => args[0][0][2].includes(row.id));
+      if (model === "pos.order") result = [
+        { id: 187619, pricelist_id: [1, "Public"], employee_id: [10, "Mohamed Eyad"], user_id: [28, "Naoor Pharmacy 2"] },
+        { id: 187682, pricelist_id: [1, "Public"], employee_id: false, user_id: [28, "Naoor Pharmacy 2"] },
+      ];
+      if (model === "product.pricelist.item") result = [
+        { pricelist_id: [1, "Public"], applied_on: "1_product", product_tmpl_id: [59666, "URIAGE DEODORANT"], product_id: false, fixed_price: 9.95 },
+      ];
+    }
+    return { ok: true, json: async () => ({ result }) };
+  };
+}
+
+test("the morning message names each line sold below its card price, with who and where", async t => {
+  const db = fixture(t);
+  const sent = [];
+  const jobs = createOdooReportJobs({ db, now: () => MARGIN_AT, config: {
+    enabled: true, odoo, ownerNumber: "", groupId: "1@g.us", timezoneOffsetMinutes: 0, fetcher: underListFetcher(),
+  } });
+  await jobs.deliverNext(async message => { sent.push(message); return {}; });
+  assert.equal(sent.length, 1);
+  const text = sent[0].text;
+  assert.match(text, /✅ ما في مشاكل ربح امبارح/, "no profit problems, said so");
+  assert.match(text, /انباعت بأقل من سعر البطاقة — 1 بند/);
+  assert.match(text, /\*1\.\* MUCOSOLVAN SYRUP 100ML\nالبطاقة 3\.210 · انباع 3\.000 × 1\nMohamed Eyad · Naoor Pharmacy POS \/47697/);
+  assert.doesNotMatch(text, /URIAGE/, "a fixed price on the list is a real price");
+  assert.doesNotMatch(text, /PANADOL/, "sold at the card price");
+  assert.doesNotMatch(text, /د\. شادي/, "the cashiers' issue is not put on Dr. Shadi");
+  const { latestPriceIssues } = await import("../lib/price-issues.ts");
+  assert.equal(latestPriceIssues(db, MARGIN_AT + 60_000), null, "nothing for a price task to carry");
 });
