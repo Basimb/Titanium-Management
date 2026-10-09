@@ -34,7 +34,6 @@ type ConfirmationView = { token: string; preview_event_key: string; requires_res
 type HistoryRow = { original_text: string; result_json: string; scope_json: string };
 type TaskDraft = { title: string | null; details: string | null; priority: "red" | "yellow" | "green" | null; ownerId: string | null; dueDate: string | null };
 type IntakeRow = { draft_json: string; last_event_key: string; expires_at: number };
-const ORIGIN = "https://www.management.titanium-pharmacy.com";
 const CONFIRM_MS = 10 * 60_000;
 // The "which task did you mean?" picker outlives the ten-minute confirmation
 // window, because since 2026-09-21 it does more than ask: while it is open the
@@ -761,7 +760,7 @@ function readReply(plan: SecretaryIntent, actor: ChatUser, state: Snapshot, now:
     const body = isBasem
       ? "احكيلي بطريقتك: شو مهامي؟ اشرح مهمة جديدة، سجل تحديث، أو اعتمد/ارفض طلب معلّق. اسألني عن أي مهمة بالاسم وبجاوبك."
       : `احكيلي بطريقتك: شو مهامي؟ سجل تحديث على مهمة قيد التنفيذ، أو اسألني عن أي مهمة بالاسم.\n${TASK_COMMANDS_LEGEND}\nولو عندك مهمة معروضة عليك وبعدك ما استلمتها: اكتب «استلمت» لبدء التنفيذ.`;
-    return { result: { status: "summary", reply: `${greeting}${SECRETARY_IDENTITY}\n${body}\nالدخول للموقع برمز خاص على واتسابك المسجّل:\n${ORIGIN}/` }, scope: [] };
+    return { result: { status: "summary", reply: `${greeting}${SECRETARY_IDENTITY}\n${body}` }, scope: [] };
   }
   if (plan.kind === "details") {
     const task = state.tasks.find(t => t.id === plan.taskId);

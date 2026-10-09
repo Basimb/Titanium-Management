@@ -897,6 +897,7 @@ test('help reply answers employees with the actual task-command legend, and drop
  assert.equal(admin.status,'summary');
  assert.doesNotMatch(admin.reply,/أوامر المهام السريعة/,'Basim never gets the employee-facing legend, in help replies either');
  assert.doesNotMatch(admin.reply,/جوابك غلط/);
- assert.match(admin.reply,/management\.titanium-pharmacy\.com/);
+ // Basim, 2026-10-09: the website is gone, so no reply points anyone to it.
+ assert.doesNotMatch(admin.reply,/management\.titanium-pharmacy\.com/);
 });
 

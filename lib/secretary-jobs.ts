@@ -17,7 +17,7 @@ export function createSecretaryJobs({ db, config, now = Date.now }: { db: Databa
     if (!isManagementAdmin(actor) && task.owner !== actor.name && task.suggestedOwner !== actor.name) return null;
     const clean = (text: string) => text.replace(/[\x00-\x1f\u202a-\u202e\u2066-\u2069]/g, " ").slice(0, 180);
     return { to: row.group_id || `${row.sender_number}@s.whatsapp.net`,
-      text: `⏰ يا ${clean(actor.name)}، هذا التذكير الذي طلبته:\n*${clean(task.title)}*\nاحكيلي شو صار معك؛ أقدر أسجّل تحديثك على المهمة.\nhttps://www.management.titanium-pharmacy.com/?task=${encodeURIComponent(task.id)}`,
+      text: `⏰ يا ${clean(actor.name)}، هذا التذكير الذي طلبته:\n*${clean(task.title)}*\nاحكيلي شو صار معك؛ أقدر أسجّل تحديثك على المهمة.`,
       messageId: row.reply_message_id };
   }
   return { async deliverNext(send: (message: { to: string; text: string; messageId: string; signal: AbortSignal }) => Promise<unknown>) {
