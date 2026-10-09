@@ -86,3 +86,18 @@ test('a task with no notes gains no note lines in any of them', t => {
   db.exec(`INSERT INTO tasks VALUES('t1','مزاولات الصيادلة','','red','progress','خالد','خالد',1,'2026-09-01',NULL,NULL,1,1,NULL,NULL)`);
   for (const plan of planFollowups(db, config, DAY_AT)) assert.doesNotMatch(plan.text, /↳/, `${plan.kind} must stay clean`);
 });
+
+// Basim, 2026-10-09: one private hello to Mohammad Eyad, once ever, and only
+// once he exists on the dashboard -- the bridge refuses anyone else.
+test('the welcome goes to Mohammad Eyad once he is a dashboard user, and only once', t => {
+  const { db, config } = fixture(t);
+  const withHim = { ...config, contacts: [...config.contacts, { userId: 'mohammad-eyad', number: '962790653173' }] };
+  assert.equal(planFollowups(db, withHim, DAY_AT).find(p => p.kind === 'welcome'), undefined, 'not a user yet: nothing');
+  db.exec(`INSERT INTO users (id,name,role,active,created_at,updated_at) VALUES('mohammad-eyad','محمد إياد','member',1,1,1)`);
+  const plan = planFollowups(db, withHim, DAY_AT).find(p => p.kind === 'welcome');
+  assert.ok(plan);
+  assert.equal(plan.to, '962790653173@s.whatsapp.net');
+  assert.match(plan.text, /السكرتير المساعد لدكتور باسم/);
+  db.prepare("INSERT INTO agent_followups (id,kind,target_user,entity_id,sent_at,response) VALUES ('w1','welcome','mohammad-eyad',NULL,?,'sent')").run(DAY_AT);
+  assert.equal(planFollowups(db, withHim, DAY_AT + 10 * 86_400_000).find(p => p.kind === 'welcome'), undefined, 'sent once, never again');
+});

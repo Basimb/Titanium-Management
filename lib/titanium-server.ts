@@ -83,6 +83,11 @@ export async function ensureSeedUsers() {
     db().prepare("INSERT OR IGNORE INTO users (id, name, role, active, created_at, updated_at) VALUES ('khaled', 'خالد', 'member', 1, ?, ?)").bind(now, now),
     db().prepare("INSERT OR IGNORE INTO users (id, name, role, active, created_at, updated_at) VALUES ('shadi', 'شادي', 'member', 1, ?, ?)").bind(now, now),
     db().prepare("INSERT OR IGNORE INTO users (id, name, role, active, created_at, updated_at) VALUES ('ayman', 'أيمن', 'member', 1, ?, ?)").bind(now, now),
+    // Basim, 2026-10-09: Mohammad Eyad (Naoor) receives the morning profit
+    // problems privately, and the bridge only messages a number whose user is
+    // active here -- so he is seeded as a member like the others. His number
+    // sits in TEAM_CHAT_CONTACTS_JSON in the private settings file.
+    db().prepare("INSERT OR IGNORE INTO users (id, name, role, active, created_at, updated_at) VALUES ('mohammad-eyad', 'محمد إياد', 'member', 1, ?, ?)").bind(now, now),
   ]);
 }
 

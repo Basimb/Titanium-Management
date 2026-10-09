@@ -15,7 +15,7 @@ import { CHOICE_CANCEL, withWayOut, type SecretaryChoices } from "./secretary-ch
 // overdueDigest: the once-a-day list of overdue tasks in the group. Off unless
 // asked for -- Basim, 2026-10-09: "4 وقفها".
 export type FollowupConfig = { enabled: boolean; contacts: Array<{ userId: string; number: string }>; groupId?: string | null; workStartHour?: number; workEndHour?: number; timezoneOffsetMinutes?: number; publicUrl?: string; overdueDigest?: boolean };
-type Planned = { id: string; kind: "overdue_task" | "silent_task" | "stale_approval" | "daily_digest" | "auto_reminder_morning" | "auto_reminder_evening" | "unclaimed_task" | "stale_unclaimed" | "unowned_task"; targetUser: string; entityId: string | null; to: string; text: string; choices?: SecretaryChoices };
+type Planned = { id: string; kind: "overdue_task" | "silent_task" | "stale_approval" | "daily_digest" | "auto_reminder_morning" | "auto_reminder_evening" | "unclaimed_task" | "stale_unclaimed" | "unowned_task" | "welcome"; targetUser: string; entityId: string | null; to: string; text: string; choices?: SecretaryChoices };
 // Basim (2026-09-15): every reminder poll used to die an hour after it was
 // built, while WhatsApp keeps the bubble tappable forever -- so a tap that
 // arrived even slightly late was rejected in total silence
@@ -27,6 +27,15 @@ type Planned = { id: string; kind: "overdue_task" | "silent_task" | "stale_appro
 // itself enforces (MAX_POLL_LIFETIME_MS in services/whatsapp-bridge/src/polls.mjs),
 // and the same one taskCloseDecisionPoll already uses.
 const REMINDER_POLL_LIFETIME_MS = 24 * 60 * 60_000;
+// One private hello, once ever, to a team member the secretary is about to
+// start writing to. Basim, 2026-10-09, for Mohammad Eyad, in his words:
+// "ارسله تجربه « مرحبا انا السكرتير المساعد لدكتور باسم وحبلش اتواصل معك
+// اذكرك وانبهك للشغل »". Sent only once the member exists and is active on the
+// dashboard (the bridge refuses anyone else) and retried on a later day if the
+// delivery failed; the row with response='sent' is what ends it.
+const WELCOMES: ReadonlyArray<{ userId: string; text: string }> = [
+  { userId: "mohammad-eyad", text: "مرحبا، أنا السكرتير المساعد لدكتور باسم، وحبلّش أتواصل معك: أذكّرك وأنبّهك للشغل 🙏" },
+];
 const DAY = 24 * 60 * 60_000, SILENT_AFTER = 3 * DAY, STALE_APPROVAL_AFTER = 2 * DAY, STALE_UNCLAIMED_AFTER = DAY, HOUR = 60 * 60_000;
 // Basim, 2026-09-20: "\u0644\u064a\u0634 \u0627\u0644\u0628\u0648\u062a \u0628\u064a\u0631\u0633\u0644 \u0643\u0644 \u0634\u0648\u064a \u0631\u0633\u0627\u0644\u0647 \u061f" ... "\u0644\u0627 \u062a\u062e\u0644\u064a\u0647 \u064a\u0643\u0631\u0631
 // \u0627\u0644\u0631\u0633\u0627\u0644\u0647". These two nudges repeated once an HOUR for as long as a task
@@ -199,6 +208,15 @@ export function planFollowups(db: DatabaseSync, config: FollowupConfig, at: numb
   const userIdByName = new Map(users.map(user => [user.name, user.id]));
   const today = localDay(at, offset);
   const plans: Planned[] = [];
+
+  for (const welcome of WELCOMES) {
+    const member = users.find(user => user.id === welcome.userId && user.active);
+    const number = member ? numberOf(welcome.userId) : null;
+    if (!member || !number) continue;
+    if (db.prepare("SELECT id FROM agent_followups WHERE kind='welcome' AND target_user=? AND response='sent' LIMIT 1").get(welcome.userId)) continue;
+    if (alreadySent(db, "welcome", welcome.userId, null, at - DAY)) continue;
+    plans.push({ id: randomBytes(8).toString("hex"), kind: "welcome", targetUser: welcome.userId, entityId: null, to: `${number}@s.whatsapp.net`, text: welcome.text });
+  }
 
   // Twice-daily team task reminder (Basim asked for one at 8am and one at
   // 8pm local, every day) -- deliberately computed and returned BEFORE the
