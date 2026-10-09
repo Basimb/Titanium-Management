@@ -442,7 +442,8 @@ test("at 10:00 the group gets only the items sold at a loss or near it, worst fi
   } });
   await jobs.deliverNext(async message => { sent.push(message); return {}; });
   assert.equal(sent.length, 1);
-  assert.equal(sent[0].to, "1@g.us");
+  // Basim, 2026-10-09: the list goes to Mohammad Eyad privately, not the group.
+  assert.equal(sent[0].to, "962790653173@s.whatsapp.net");
   const text = sent[0].text;
   assert.match(text, /صباح الخير فريق عمل تيتانيوم/);
   assert.match(text, /مبيعات 1970-01-01 — 3 أصناف/);
@@ -470,7 +471,7 @@ test("a day with nothing sold at a loss sends one short all-clear", async t => {
   } });
   await jobs.deliverNext(async message => { sent.push(message); return {}; });
   assert.equal(sent.length, 1);
-  assert.equal(sent[0].to, "1@g.us");
+  assert.equal(sent[0].to, "962790653173@s.whatsapp.net");
   assert.equal(sent[0].text, "✅ ما في مشاكل ربح امبارح\n✅ وكل الأصناف انباعت بسعر بطاقتها");
   assert.deepEqual(await jobs.deliverNext(async () => assert.fail("once a day")), { status: "idle" });
 });
@@ -570,6 +571,8 @@ test("at 22:30 each branch gets its own short shelf-check list, never repeated f
   let at = COUNT_AT - 20 * 60_000;
   const jobs = createOdooReportJobs({ db, now: () => at, config: {
     enabled: true, odoo, ownerNumber: "", groupId: "1@g.us", timezoneOffsetMinutes: 0, fetcher: countFetcher(),
+    // Off by default since 2026-10-09; the test switches it back on.
+    routing: { odoo_cycle_count: { enabled: true, group: true } },
   } });
   assert.deepEqual(await jobs.deliverNext(async () => assert.fail("not before half past ten")), { status: "idle" });
   at = COUNT_AT;

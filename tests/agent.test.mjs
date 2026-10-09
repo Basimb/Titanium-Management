@@ -511,7 +511,7 @@ test("tasks_draft parses task lines, previews for owner, and creates every task 
 test("follow-ups: overdue owner nudge once per day, stale approval to owner, digest bounded; queued notifications first", async t => {
   const db = fixture(t);
   const at = Date.UTC(2026, 8, 10, 7, 0); // 10:00 Amman, Thursday
-  const config = { enabled: true, contacts: [{ userId: "basem", number: "966500000000" }, { userId: "khaled", number: "962770000000" }], groupId: "123@g.us" };
+  const config = { enabled: true, contacts: [{ userId: "basem", number: "966500000000" }, { userId: "khaled", number: "962770000000" }], groupId: "123@g.us", overdueDigest: true };
   let plans = planFollowups(db, config, at);
   // t2 (open, no owner, no suggested_owner either) is exactly the "no
   // employee at all" case Basim later asked to escalate straight to him

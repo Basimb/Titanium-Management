@@ -71,7 +71,9 @@ export type OdooReportConfig = {
 };
 
 type Kind = "odoo_daily" | "odoo_weekly" | "odoo_purchases_weekly" | "odoo_shortages" | "odoo_margin" | "odoo_cycle_count";
-export type ReportRouting = { enabled: boolean; group: boolean; owner: boolean };
+// `numbers`: private recipients besides the group and the owner, digits only
+// (Basim, 2026-10-09: the profit problems go to Mohammad Eyad, not the group).
+export type ReportRouting = { enabled: boolean; group: boolean; owner: boolean; numbers?: string[] };
 // Basim, 2026-09-17: "مبيعات يومي بالفرع كل يوم ١٢ منتصف الليل الجروب بس
 // والغي الثاني لغاية ما اقولك" -- daily sales per branch, midnight, group only;
 // both weeklies off until he says otherwise. These are the defaults rather than
@@ -86,8 +88,11 @@ const DEFAULT_ROUTING: Record<Kind, ReportRouting> = {
   // نرسل نواقص على الجروب". Off by default; the report and its per-branch
   // formatting stay intact, so turning it back on is this one line.
   odoo_shortages: { enabled: false, group: false, owner: false },
-  odoo_margin: { enabled: true, group: true, owner: false },
-  odoo_cycle_count: { enabled: true, group: true, owner: false },
+  // Basim, 2026-10-09: "2 وقفها وارسلها لمحمد اياد" -- the profit problems
+  // leave the group and go to Mohammad Eyad privately; "3 وقفها" -- the
+  // nightly shelf check is off.
+  odoo_margin: { enabled: true, group: false, owner: false, numbers: ["962790653173"] },
+  odoo_cycle_count: { enabled: false, group: false, owner: false },
 };
 type CountItems = { locationId: number; productIds: number[] };
 type Planned = { id: string; kind: Kind; targetUser: string; entityId: string | null; to: string; text: string; priceIssues?: { day: string; items: string }; countItems?: CountItems };
@@ -410,6 +415,10 @@ async function planOdooReports(db: DatabaseSync, config: OdooReportConfig, at: n
   const targets: Array<{ targetUser: string; to: string }> = [];
   if (routing.group && config.groupId) targets.push({ targetUser: "group", to: config.groupId });
   if (routing.owner && config.ownerNumber) targets.push({ targetUser: "owner", to: `${config.ownerNumber}@s.whatsapp.net` });
+  for (const number of routing.numbers ?? []) {
+    const digits = String(number).replace(/[^0-9]/g, "");
+    if (digits && digits !== config.ownerNumber) targets.push({ targetUser: digits, to: `${digits}@s.whatsapp.net` });
+  }
   if (!targets.length) return [];
   // Cheap check first, for the one-message kinds: if every target already has
   // today's report, the pharmacy's system is never touched at all. The

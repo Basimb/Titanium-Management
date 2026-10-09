@@ -12,7 +12,9 @@ import { getManagementSnapshot, migrateManagementActions, type ManagementActor, 
 import { GROUP_EVENT_ALLOWLIST, groupBudgetRemaining } from "./team-chat-policy.ts";
 import { CHOICE_CANCEL, withWayOut, type SecretaryChoices } from "./secretary-choices.ts";
 
-export type FollowupConfig = { enabled: boolean; contacts: Array<{ userId: string; number: string }>; groupId?: string | null; workStartHour?: number; workEndHour?: number; timezoneOffsetMinutes?: number; publicUrl?: string };
+// overdueDigest: the once-a-day list of overdue tasks in the group. Off unless
+// asked for -- Basim, 2026-10-09: "4 وقفها".
+export type FollowupConfig = { enabled: boolean; contacts: Array<{ userId: string; number: string }>; groupId?: string | null; workStartHour?: number; workEndHour?: number; timezoneOffsetMinutes?: number; publicUrl?: string; overdueDigest?: boolean };
 type Planned = { id: string; kind: "overdue_task" | "silent_task" | "stale_approval" | "daily_digest" | "auto_reminder_morning" | "auto_reminder_evening" | "unclaimed_task" | "stale_unclaimed" | "unowned_task"; targetUser: string; entityId: string | null; to: string; text: string; choices?: SecretaryChoices };
 // Basim (2026-09-15): every reminder poll used to die an hour after it was
 // built, while WhatsApp keeps the bubble tappable forever -- so a tap that
@@ -358,7 +360,7 @@ export function planFollowups(db: DatabaseSync, config: FollowupConfig, at: numb
         text: `يا باسم، هذه المهام لسا ما استلمها حدا من أكثر من يوم:\n${lines.join("\n")}` });
     }
   }
-  if (config.groupId && overdueTasks.length && !alreadySent(db, "daily_digest", "group", null, at - DAY) && groupBudgetRemaining(db, at) > 0 && GROUP_EVENT_ALLOWLIST.has("delay")) {
+  if (config.overdueDigest && config.groupId && overdueTasks.length && !alreadySent(db, "daily_digest", "group", null, at - DAY) && groupBudgetRemaining(db, at) > 0 && GROUP_EVENT_ALLOWLIST.has("delay")) {
     const lines = overdueTasks.slice(0, 12).map(task => `• ${clean(task.title)} — ${task.owner} — ${task.dueDate}${autoReminderNotes(snapshot.comments as ReminderNote[], task.id)}`);
     plans.push({ id: randomBytes(8).toString("hex"), kind: "daily_digest", targetUser: "group", entityId: null, to: config.groupId, text: `📋 المهام المتأخرة اليوم (${overdueTasks.length}):\n${lines.join("\n")}${overdueTasks.length > 12 ? "\n…" : ""}` });
   }
