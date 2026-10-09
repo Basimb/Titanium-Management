@@ -49,6 +49,7 @@ async function main() {
   let secretaryOutbox;
   let agentFollowups;
   let odooReportJobs, clinicReportJobs;
+  let backendFetcher;
   if (process.env.TEAM_CHAT_AUTH_DATABASE) {
     const { DatabaseSync } = await import('node:sqlite');
     const { lstatSync, realpathSync } = await import('node:fs');
@@ -69,6 +70,18 @@ async function main() {
         contacts, allowedGroupIds: [...config.allowedGroups] } });
       const outboxSettingsPath = process.env.TEAM_CHAT_AUTH_CONFIG_PATH;
       secretaryOutbox = createSecretaryOutboxJobs({ db: jobsDb, config: () => readOutboxConfig(outboxSettingsPath) });
+      // The secretary itself (Basim, 2026-10-09: "الغي الموقع تماما"). Every
+      // message used to be POSTed to the website, which answered it; the same
+      // backend now runs here, reading the same settings file and the same
+      // database, and the website is no longer needed to answer anything.
+      // The two env names are the ones lib/titanium-server.ts and
+      // lib/team-chat-settings.ts have always read, set before they load.
+      if (outboxSettingsPath) {
+        process.env.TITANIUM_TEAM_CHAT_CONFIG = outboxSettingsPath;
+        process.env.TITANIUM_DATA_DIR = path.dirname(filename);
+        const { localTeamChatFetcher } = await import('../../../lib/team-chat-backend.ts');
+        backendFetcher = localTeamChatFetcher();
+      }
       const { createFollowupJobs } = await import('../../../lib/agent-followups.ts');
       agentFollowups = createFollowupJobs({ db: jobsDb, config: () => ({
         enabled: process.env.SECRETARY_FOLLOWUP_ENABLED === '1', contacts,
@@ -115,6 +128,7 @@ async function main() {
   const runtime = createBridgeRuntime({
     config, store, auth, makeWASocket, waVersion, jidNormalizedUser, makeCacheableSignalKeyStore, DisconnectReason, logger,
     control, isActiveNumber, secretaryJobs, secretaryOutbox, agentFollowups, odooReportJobs, clinicReportJobs, proto, generateWAMessageContent, generateWAMessage, decryptPollVote, normalizeMessageContent,
+    ...(backendFetcher ? { fetcher: backendFetcher } : {}),
     ...(config.voiceEnabled ? { transcribeVoice: createVoiceTranscriber({ apiKey: process.env.OPENAI_API_KEY, downloadContent: downloadContentFromMessage }) } : {}),
     onStop: code => { process.exitCode = code === 'service_shutdown' ? 0 : 78; },
   });

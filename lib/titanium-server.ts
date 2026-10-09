@@ -18,7 +18,10 @@ const encoder = new TextEncoder();
 type RunMeta = { changes:number; last_row_id:number | bigint | undefined };
 class LocalStatement {
   private values: SQLInputValue[] = [];
-  constructor(private readonly statement: StatementSync) {}
+  // Written out rather than as a parameter property: the bridge loads this
+  // file with Node's type stripping, which rejects that shorthand.
+  private readonly statement: StatementSync;
+  constructor(statement: StatementSync) { this.statement = statement; }
   bind(...values: SQLInputValue[]) { const next = new LocalStatement(this.statement); next.values = values; return next; }
   async first<T>() { return (this.statement.get(...this.values) as T | undefined) ?? null; }
   async all<T>() { return { results:this.statement.all(...this.values) as T[] }; }
