@@ -185,7 +185,8 @@ function dailyText(byLocation: BranchDaySales[], dateLabel: string, currencyLabe
   });
   if (!ranked.length) lines.push("لا توجد مبيعات مسجّلة لهذا اليوم.", "");
   lines.push("━━━━━━━━━━━━━", `💰 *الإجمالي: ${money(total, currencyLabel)} — ${orders} حركة*`);
-  if (margin) lines.push(`📈 *ربح البيع الكلي: ${margin.pct.toFixed(1)}%*${margin.unknownCost ? ` (بدون ${margin.unknownCost} صنف ما إله كلفة مسجّلة)` : ""}`);
+  // Basim, 2026-10-09: "لا تذكر اصناف بس المارجن اذكر" -- the figure alone.
+  if (margin) lines.push(`📈 *ربح البيع الكلي: ${margin.pct.toFixed(1)}%*`);
   return clean(lines.join("\n"));
 }
 

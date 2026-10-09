@@ -118,7 +118,7 @@ test("the daily report gives each branch its total and count, then cash, card an
   assert.equal(lines[at("صافوط") + 1], "كاش 244.15 · بطاقة 169.45 · تأمين 54.30", "no ذمم when there were none");
   assert.equal(lines[at("الجمرك") + 1], "كاش 50.00 · بطاقة 33.43 · تأمين 0.00");
   assert.match(text, /💰 \*الإجمالي: 2,415\.04 — 251 حركة\*/);
-  assert.match(text, /📈 \*ربح البيع الكلي: 27\.0%\* \(بدون 1 صنف ما إله كلفة مسجّلة\)/);
+  assert.match(text, /\n📈 \*ربح البيع الكلي: 27\.0%\*$/, "the figure alone, nothing about items");
 });
 
 test("if Odoo will not give the payment split, the branch totals still go out", async t => {
