@@ -15,7 +15,7 @@ const odoo = { url: "https://pharmacy.example.com", db: "pharmacy", username: "b
 
 function odooFetcher({ orderCount = 5, totalAmount = 250.5, byLocation = null, activeProducts = 100,
   purchaseCount = 0, purchaseAmount = 0, returnCount = 0, returnAmount = 0,
-  invoiceCount = 0, invoiceAmount = 0, shelf = [] } = {}) {
+  invoiceCount = 0, invoiceAmount = 0, shelf = [], margins = null } = {}) {
   return async (url, options) => {
     const body = JSON.parse(options.body);
     let result;
@@ -28,6 +28,9 @@ function odooFetcher({ orderCount = 5, totalAmount = 250.5, byLocation = null, a
       result = moveType === "in_refund" ? [{ amount_total: returnAmount, amount_residual: returnAmount, __count: returnCount }]
         : moveType === "out_invoice" ? [{ amount_total: invoiceAmount, __count: invoiceCount }]
         : [{ amount_total: purchaseAmount, amount_residual: purchaseAmount, __count: purchaseCount }];
+    } else if (model === "pos.order.line" && margins && body.params.args[5][1].includes("price_subtotal")) {
+      // The nightly report's margin read: sales and booked cost per product.
+      result = (body.params.args[6]?.offset || 0) ? [] : margins.map(([name, price_subtotal, total_cost], index) => ({ product_id: [index + 1, name], price_subtotal, total_cost, qty: 1 }));
     } else if (model === "pos.order.line") {
       result = shelf.filter(item => item.sold).map((item, index) => ({ product_id: [index + 1, item.name], qty: item.sold }));
     } else if (model === "product.product" && method === "search_read") {
@@ -100,7 +103,9 @@ test("the daily report gives each branch its total and count, then cash, card an
   ];
   const jobs = createOdooReportJobs({ db, now: () => DAILY_AT, config: {
     enabled: true, odoo, ownerNumber: "", groupId: "1@g.us", timezoneOffsetMinutes: 0,
-    fetcher: odooFetcher({ byLocation }),
+    // Basim, 2026-10-09: the day's margin under the total -- 2,000 sold at a
+    // cost of 1,460 is 27.0%; the item with no booked cost is left out and counted.
+    fetcher: odooFetcher({ byLocation, margins: [["PANADOL", 1200, 900], ["OZEMPIC", 800, 560], ["NO COST ITEM", 50, 0]] }),
   } });
   await jobs.deliverNext(async message => { text = message.text; return {}; });
   // DAILY_AT is 1970-01-02T00:00Z; the report covers the day that just ended, 1970-01-01.
@@ -113,6 +118,7 @@ test("the daily report gives each branch its total and count, then cash, card an
   assert.equal(lines[at("صافوط") + 1], "كاش 244.15 · بطاقة 169.45 · تأمين 54.30", "no ذمم when there were none");
   assert.equal(lines[at("الجمرك") + 1], "كاش 50.00 · بطاقة 33.43 · تأمين 0.00");
   assert.match(text, /💰 \*الإجمالي: 2,415\.04 — 251 حركة\*/);
+  assert.match(text, /📈 \*ربح البيع الكلي: 27\.0%\* \(بدون 1 صنف ما إله كلفة مسجّلة\)/);
 });
 
 test("if Odoo will not give the payment split, the branch totals still go out", async t => {

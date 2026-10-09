@@ -154,7 +154,23 @@ function branchLabel(location: string, names: Record<string, string>): string {
 // Basim, 2026-09-29, approving the example: each branch's total with its
 // number of sales beside it, and under it one line -- cash, card, insurance
 // side by side, ذمم only when there were any.
-function dailyText(byLocation: BranchDaySales[], dateLabel: string, currencyLabel: string | undefined, branchNames: Record<string, string> | undefined): string {
+// Basim, 2026-10-09, on the nightly report: "زيد المارجن للبيع الكلي على
+// الرسالة" -- one figure for the whole day, under the total. Sales before tax
+// against the cost Odoo booked, the same pair the morning profit check uses;
+// lines with no booked cost are left out of both sides rather than counted
+// as pure profit, and the message says how many were.
+export function dayMargin(products: ProductMargin[]): { pct: number; unknownCost: number } | null {
+  let sales = 0, cost = 0, unknownCost = 0;
+  for (const row of products) {
+    if (!(row.sales > 0)) continue;
+    if (!(row.cost > 0)) { unknownCost++; continue; }
+    sales += row.sales; cost += row.cost;
+  }
+  return sales > 0 ? { pct: ((sales - cost) / sales) * 100, unknownCost } : null;
+}
+
+function dailyText(byLocation: BranchDaySales[], dateLabel: string, currencyLabel: string | undefined, branchNames: Record<string, string> | undefined,
+  margin: ReturnType<typeof dayMargin> = null): string {
   const names = { ...DEFAULT_BRANCH_NAMES, ...branchNames };
   const total = byLocation.reduce((sum, row) => sum + row.totalAmount, 0);
   const orders = byLocation.reduce((sum, row) => sum + row.orderCount, 0);
@@ -169,6 +185,7 @@ function dailyText(byLocation: BranchDaySales[], dateLabel: string, currencyLabe
   });
   if (!ranked.length) lines.push("لا توجد مبيعات مسجّلة لهذا اليوم.", "");
   lines.push("━━━━━━━━━━━━━", `💰 *الإجمالي: ${money(total, currencyLabel)} — ${orders} حركة*`);
+  if (margin) lines.push(`📈 *ربح البيع الكلي: ${margin.pct.toFixed(1)}%*${margin.unknownCost ? ` (بدون ${margin.unknownCost} صنف ما إله كلفة مسجّلة)` : ""}`);
   return clean(lines.join("\n"));
 }
 
@@ -375,7 +392,9 @@ async function buildReportBody(config: OdooReportConfig, session: Awaited<Return
     const since = new Date(dayStart).toISOString();
     const until = new Date(dayStart + DAY).toISOString();
     const byLocation = await session.branchDaySales(since, until);
-    return dailyText(byLocation, localDateLabel(dayStart, offset), config.currencyLabel, config.branchNames);
+    // The margin is an extra: if the cost read fails, the totals still go out.
+    const margin = dayMargin(await session.productMargins(since, until).catch(() => []));
+    return dailyText(byLocation, localDateLabel(dayStart, offset), config.currencyLabel, config.branchNames, margin);
   }
   if (kind === "odoo_purchases_weekly") {
     const offset = config.timezoneOffsetMinutes ?? 180;
