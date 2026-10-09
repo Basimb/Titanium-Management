@@ -445,13 +445,15 @@ test("at 10:00 the group gets only the items sold at a loss or near it, worst fi
   // Basim, 2026-10-09: the list goes to Mohammad Eyad privately, not the group.
   assert.equal(sent[0].to, "962790653173@s.whatsapp.net");
   const text = sent[0].text;
-  assert.match(text, /صباح الخير فريق عمل تيتانيوم/);
+  assert.match(text, /^صباح الخير ☀️\n/, "spoken to one person, not the team");
+  assert.doesNotMatch(text, /فريق عمل تيتانيوم/);
   assert.match(text, /مبيعات 1970-01-01 — 3 أصناف/);
-  assert.match(text, /رقم \*1\*/, "Dr. Shadi is told a private 1 opens a task");
-  assert.match(text, /سكرتير/, "and that a group reply must name the secretary");
+  assert.match(text, /رقم \*1\*/, "told a 1 opens a task");
+  assert.doesNotMatch(text, /سكرتير/, "a private reply needs no code word");
+  assert.doesNotMatch(text, /د\. شادي/, "not addressed to Dr. Shadi any more");
+  assert.match(text, /هاي بدها متابعة منك/);
   assert.ok(text.indexOf("FOSAVANCE") < text.indexOf("SEROXAT") && text.indexOf("SEROXAT") < text.indexOf("AIWIBI"), "worst first");
   assert.match(text, /بيع 6\.54 · كلفة 6\.82 · خسارة 4\.2%/);
-  assert.match(text, /د\. شادي/, "addressed to Dr. Shadi, as a heads-up");
   assert.doesNotMatch(text, /OZEMPIC/, "a thin but healthy margin is not a problem");
   assert.doesNotMatch(text, /NO COST ITEM/, "an item with no booked cost is unknown, not a problem");
   assert.deepEqual(await jobs.deliverNext(async () => assert.fail("once a day")), { status: "idle" });
@@ -460,6 +462,22 @@ test("at 10:00 the group gets only the items sold at a loss or near it, worst fi
   const kept = latestPriceIssues(db, MARGIN_AT + 60_000);
   assert.equal(kept.day, "1970-01-01");
   assert.match(kept.items, /^1\. FOSAVANCE 4 TAB\nبيع 6\.54 · كلفة 6\.82 · خسارة 4\.2%/);
+});
+
+test("routed back to the group, the morning message speaks to the team and Dr. Shadi again", async t => {
+  const db = fixture(t);
+  const sent = [];
+  const jobs = createOdooReportJobs({ db, now: () => MARGIN_AT, config: {
+    enabled: true, odoo, ownerNumber: "", groupId: "1@g.us", timezoneOffsetMinutes: 0,
+    routing: { odoo_margin: { group: true, numbers: [] } },
+    fetcher: marginFetcher([["FOSAVANCE 4 TAB", 6.544, 6.817]]),
+  } });
+  await jobs.deliverNext(async message => { sent.push(message); return {}; });
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].to, "1@g.us");
+  assert.match(sent[0].text, /صباح الخير فريق عمل تيتانيوم/);
+  assert.match(sent[0].text, /د\. شادي، هاي مسؤوليتك/);
+  assert.match(sent[0].text, /سكرتير/, "a group reply must name the secretary");
 });
 
 test("a day with nothing sold at a loss sends one short all-clear", async t => {

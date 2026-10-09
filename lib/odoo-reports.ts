@@ -201,12 +201,19 @@ function marginProblems(products: ProductMargin[]): ProductMargin[] {
 // One morning message: the profit problems (Dr. Shadi's) and the lines rung
 // up below the item card (the cashiers'). A clean day still says so -- Basim,
 // 2026-10-03: "✅ ما في مشاكل ربح امبارح" -- so the group knows it checked.
-function morningPriceText(products: ProductMargin[], underList: UnderListSale[], dateLabel: string): { text: string; items: string | null } {
+// Since 2026-10-09 it goes privately to Mohammad Eyad instead of the group
+// (Basim: "وقفها وارسلها لمحمد اياد"), so when it is not for the group it
+// speaks to one person and drops the group-only reply instructions.
+function morningPriceText(products: ProductMargin[], underList: UnderListSale[], dateLabel: string, inGroup = true): { text: string; items: string | null } {
   const losing = marginProblems(products);
   if (!losing.length && !underList.length) return { text: `${PROFIT_CLEAN}\n${LIST_CLEAN}`, items: null };
-  const lines = [
+  const lines = inGroup ? [
     "صباح الخير فريق عمل تيتانيوم الجبّار ☀️",
     "بعرض عليكم مشاكل البيع والنِّسب القليلة عشان تتأكدوا من الأسعار والكلفة، يعطيكم العافية.",
+    "",
+  ] : [
+    "صباح الخير ☀️",
+    "هاي مشاكل البيع والنِّسب القليلة امبارح، تأكد من الأسعار والكلفة، يعطيك العافية.",
     "",
   ];
   if (losing.length) {
@@ -233,13 +240,19 @@ function morningPriceText(products: ProductMargin[], underList: UnderListSale[],
     });
     if (underList.length > MAX_UNDER_LISTED) lines.push(`و${underList.length - MAX_UNDER_LISTED} بند ثاني.`, "");
   } else lines.push(LIST_CLEAN, "");
-  if (losing.length) lines.push(
+  if (losing.length && inGroup) lines.push(
     "━━━━━━━━━━━━━",
     "د. شادي، هاي مسؤوليتك 👆",
     "بتحب أحطلك ياها مهمة، ولا رح تعالجهم فوراً؟",
     "إذا بدك ياها مهمة: ابعتلي على الخاص رقم *1* واكتب المهمة عن تعديل الأسعار، وأنا بجهزلك المهمة كاملة. شكراً إلك 🙏",
     "",
     "_وإذا بدك ترد عليّ بالجروب، الرجاء تذكر كلمة *سكرتير* بالرسالة عشان أفهم إنها موجهة إلي._",
+  );
+  else if (losing.length) lines.push(
+    "━━━━━━━━━━━━━",
+    "هاي بدها متابعة منك 👆",
+    "بتحب أحطلك ياها مهمة، ولا رح تعالجهم فوراً؟",
+    "إذا بدك ياها مهمة: ابعتلي رقم *1* واكتب المهمة عن تعديل الأسعار، وأنا بجهزلك المهمة كاملة. شكراً إلك 🙏",
   );
   const items = losing.length ? losing.map((row, index) => {
     const margin = pctOf(row.sales, row.cost);
@@ -348,7 +361,8 @@ async function buildReportMessagesFresh(db: DatabaseSync, config: OdooReportConf
     const since = new Date(dayStart).toISOString(), until = new Date(dayStart + DAY).toISOString();
     const [products, underList] = await Promise.all([session.productMargins(since, until), session.underListSales(since, until)]);
     const day = localDateLabel(dayStart, offset);
-    const morning = morningPriceText(products, underList, day);
+    const inGroup = Boolean(config.routing?.odoo_margin?.group ?? DEFAULT_ROUTING.odoo_margin.group) && Boolean(config.groupId);
+    const morning = morningPriceText(products, underList, day, inGroup);
     return [{ entityId: null, text: morning.text, ...(morning.items ? { priceIssues: { day, items: morning.items } } : {}) }];
   }
   return [{ entityId: null, text: await buildReportBody(config, session, kind, at) }];
