@@ -173,6 +173,32 @@ export function createBridgeRuntime({ config, store, auth, makeWASocket, waVersi
       for (const update of updates) if (update.id) invalidateGroup(update.id);
     });
     current.ev.on('group-participants.update', update => invalidateGroup(update.id));
+    // TEMP (owner-approved 2026-10-10): remember the WhatsApp display name (pushName)
+    // of group members as they write, into a private file, so the owner can tell who
+    // each number is. Read-only: sends nothing, never enqueues, changes no config.
+    current.ev.on('messages.upsert', event => {
+      void (async () => {
+        try {
+          const seen = [];
+          for (const m of event.messages || []) {
+            const remote = m?.key?.remoteJid;
+            if (!remote || !remote.endsWith('@g.us') || m.key.fromMe || !m.pushName) continue;
+            let number = null;
+            try { number = await resolvePhone(m.key.participant, m.key.participantPn || m.key.participantAlt, identity); } catch { number = null; }
+            seen.push({ number, raw: m.key.participant || null, group: remote, name: String(m.pushName).slice(0, 80) });
+          }
+          if (!seen.length) return;
+          const { readFile, writeFile } = await import('node:fs/promises');
+          const { dirname } = await import('node:path');
+          const dir = process.env.TITANIUM_TEAM_CHAT_CONFIG ? dirname(process.env.TITANIUM_TEAM_CHAT_CONFIG) : '/home/titani24/.titanium-team-chat';
+          const file = `${dir}/group-names-seen.json`;
+          let map = {};
+          try { map = JSON.parse(await readFile(file, 'utf8')); } catch { map = {}; }
+          for (const s of seen) map[s.number || s.raw] = { ...s, at: new Date().toISOString() };
+          await writeFile(file, JSON.stringify(map, null, 2), { mode: 0o600 });
+        } catch { /* never affects the bridge */ }
+      })();
+    });
     current.ev.on('creds.update', update => {
       if (stopped || current !== socket) return;
       auth.saveCreds(update).catch(() => stop('auth_persistence_failed'));
@@ -200,6 +226,56 @@ export function createBridgeRuntime({ config, store, auth, makeWASocket, waVersi
           ready = true;
           reconnectCount = 0;
           output.info('Titanium bridge connected to the configured account; only allowlisted fresh messages are eligible.');
+          // ONE-OFF (owner-requested 2026-10-10): post the approved welcome text once to
+          // the "Titanium" staff group. The group stays NOT allowlisted: nothing is read
+          // from it or answered there. The marker is created BEFORE sending (flag wx),
+          // so this can never post twice, even across restarts or a failed send.
+          void (async () => {
+            try {
+              const { readFile, writeFile } = await import('node:fs/promises');
+              const { dirname } = await import('node:path');
+              const dir = process.env.TITANIUM_TEAM_CHAT_CONFIG ? dirname(process.env.TITANIUM_TEAM_CHAT_CONFIG) : '/home/titani24/.titanium-team-chat';
+              const text = (await readFile(`${dir}/welcome-titanium.txt`, 'utf8')).trim();
+              if (!text) return;
+              await writeFile(`${dir}/welcome-titanium.sent`, new Date().toISOString(), { flag: 'wx', mode: 0o600 });
+              await current.sendMessage('120363323474480147@g.us', { text: boundedPlainText(text), linkPreview: null });
+              output.info('Titanium one-off welcome: sent.');
+            } catch (error) {
+              output.info(`Titanium one-off welcome: skipped (${error?.code === 'EEXIST' ? 'already_sent' : 'failed'}).`);
+            }
+          })();
+          // TEMP (owner-approved 2026-10-10): write the bot's group list (id + subject + size)
+          // to a private file so the owner can pick which groups to allowlist. Read-only;
+          // sends nothing and changes no configuration. Remove after the groups are chosen.
+          void (async () => {
+            try {
+              const groups = await withDeadline(() => current.groupFetchAllParticipating());
+              const list = [];
+              for (const g of Object.values(groups || {})) {
+                const parts = Array.isArray(g.participants) ? g.participants : [];
+                const members = [];
+                for (const p of parts) {
+                  let number = null;
+                  try { number = await resolvePhone(p.id, p.phoneNumber, identity); } catch { number = null; }
+                  let about = null;
+                  try {
+                    const st = await withDeadline(() => current.fetchStatus(number ? `${number}@s.whatsapp.net` : p.id));
+                    const first = Array.isArray(st) ? st[0] : st;
+                    about = first?.status?.status ?? first?.status ?? null;
+                    if (typeof about !== 'string') about = null;
+                  } catch { about = null; }
+                  members.push({ number: number || null, raw: p.phoneNumber || p.id || null, admin: p.admin || null,
+                    name: p.notify || p.name || p.verifiedName || null, about });
+                }
+                list.push({ id: g.id, subject: g.subject || '', size: parts.length || g.size || 0, members });
+              }
+              const { writeFile } = await import('node:fs/promises');
+              const { dirname } = await import('node:path');
+              const dir = process.env.TITANIUM_TEAM_CHAT_CONFIG ? dirname(process.env.TITANIUM_TEAM_CHAT_CONFIG) : '/home/titani24/.titanium-team-chat';
+              await writeFile(`${dir}/groups-list.json`, JSON.stringify(list, null, 2), { mode: 0o600 });
+              output.info(`Titanium groups list: ${list.length} groups written.`);
+            } catch { output.info('Titanium groups list: unavailable.'); }
+          })();
         }
         if (update.connection === 'close') {
           ready = false;

@@ -57,6 +57,10 @@ export async function selectIncoming(message, event, config, identity, now, acti
   if (typeof text !== 'string' || !text.trim() || text.length > 2000) return null;
   // Login codes are entered on the website, never forwarded to an AI service.
   if (/^[0-9٠-٩]{6}$/.test(text.trim())) return null;
+  // Owner rule: in a group the secretary stays completely silent unless the
+  // message names it ("سكرتير"). Filtered here, before the backend, so even a
+  // backend failure can never produce a group reply to an unaddressed message.
+  if (isGroup && !/سكرتير/.test(text)) return null;
   const senderNumber = await resolvePhone(isGroup ? key.participant : chat,
     isGroup ? key.participantAlt : key.remoteJidAlt, identity);
   if (!senderNumber || senderNumber === config.botNumber || !config.allowedNumbers.has(senderNumber)) return null;
