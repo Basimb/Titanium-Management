@@ -21,6 +21,7 @@ import { classifyOdooQuestion } from "./odoo-question-model.ts";
 import { exploreOdoo } from "./odoo-explore.ts";
 import { odooPersonFor } from "./odoo-people.ts";
 import { openOdooSession } from "./odoo-client.ts";
+import { idaraIntercept } from "./idara-approvals.ts";
 
 export async function handleTeamChatPost(request: Request): Promise<Response> {
   try {
@@ -94,6 +95,10 @@ export function localTeamChatFetcher(): (url: string, init: RequestInit) => Prom
   const seeded = ensureSeedUsers().catch(() => undefined);
   return async (url, init) => {
     await seeded;
+    // IDARA approvals from the phone: a tap on an IDARA poll, or «طلباتي».
+    // Everything else (null) goes to the secretary exactly as before.
+    const idara = await idaraIntercept(init).catch(() => null);
+    if (idara) return idara;
     return handleTeamChatPost(new Request(url, init));
   };
 }
