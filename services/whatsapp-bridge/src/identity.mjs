@@ -60,7 +60,8 @@ export async function selectIncoming(message, event, config, identity, now, acti
   // Owner rule: in a group the secretary stays completely silent unless the
   // message names it ("سكرتير"). Filtered here, before the backend, so even a
   // backend failure can never produce a group reply to an unaddressed message.
-  if (isGroup && !/سكرتير/.test(text)) return null;
+  // A voice note arrives here as a placeholder; its words are checked after transcription.
+  if (isGroup && !/سكرتير/.test(text) && text !== 'رسالة صوتية للعمل') return null;
   const senderNumber = await resolvePhone(isGroup ? key.participant : chat,
     isGroup ? key.participantAlt : key.remoteJidAlt, identity);
   if (!senderNumber || senderNumber === config.botNumber || !config.allowedNumbers.has(senderNumber)) return null;

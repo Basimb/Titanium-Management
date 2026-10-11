@@ -162,8 +162,18 @@ export async function selectVoiceIncoming(message, event, config, identity, now,
   const projected = { ...message, message: { extendedTextMessage: { text: 'رسالة صوتية للعمل', ...(quoted ? { contextInfo: { stanzaId: quoted } } : {}) } } };
   const incoming = await selectIncoming(projected, event, config, identity, now, activatedAt);
   if (!incoming || !await authorize(incoming.body) || !reserve(incoming.body)) return null;
-  const text = await transcribe(content.audioMessage, { authorize: () => authorize(incoming.body) });
+  const inGroup = String(incoming.body?.chatId || message?.key?.remoteJid || '').endsWith('@g.us');
+  let text;
+  try {
+    text = await transcribe(content.audioMessage, { authorize: () => authorize(incoming.body) });
+  } catch (error) {
+    // In a group, a voice note that could not be understood stays silent.
+    if (inGroup) return null;
+    throw error;
+  }
   if (!safeVoiceTranscript(text) || !await authorize(incoming.body)) return null;
+  // Owner rule: in a group, answer a voice note only if it says "سكرتير".
+  if (inGroup && !/سكرتير/.test(text)) return null;
   return { ...incoming, body: { ...incoming.body, text, inputKind: 'voice' } };
 }
 
