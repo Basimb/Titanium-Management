@@ -91,6 +91,9 @@ export async function ensureSeedUsers() {
     // active here -- so he is seeded as a member like the others. His number
     // sits in TEAM_CHAT_CONTACTS_JSON in the private settings file.
     db().prepare("INSERT OR IGNORE INTO users (id, name, role, active, created_at, updated_at) VALUES ('mohammad-eyad', 'محمد إياد', 'member', 1, ?, ?)").bind(now, now),
+      // Owner, 2026-10-11: Malik Al-Hawanieh (warehouse) receives transfer approval
+      // requests privately. Number in TEAM_CHAT_CONTACTS_JSON like the others.
+      db().prepare("INSERT OR IGNORE INTO users (id, name, role, active, created_at, updated_at) VALUES ('malik-hawanieh', 'مالك الحوانية', 'member', 1, ?, ?)").bind(now, now),
   ]);
 }
 
