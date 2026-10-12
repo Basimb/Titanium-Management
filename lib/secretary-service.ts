@@ -516,6 +516,13 @@ export function migrateSecretary(db: DatabaseSync) {
 function actorFor(db: DatabaseSync, event: Event, config: TeamChatConfig) {
   return resolveChatUser({ senderNumber: event.senderNumber, groupId: event.groupId }, config.contacts, db.prepare("SELECT id,name,role,active FROM users").all() as ChatUser[], config.allowedGroupIds);
 }
+// Basim, 2026-10-12: the shift staff now talk to the secretary (Amin) privately, but the
+// pharmacy's and the clinics' figures stay with the people who run them. Only these
+// accounts may ask the Odoo / clinic questions; anyone else gets a polite pointer, never
+// a number. Enforced here, before any data is fetched, for direct messages and groups alike.
+const DATA_READERS = new Set(["basem", "khaled", "ayman", "shadi", "mohammad-eyad", "malik-hawanieh"]);
+function mayReadData(actor: ChatUser): boolean { return actor.role === "admin" || DATA_READERS.has(actor.id); }
+const DATA_DENIED = "هاي المعلومة عند الإدارة 🙏 إذا بتحتاجها لشغلك، احكي لمسؤولك.";
 function stateFor(db: DatabaseSync, actor: ChatUser): Snapshot { return getManagementSnapshot(db, actor) as unknown as Snapshot; }
 // Same base filter + overdue/pending-first ordering as the displayed task
 // list (readReply's "ordered" array) so a task's position number is always
@@ -1471,6 +1478,7 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
         const state = stateFor(db, asking);
         const duplicate = lookup(db, event, asking, state);
         if (duplicate) return duplicate;
+        if (!mayReadData(asking)) return transaction(db, () => save(db, event, asking, { status: "summary", reply: DATA_DENIED }, [], now));
         try {
           const reply = await dependencies.askClinic(clinicQuestion, now);
           return transaction(db, () => save(db, event, asking, { status: "summary", reply }, [], now));
@@ -1492,6 +1500,7 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
         const state = stateFor(db, asking);
         const duplicate = lookup(db, event, asking, state);
         if (duplicate) return duplicate;
+        if (!mayReadData(asking)) return transaction(db, () => save(db, event, asking, { status: "summary", reply: DATA_DENIED }, [], now));
         try {
           const answer = await dependencies.askOdoo(question, now);
           return transaction(db, () => save(db, event, asking,
@@ -1509,6 +1518,7 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
         const state = stateFor(db, asking);
         const duplicate = lookup(db, event, asking, state);
         if (duplicate) return duplicate;
+        if (!mayReadData(asking)) return transaction(db, () => save(db, event, asking, { status: "summary", reply: DATA_DENIED }, [], now));
         // A router that is slow, unreachable or unsure returns nothing, and the
         // message carries on to the ordinary secretary exactly as before.
         question = dependencies.classifyOdoo ? await dependencies.classifyOdoo(event.text) : null;

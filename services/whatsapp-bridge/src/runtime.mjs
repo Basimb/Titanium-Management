@@ -244,6 +244,41 @@ export function createBridgeRuntime({ config, store, auth, makeWASocket, waVersi
               output.info(`Titanium one-off welcome: skipped (${error?.code === 'EEXIST' ? 'already_sent' : 'failed'}).`);
             }
           })();
+          // Amin group announcements (Basim, 2026-10-12: "الجروبات للإعلانات والتغييرات").
+          // A file ~/.titanium-team-chat/announce/<group>__<YYYYMMDDHHMM Amman>__<slug>.txt is
+          // posted once to that group when its time comes; <group> is titanium or dev. The file
+          // is renamed to .sending BEFORE the send and .sent after, so it can never post twice;
+          // a failed send stays .sending for a person to look at. This only SENDS: the Titanium
+          // group stays off the allowlist, nothing is read from it or answered there.
+          globalThis.__aminAnnounceSock = current;
+          if (!globalThis.__aminAnnounceTimer) {
+            globalThis.__aminAnnounceTimer = setInterval(() => { void (async () => {
+              const sock = globalThis.__aminAnnounceSock;
+              if (!sock || globalThis.__aminAnnounceBusy) return;
+              globalThis.__aminAnnounceBusy = true;
+              try {
+                const { readFile, readdir, rename } = await import('node:fs/promises');
+                const { dirname } = await import('node:path');
+                const base = process.env.TITANIUM_TEAM_CHAT_CONFIG ? dirname(process.env.TITANIUM_TEAM_CHAT_CONFIG) : '/home/titani24/.titanium-team-chat';
+                const dir = `${base}/announce`;
+                let names = [];
+                try { names = await readdir(dir); } catch { return; }
+                const groups = { titanium: '120363323474480147@g.us', dev: '120363178431513880@g.us' };
+                const nowKey = new Date(Date.now() + 3 * 3600_000).toISOString().slice(0, 16).replace(/[-T:]/g, '');
+                for (const name of names.sort()) {
+                  const m = /^(titanium|dev)__(\d{12})__[a-z0-9-]{1,60}\.txt$/.exec(name);
+                  if (!m || m[2] > nowKey) continue;
+                  const text = (await readFile(`${dir}/${name}`, 'utf8')).trim();
+                  await rename(`${dir}/${name}`, `${dir}/${name}.sending`);
+                  try {
+                    if (text) await sock.sendMessage(groups[m[1]], { text: boundedPlainText(text), linkPreview: null });
+                    await rename(`${dir}/${name}.sending`, `${dir}/${name}.sent`);
+                    output.info(`Amin announcement: sent ${name}`);
+                  } catch { output.info(`Amin announcement: failed ${name}`); }
+                }
+              } catch { /* never affects the bridge */ } finally { globalThis.__aminAnnounceBusy = false; }
+            })(); }, 60_000);
+          }
           // TEMP (owner-approved 2026-10-10): write the bot's group list (id + subject + size)
           // to a private file so the owner can pick which groups to allowlist. Read-only;
           // sends nothing and changes no configuration. Remove after the groups are chosen.
