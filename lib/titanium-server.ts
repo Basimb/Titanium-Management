@@ -25,7 +25,8 @@ class LocalStatement {
   bind(...values: SQLInputValue[]) { const next = new LocalStatement(this.statement); next.values = values; return next; }
   async first<T>() { return (this.statement.get(...this.values) as T | undefined) ?? null; }
   async all<T>() { return { results:this.statement.all(...this.values) as T[] }; }
-  async run() { const result = this.statement.run(...this.values); return { meta:{ changes:Number(result.changes), last_row_id:result.lastInsertRowid } as RunMeta }; }
+  async run() { return this.runNow(); }
+  runNow() { const result = this.statement.run(...this.values); return { meta:{ changes:Number(result.changes), last_row_id:result.lastInsertRowid } as RunMeta }; }
 }
 
 class LocalDatabase {
@@ -34,7 +35,11 @@ class LocalDatabase {
   prepare(sql:string) { return new LocalStatement(this.sqlite.prepare(sql)); }
   async batch(statements:LocalStatement[]) {
     this.sqlite.exec("BEGIN IMMEDIATE");
-    try { const results=[]; for (const statement of statements) results.push(await statement.run()); this.sqlite.exec("COMMIT"); return results; }
+    // Synchronous between BEGIN and COMMIT (2026-10-12): awaiting each statement let
+    // other code on the same process run mid-transaction; the bridge's own startup
+    // migration (another connection, BEGIN IMMEDIATE) then waited on this write lock
+    // and failed with "database is locked", so the bridge would not start.
+    try { const results=[]; for (const statement of statements) results.push(statement.runNow()); this.sqlite.exec("COMMIT"); return results; }
     catch (error) { this.sqlite.exec("ROLLBACK"); throw error; }
   }
   private migrate() { this.sqlite.exec(`

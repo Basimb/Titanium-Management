@@ -137,7 +137,7 @@ async function main() {
   await runtime.start();
 }
 
-main().catch(() => {
-  console.error('Titanium bridge could not start. Check configuration, dependency compatibility, and private storage.');
+main().catch((error) => {
+  console.error('Titanium bridge could not start. Check configuration, dependency compatibility, and private storage.', String(error && error.stack || error).replace(/\s+/g, ' ').slice(0, 600));
   process.exitCode = 78;
 });
