@@ -34,7 +34,8 @@ test('context budget preserves catalogs and complete pending preview',async()=>{
  // remind-is-never-a-message-to-someone-else steering rule, then the nudge
  // kind (real new capabilities, not bloat) were added to the system prompt --
  // still a sanity guard against unbounded prompt growth, not a hard model limit.
- assert.deepEqual(sent.tasks,input.tasks);assert.ok(body.messages[0].content.length<24500);
+ // 2026-10-12: + free_reminder / outbound_reply / RECENT OUTBOUND lines.
+ assert.deepEqual(sent.tasks,input.tasks);assert.ok(body.messages[0].content.length<26000);
 });
 
 

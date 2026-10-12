@@ -22,6 +22,12 @@ export function migrateAgentSchema(sqlite: DatabaseSync): void {
     // agent_outbox table predates the feature; a fresh one gets it directly in
     // the CREATE TABLE below.
     addColumns("agent_outbox", [["choices_json", "TEXT"]]);
+    // Basim, 2026-10-12: «خليه يفهم كل شي ويحلل الكلام». deliver_after = a free
+    // reminder the person asked for ("ذكرني الساعة 5"); source = who queued the
+    // row (in-code calls write 'system'; one-off/IDARA rows inserted from outside
+    // stay NULL); reply_noticed_at = the person's reply to this row was already
+    // acknowledged and forwarded to Basim once.
+    addColumns("agent_outbox", [["deliver_after", "INTEGER"], ["source", "TEXT"], ["reply_noticed_at", "INTEGER"]]);
     sqlite.exec(`
       CREATE TABLE IF NOT EXISTS approvals (
         id TEXT PRIMARY KEY NOT NULL,
@@ -96,7 +102,10 @@ export function migrateAgentSchema(sqlite: DatabaseSync): void {
         choices_json TEXT,                 -- JSON SecretaryChoices, e.g. an approval-decision poll
         state TEXT DEFAULT 'pending' NOT NULL, -- pending | sending | sent | failed
         created_at INTEGER NOT NULL,
-        sent_at INTEGER
+        sent_at INTEGER,
+        deliver_after INTEGER,             -- a free reminder: not before this time
+        source TEXT,                       -- 'system' for in-code rows; NULL = one-off/IDARA
+        reply_noticed_at INTEGER           -- the reply to this row was already acknowledged
       );
       CREATE INDEX IF NOT EXISTS idx_agent_outbox_state ON agent_outbox(state, created_at);
 

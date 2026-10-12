@@ -59,7 +59,9 @@ async function askWhichOne(f) {
 test('an employee cannot answer an open question by typing -- not a number, not anything', async t => {
   const f = fixture(t);
   const asked = await askWhichOne(f);
-  for (const typed of ['2', '7', 'خلصت', 'شو مبيعات اليوم']) {
+  // Basim, 2026-10-12: a real unrelated sentence is now read (see
+  // secretary-free-text.test.mjs); anything answer-shaped still is not.
+  for (const typed of ['2', '7', 'خلصت', 'تمام', 'رقم 2']) {
     const reply = await f.say(typed);
     assert.match(reply.reply, /اختار من القائمة/, `"${typed}" must be refused, not acted on`);
     assert.ok(reply.choices, 'and the same question comes back rather than being pointed at');

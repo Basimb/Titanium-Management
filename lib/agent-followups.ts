@@ -389,15 +389,17 @@ export function planFollowups(db: DatabaseSync, config: FollowupConfig, at: numb
  * choices, when given, is a real tappable WhatsApp poll to attach alongside the
  * text (see approvalDecisionPoll in approvals.ts) -- 'group' targets ignore it,
  * same as the interactive sendReply path (WhatsApp polls don't work in groups). */
-export function enqueueAgentMessage(db: DatabaseSync, input: { toUser: string; text: string; choices?: SecretaryChoices }, at: number): string {
+export function enqueueAgentMessage(db: DatabaseSync, input: { toUser: string; text: string; choices?: SecretaryChoices; deliverAfter?: number; source?: string }, at: number): string {
   migrateManagementActions(db);
   const id = randomBytes(8).toString("hex");
   // Every poll carries the universal way out, and every poll sent to a person
   // is remembered as the one they now have open -- see recordOpenChoice.
   const choices = input.toUser !== "group" && input.choices ? withWayOut(input.choices) : null;
-  db.prepare("INSERT INTO agent_outbox (id,to_user,text,choices_json,state,created_at) VALUES (?,?,?,?,'pending',?)")
-    .run(id, input.toUser, input.text.slice(0, 3800), choices ? JSON.stringify(choices) : null, at);
-  if (choices) recordOpenChoice(db, input.toUser, choices);
+  // A free reminder ("ذكرني الساعة 5") waits in the outbox until deliver_after.
+  const deliverAfter = typeof input.deliverAfter === "number" && input.deliverAfter > at ? Math.floor(input.deliverAfter) : null;
+  db.prepare("INSERT INTO agent_outbox (id,to_user,text,choices_json,state,created_at,deliver_after,source) VALUES (?,?,?,?,'pending',?,?,?)")
+    .run(id, input.toUser, input.text.slice(0, 3800), choices ? JSON.stringify(choices) : null, at, deliverAfter, input.source || "system");
+  if (choices && deliverAfter === null) recordOpenChoice(db, input.toUser, choices);
   return id;
 }
 /**
@@ -433,9 +435,12 @@ export function countOpenChoiceNudge(db: DatabaseSync, userId: string): void {
 }
 
 function nextQueued(db: DatabaseSync, config: FollowupConfig, at: number): Planned | null {
-  db.prepare("UPDATE agent_outbox SET state='failed' WHERE state='sending' AND created_at<=?").run(at - 5 * 60_000);
-  const row = db.prepare("SELECT id,to_user AS toUser,text,choices_json AS choicesJson FROM agent_outbox WHERE state='pending' AND created_at>=? ORDER BY created_at LIMIT 1").get(at - DAY) as { id: string; toUser: string; text: string; choicesJson: string | null } | undefined;
-  if (!row) { db.prepare("UPDATE agent_outbox SET state='failed' WHERE state='pending' AND created_at<?").run(at - DAY); return null; }
+  // COALESCE(deliver_after,created_at): a free reminder counts as "created" the
+  // moment it is due -- never picked early, never swept as stale while it waits
+  // (Basim, 2026-10-12: «ذكرني فيهم ع ٥ العصر»).
+  db.prepare("UPDATE agent_outbox SET state='failed' WHERE state='sending' AND COALESCE(deliver_after,created_at)<=?").run(at - 5 * 60_000);
+  const row = db.prepare("SELECT id,to_user AS toUser,text,choices_json AS choicesJson FROM agent_outbox WHERE state='pending' AND COALESCE(deliver_after,created_at)<=? AND COALESCE(deliver_after,created_at)>=? ORDER BY COALESCE(deliver_after,created_at) LIMIT 1").get(at, at - DAY) as { id: string; toUser: string; text: string; choicesJson: string | null } | undefined;
+  if (!row) { db.prepare("UPDATE agent_outbox SET state='failed' WHERE state='pending' AND COALESCE(deliver_after,created_at)<?").run(at - DAY); return null; }
   // A poll expires at most an hour after it was built (approvalDecisionPoll/
   // confirmChoices) -- past that WhatsApp itself would reject it, so drop it
   // here rather than let the bridge attempt and fail; the plain text (which

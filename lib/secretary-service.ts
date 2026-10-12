@@ -1300,6 +1300,64 @@ function nudgeOwner(db: DatabaseSync, event: Event, actor: ChatUser, state: Snap
   return save(db, event, actor, { status: "applied", reply: `✅ بعتّ لـ${clean(responsible)} تذكيرًا بمهمة «${clean(task.title)}».`, taskId: task.id }, ["t:" + task.id], now);
 }
 
+// ---- Basim, 2026-10-12: «خليه يفهم كل شي ويحلل الكلام» ---------------------
+function pollNorm(text: string) { return text.normalize("NFKC").replace(/[ً-ٰٟـ‎‏⁦-⁩]/g, "").replace(/[أإآ]/g, "ا").replace(/ى/g, "ي").replace(/ة/g, "ه").replace(/[^\p{L}\p{N}\s]/gu, " ").replace(/\s+/g, " ").trim().toLowerCase(); }
+/** Typed text that could be mistaken for tapping the open poll. */
+export function looksLikePollAnswer(text: unknown, choices: SecretaryChoices): boolean {
+  const value = pollNorm(String(text ?? ""));
+  if (!value) return true;
+  if (/^[\p{N}\s]{1,6}$/u.test(value) || /^(?:رقم|خيار|الخيار)\s*[\p{N}]{1,3}$/u.test(value)) return true;
+  if (/^(?:اه|ايوه|ايوا|اي|نعم|اكيد|تمام|ماشي|اوك|ok|okay|yes|no|لا|لاء|موافق|وافق|اوافق|ارفض|رفض|مش موافق|الغي|الغاء|بلاش|اعتمد|بنفع|ما بنفع|يب|هيك)$/u.test(value)) return true;
+  // Anything that sounds like acting on a task still waits for the tap -- the
+  // 2026-09-21 accident was exactly a typed task action landing while a poll
+  // was open.
+  if (/(?:خلص|انهي|انهاء|انجز|استلم|سكر|اغلق|اقفل|سلم|حول|تحويل|مدد|تمديد|بدات|ابدا|اعتمد|مهمه|مهام|رقم)/u.test(value)) return true;
+  return choices.options.some(option => { const label = pollNorm(option.label); return !!label && (value === label || (label.length >= 4 && value.length <= label.length + 6 && value.includes(label))); });
+}
+const OUTBOUND_WINDOW_MS = 48 * 3600_000;
+type OutboundRow = { id: string; text: string; sent_at: number; source: string | null; choices_json: string | null; reply_noticed_at: number | null };
+function recentOutboundRows(db: DatabaseSync, userId: string, now: number): OutboundRow[] {
+  try {
+    return db.prepare("SELECT id,text,sent_at,source,choices_json,reply_noticed_at FROM agent_outbox WHERE to_user=? AND state='sent' AND sent_at>? ORDER BY sent_at DESC LIMIT 3")
+      .all(userId, now - OUTBOUND_WINDOW_MS) as OutboundRow[];
+  } catch { return []; }
+}
+function recentOutboundFor(db: DatabaseSync, userId: string, now: number): SecretaryModelInput["recentOutbound"] {
+  const fmt = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Amman", dateStyle: "short", timeStyle: "short", hour12: false });
+  return recentOutboundRows(db, userId, now).map(row => ({ text: String(row.text).slice(0, 600), sentAt: fmt.format(row.sent_at) }));
+}
+/** A one-off/IDARA message (source NULL, no poll) the person has not yet been
+ * acknowledged on -- their reply to it is worth telling Basim about once. */
+function noticeableOutbound(db: DatabaseSync, userId: string, now: number): OutboundRow | null {
+  const row = recentOutboundRows(db, userId, now)[0];
+  return row && row.source === null && !row.choices_json && row.reply_noticed_at === null ? row : null;
+}
+const SHORT_ACK = /^(?:تمام|ماشي|اوك|ok|okay|حاضر|ابشر|من عيوني|على راسي|وصلت|وصل|وصلني|تم|طيب|ان شاء الله|انشالله|انشاءالله|شكرا|مشكور|يعطيك العافيه|الله يعطيك العافيه|تسلم|👍|🙏|❤️|✅|👌)(?:\s+(?:دكتور|دكتورنا|باسم|يا باسم|حبيبي|الله يعطيك العافيه|يعطيك العافيه|شكرا|مشكور|تسلم))*$/u;
+export function isShortAck(text: string): boolean {
+  const raw = text.trim();
+  if (/^[\p{Extended_Pictographic}‍️\s]{1,12}$/u.test(raw) && /\p{Extended_Pictographic}/u.test(raw)) return true;
+  const value = pollNorm(raw);
+  return !!value && value.length <= 60 && (SHORT_ACK.test(value) || AFFIRMATIONS.includes(value));
+}
+function notifyBasimOfReply(db: DatabaseSync, actor: ChatUser, row: OutboundRow, reply: string, now: number) {
+  db.prepare("UPDATE agent_outbox SET reply_noticed_at=? WHERE id=? AND reply_noticed_at IS NULL").run(now, row.id);
+  if (actor.id === "basem") return;
+  const sent = clean(String(row.text)).replace(/\s+/g, " ").slice(0, 80);
+  enqueueAgentMessage(db, { toUser: "basem", text: `📩 ${clean(actor.name)} ردّ على رسالة «${sent}${String(row.text).length > 80 ? "…" : ""}»:\n${clean(reply).slice(0, 400)}` }, now);
+}
+function freeReminder(db: DatabaseSync, event: Event, actor: ChatUser, body: string, remindAt: string, now: number): Result {
+  const due = Date.parse(remindAt);
+  if (event.groupId !== null) return save(db, event, actor, { status: "clarify", reply: "التذكيرات بتنعمل عالخاص بس، ابعتلي اياها هناك." }, [], now);
+  if (!Number.isFinite(due) || due < now + 60_000 || due > now + 90 * 86400_000) return save(db, event, actor, { status: "clarify", reply: "إمتى بدك أذكرك بالضبط؟ اعطيني وقت جاي (مثلاً الساعة 5 العصر أو بعد ساعتين)." }, [], now);
+  const pending = Number((db.prepare("SELECT count(*) AS n FROM agent_outbox WHERE to_user=? AND state='pending' AND source='reminder' AND deliver_after>?").get(actor.id, now) as { n: number }).n);
+  if (pending >= 30) return save(db, event, actor, { status: "clarify", reply: "عندك 30 تذكير جايين. خلينا نخلص منهم قبل ما نضيف غيرهم." }, [], now);
+  const what = clean(body).slice(0, 500);
+  enqueueAgentMessage(db, { toUser: actor.id, text: `⏰ تذكير: ${what}`, deliverAfter: due, source: "reminder" }, now);
+  log(db, actor, event, "secretary_reminder", { summary: "جدول تذكيرًا حرًا", dueAt: due }, now);
+  const when = new Intl.DateTimeFormat("ar-JO", { timeZone: "Asia/Amman", weekday: "long", hour: "numeric", minute: "2-digit" }).format(due);
+  return save(db, event, actor, { status: "scheduled", reply: `⏰ تمام، رح أذكرك ${when}: ${what}` }, [], now);
+}
+
 // Search only an exact user-authored question, never model-extracted history or a
 // task catalog. Internal questions are answered through authorized DB reads.
 function privateSearchQuestion(query: string, state: Snapshot): boolean {
@@ -1370,7 +1428,12 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
       if (event.choice) clearOpenChoice(db, gateActor.id);
       else if (gateActor.role !== "admin" && !seen) {
         const open = openChoiceFor(db, gateActor.id, now);
-        if (open) {
+        // Basim, 2026-10-12: «خليه يفهم كل شي ويحلل الكلام». Only what could be
+        // MISTAKEN for a poll answer is still held back (a number, an option's
+        // own label, a bare yes/no/ok) -- a real sentence goes on to be
+        // understood normally, and the poll stays open for a tap.
+        // SECRETARY_OPEN_CHOICE_STRICT=1 restores the old "type nothing" gate.
+        if (open && (process.env.SECRETARY_OPEN_CHOICE_STRICT === "1" || looksLikePollAnswer(event.text, open.choices))) {
           countOpenChoiceNudge(db, gateActor.id);
           return transaction(db, () => save(db, event, gateActor, { status: "clarify",
             reply: "\u261d\ufe0f \u0644\u0633\u0627 \u0641\u064a \u0633\u0624\u0627\u0644 \u0645\u0641\u062a\u0648\u062d \u0639\u0646\u062f\u0643. \u0627\u062e\u062a\u0627\u0631 \u0645\u0646 \u0627\u0644\u0642\u0627\u0626\u0645\u0629 \u2014 \u0627\u0644\u0643\u062a\u0627\u0628\u0629 \u0645\u0627 \u0628\u062a\u0646\u0641\u0639 \u0647\u0644\u0623.\n\u0625\u0630\u0627 \u0645\u0627 \u0628\u062f\u0643 \u0625\u0634\u064a\u060c \u0627\u062e\u062a\u0627\u0631 \u00ab" + CHOICE_CANCEL + "\u00bb.",
@@ -2257,6 +2320,19 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
     clearSecretaryChoices(db, key);
     return save(db, event, freshActor, { status: "cancelled", reply: "ألغيت مسودة المهمة. لم أنشئ مهمة أو أنفّذ طلبًا سابقًا." }, [], now);
   });
+  // Basim, 2026-10-12: Shadi answered a one-off message with «موافق» and the
+  // secretary read it as a task confirmation. A short "تمام/وصلت/موافق" right
+  // after such a message (no preview waiting, no draft) is a reply to THAT
+  // message: acknowledge it, and tell Basim once.
+  if (!pending && !storedIntake && !review && event.groupId === null && event.inputKind !== "voice" && isShortAck(event.text)
+    && !db.prepare("SELECT 1 FROM secretary_task_choice WHERE conversation_key=? AND expires_at>?").get(key, now)
+    && noticeableOutbound(db, actor.id, now)) return transaction(db, () => {
+    const freshActor = actorFor(db, event, config); if (!freshActor || JSON.stringify(freshActor) !== JSON.stringify(actor)) return { status: "denied", reply: "" };
+    const state = stateFor(db, freshActor); const duplicate = lookup(db, event, freshActor, state); if (duplicate) return duplicate;
+    const row = noticeableOutbound(db, freshActor.id, now);
+    if (row) notifyBasimOfReply(db, freshActor, row, event.text, now);
+    return save(db, event, freshActor, { status: "summary", reply: `تمام يا ${clean(freshActor.name, 60)}، وصلني ردك 👍${freshActor.id === "basem" ? "" : " وبلّغت باسم."}` }, [], now);
+  });
   if (!pending && isConfirmationAttempt(event.text)) return transaction(db, () => {
     const freshActor = actorFor(db, event, config); if (!freshActor || JSON.stringify(freshActor) !== JSON.stringify(actor)) return { status: "denied", reply: "" };
     const state = stateFor(db, freshActor); const duplicate = lookup(db, event, freshActor, state); if (duplicate) return duplicate;
@@ -2368,7 +2444,8 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
       query: review?.question || event.text, now,
       allowedScope: new Set(initial.tasks.map(t => "t:" + t.id)) }) : [],
     knowledgeContext: event.groupId === null ? safeKnowledge(db, actor, review?.question || event.text)
-      .slice(0, 3).map(hit => ({ title: hit.title, snippet: hit.snippet.slice(0, 600) })) : [] };
+      .slice(0, 3).map(hit => ({ title: hit.title, snippet: hit.snippet.slice(0, 600) })) : [],
+    recentOutbound: event.groupId === null && !review ? recentOutboundFor(db, actor.id, now) : [] };
   const directCreation = !review && event.inputKind !== "voice" && !event.replyToMessageId ? directTaskCreationIntent(input) : null;
   // Tapping "1" on the menu is not a sentence to be classified -- it is the
   // person pressing "open a task". Sending it to the model produced both
@@ -2436,6 +2513,15 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
   // Independent of the provider validator: criticism never grants a write/replay.
   if (review && !["summary", "details", "report", "help", "chat", "clarify", "search", "message_status"].includes(plan.kind)) {
     plan = emptySecretaryIntent("clarify", "براجع الجواب معك؛ لم أنفّذ أو أعد إرسال أي طلب. اكتب التغيير المطلوب كطلب جديد إذا بدك تنفيذه.");
+  }
+  // Basim, 2026-10-12: a sentence typed while a poll is open now gets read --
+  // but if it turns out to be a task/approval action after all, the poll in
+  // front of them still comes first, exactly as before.
+  if (actor.role !== "admin" && event.groupId === null && !event.choice
+    && !["summary", "details", "report", "help", "chat", "clarify", "search", "message_status", "knowledge", "approvals", "free_reminder", "outbound_reply", "remind"].includes(plan.kind)) {
+    const open = openChoiceFor(db, actor.id, now);
+    if (open) return transaction(db, () => save(db, event, actor, { status: "clarify",
+      reply: "☝️ لسا في سؤال مفتوح عندك. اختار من القائمة أول، وبعدها احكيلي.\nإذا ما بدك إشي، اختار «" + CHOICE_CANCEL + "».", choices: open.choices }, [], now));
   }
   let publicReply: string | null = null;
   if (plan.kind === "search") {
@@ -2617,6 +2703,15 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
       return reminder(db, event, freshActor, state, task.id, due, now);
     }
     if (plan.kind === "nudge") return nudgeOwner(db, event, freshActor, state, String(plan.taskId), now);
+    // Basim, 2026-10-12: a free "ذكرني الساعة 5 ..." with no task behind it.
+    if (plan.kind === "free_reminder") return freeReminder(db, event, freshActor, String(plan.fields.body || ""), String(plan.fields.remindAt || ""), now);
+    // A reply about something the secretary sent this person: answer it, and
+    // tell Basim once when it was one of his one-off messages.
+    if (plan.kind === "outbound_reply") {
+      const row = event.groupId === null ? noticeableOutbound(db, freshActor.id, now) : null;
+      if (row) notifyBasimOfReply(db, freshActor, row, event.text, now);
+      return save(db, event, freshActor, { status: "summary", reply: safeConversationalReply(String(plan.message || "تمام، وصلني ردك 👍")) }, [], now);
+    }
     // Basim: "قصدي ما فتح تصويت" -- give the SAME real tappable choice the
     // exact typed phrase and the tapped legend reminder already get, instead
     // of ever leaving a bare "which task" clarify with no buttons attached.
