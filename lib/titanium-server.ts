@@ -98,13 +98,18 @@ export async function ensureSeedUsers() {
     db().prepare("INSERT OR IGNORE INTO users (id, name, role, active, created_at, updated_at) VALUES ('mohammad-eyad', 'محمد إياد', 'member', 1, ?, ?)").bind(now, now),
       // Owner, 2026-10-11: Malik Al-Hawanieh (warehouse) receives transfer approval
       // requests privately. Number in TEAM_CHAT_CONTACTS_JSON like the others.
-      db().prepare("INSERT OR IGNORE INTO users (id, name, role, active, created_at, updated_at) VALUES ('malik-hawanieh', 'مالك الحوانية', 'member', 1, ?, ?)").bind(now, now),
+      db().prepare("INSERT OR IGNORE INTO users (id, name, role, active, created_at, updated_at) VALUES ('malik-hawanieh', 'مالك الهوانية', 'member', 1, ?, ?)").bind(now, now),
       // Basim, 2026-10-12: every staff member talks to Amin privately (training memos,
       // their own target, questions). Members only; business figures stay behind
       // DATA_READERS in lib/secretary-service.ts. Numbers in TEAM_CHAT_CONTACTS_JSON.
       ...([["ruba", "ربى"], ["taqwa", "تقوى"], ["alreem", "الريم"], ["sanad", "سند"], ["moatasem", "معتصم"],
         ["kholoud", "خلود"], ["malik-maswadah", "مالك مسودة"], ["mohamed-eid", "محمد عيد"], ["baraa", "براء"],
-        ["sara", "سارة"], ["leen", "لين"]] as const).map(([id, name]) =>
+        ["sara", "سارة"], ["leen", "لين"],
+        // Basim, 2026-10-13: new department «العيادات» (Titanium Medical Clinics, above the Naoor
+        // pharmacy, same building). Shahad = department manager (coordinator/supervisor, answers the
+        // clinics' Messenger/Instagram); Dr. Abdallah Gogazeh = staff (GP, clinic director). Members
+        // only -- not DATA_READERS. Numbers in TEAM_CHAT_CONTACTS_JSON; department in staff.json.
+        ["shahad", "شهد أبو عنزة"], ["abdallah", "د. عبد الله قوقزة"]] as const).map(([id, name]) =>
         db().prepare("INSERT OR IGNORE INTO users (id, name, role, active, created_at, updated_at) VALUES (?, ?, 'member', 1, ?, ?)").bind(id, name, now, now)),
   ]);
 }

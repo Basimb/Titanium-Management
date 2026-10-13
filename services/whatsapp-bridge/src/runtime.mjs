@@ -199,6 +199,64 @@ export function createBridgeRuntime({ config, store, auth, makeWASocket, waVersi
         } catch { /* never affects the bridge */ }
       })();
     });
+    // Amin media inbox (Basim, 2026-10-13: «الصور وكل الفيديوهات… اتعلم كل شي»).
+    // Private chats from allowlisted, active numbers only: images, videos, documents
+    // and stickers are saved to ~/.titanium-team-chat/media/<number>/ with an
+    // index.jsonl line (time, sender, type, caption, file). Saves only; never
+    // forwards anything, never touches groups. One short receipt per sender per minute.
+    const mediaReplyAt = new Map();
+    current.ev.on('messages.upsert', event => {
+      void (async () => {
+        if (event.type !== 'notify') return;
+        for (const m of event.messages || []) {
+          try {
+            const remote = m?.key?.remoteJid;
+            if (!remote || m.key.fromMe || remote.endsWith('@g.us') || remote.endsWith('@broadcast') || remote.endsWith('@newsletter')) continue;
+            const sentAt = Number(m.messageTimestamp) * 1000;
+            if (!Number.isFinite(sentAt) || sentAt < activatedAt - 1000 || sentAt < now() - 600_000) continue;
+            let c = m.message || {};
+            for (const wrap of ['ephemeralMessage', 'viewOnceMessage', 'viewOnceMessageV2', 'viewOnceMessageV2Extension', 'documentWithCaptionMessage']) {
+              if (c[wrap]?.message) c = c[wrap].message;
+            }
+            const kinds = [['imageMessage', 'image', 'jpg'], ['videoMessage', 'video', 'mp4'], ['documentMessage', 'document', 'bin'], ['stickerMessage', 'sticker', 'webp']];
+            const hit = kinds.find(([k]) => c[k]);
+            if (!hit) continue;
+            const [field, kind, defExt] = hit;
+            const media = c[field];
+            const number = await resolvePhone(remote, m.key.remoteJidAlt, identity);
+            if (!number || number === config.botNumber || !config.allowedNumbers.has(number) || !await isActiveNumber(number)) continue;
+            const size = Number(media.fileLength) || 0;
+            if (size > 60 * 1024 * 1024) { output.info(`Amin media: too_large from ${number}.`); continue; }
+            const { downloadContentFromMessage } = await import('baileys');
+            const stream = await downloadContentFromMessage(media, kind);
+            const chunks = [];
+            let total = 0;
+            for await (const chunk of stream) { total += chunk.length; if (total > 60 * 1024 * 1024) throw new Error('too_large'); chunks.push(chunk); }
+            const { mkdir, writeFile, appendFile } = await import('node:fs/promises');
+            const { dirname } = await import('node:path');
+            const base = process.env.TITANIUM_TEAM_CHAT_CONFIG ? dirname(process.env.TITANIUM_TEAM_CHAT_CONFIG) : '/home/titani24/.titanium-team-chat';
+            const dir = `${base}/media/${number}`;
+            await mkdir(dir, { recursive: true, mode: 0o700 });
+            const mime = String(media.mimetype || '');
+            const fromName = String(media.fileName || '').match(/\.([a-zA-Z0-9]{1,6})$/)?.[1];
+            const ext = (fromName || mime.split('/')[1]?.split(';')[0]?.replace(/[^a-z0-9]/gi, '') || defExt).slice(0, 6).toLowerCase();
+            const stamp = new Date(sentAt + 3 * 3600_000).toISOString().slice(0, 19).replace(/[-:]/g, '').replace('T', '-');
+            const id = String(m.key.id || '').replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 40);
+            const file = `${dir}/${stamp}_${id}.${ext}`;
+            await writeFile(file, Buffer.concat(chunks), { mode: 0o600 });
+            const caption = typeof media.caption === 'string' ? media.caption.slice(0, 2000) : '';
+            await appendFile(`${base}/media/index.jsonl`, JSON.stringify({ at: new Date(sentAt).toISOString(), number, name: m.pushName || null, kind, mime, bytes: total, caption, fileName: media.fileName || null, file }) + '\n', { mode: 0o600 });
+            output.info(`Amin media: saved ${kind} from ${number}.`);
+            const last = mediaReplyAt.get(number) || 0;
+            if (now() - last > 60_000 && ready && !stopped && current === socket) {
+              mediaReplyAt.set(number, now());
+              const label = kind === 'video' ? 'وصل الفيديو وانحفظ' : kind === 'document' ? 'وصل الملف وانحفظ' : 'وصلت الصورة وانحفظت';
+              await current.sendMessage(remote, { text: `📎 ${label} عندي. إذا في طلب معها اكتبه بكلمتين.`, linkPreview: null });
+            }
+          } catch (error) { output.info(`Amin media: failed (${String(error?.message || 'error').slice(0, 40)}).`); }
+        }
+      })();
+    });
     current.ev.on('creds.update', update => {
       if (stopped || current !== socket) return;
       auth.saveCreds(update).catch(() => stop('auth_persistence_failed'));
