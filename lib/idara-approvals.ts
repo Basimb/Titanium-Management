@@ -13,7 +13,7 @@
  * returns null and goes to the secretary exactly as before.
  */
 import { createHmac } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { appendFileSync, readFileSync } from "node:fs";
 
 const GATEWAY = "https://titanium-pharmacy.com/idara/apvbot.php";
 const KEY_FILE = "/home/titani24/qa_data/idara_botkey.txt";
@@ -83,6 +83,18 @@ function reply(text: string, choices?: Choices): Response {
 export async function idaraIntercept(init: RequestInit, now = Date.now): Promise<Response | null> {
   let body: Body;
   try { body = JSON.parse(String(init.body ?? "")); } catch { return null; }
+  // Amin's approval polls (Basim 2026-10-13: «اي طلب موافقه لاي احد يجي بنظام التصويت»).
+  // Option ids AMN<question>_<Y|N>: the tap is recorded for Amin, nothing is executed here.
+  const am = /^AMN([A-Za-z0-9]{1,60})_([YN])$/.exec(body.choice?.optionId ?? "");
+  if (am && !body.groupId) {
+    const who = userIdFor(String(body.senderNumber ?? ""));
+    if (!who) return reply("ما قدرت أعرف رقمك.");
+    try {
+      appendFileSync("/home/titani24/qa_data/amin/votes.jsonl",
+        JSON.stringify({ at: now(), uid: who, q: am[1], v: am[2] }) + "\n");
+    } catch { return reply("⚠️ ما قدرت أسجّل تصويتك — احكيه لأمين كتابة."); }
+    return reply(am[2] === "Y" ? "✅ تمام، انسجّلت موافقتك. أمين بكمّل." : "❌ تمام، انسجّل الرفض. ما رح يتنفّذ إشي.");
+  }
   const want = intent(body);
   if (!want) return null;
   const uid = userIdFor(String(body.senderNumber ?? ""));
