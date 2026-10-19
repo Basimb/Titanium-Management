@@ -639,11 +639,16 @@ export async function openOdooSession(config: OdooConfig, fetcher: Fetcher = fet
         [[["sale_ok", "=", true], ["active", "=", true], ["qty_available", ">", 0]], ["name", "qty_available", "barcode", "standard_price"]],
         { order: "id asc" });
 
+      // Basim 2026-10-16: the loose-piece variant (attribute "تجزئة") stays out of every
+      // pack reckoning -- its stock and sales are counted in pieces, not boxes.
+      const splitRows = await page("product.product", "search_read",
+        [[["product_template_attribute_value_ids.name", "ilike", "تجزئ"]], ["id"]], { order: "id asc" });
+      const split = new Set<number>(splitRows.map(row => Number(row.id)));
       const rows: ShortageRow[] = stockRows.map(row => ({
         id: Number(row.id), name: String(row.name ?? "?"),
         barcode: typeof row.barcode === "string" && row.barcode.trim() ? row.barcode.trim() : null,
         cost: Number(row.standard_price), qty: Number(row.qty_available),
-      })).filter(row => row.qty > 0);
+      })).filter(row => row.qty > 0 && !split.has(row.id));
       return rankShortages(rows, sold, windowDays, maxDaysLeft).slice(0, limit);
     },
     // Basim, 2026-09-20, after seeing the company-wide list: "بدي كل النواقص
@@ -702,6 +707,10 @@ export async function openOdooSession(config: OdooConfig, fetcher: Fetcher = fet
         }
       }
 
+      // Basim 2026-10-16: loose-piece variants (تجزئة) are not part of branch shortages.
+      const splitRows = await page("product.product", "search_read",
+        [[["product_template_attribute_value_ids.name", "ilike", "تجزئ"]], ["id"]], { order: "id asc" });
+      const split = new Set<number>(splitRows.map(row => Number(row.id)));
       const out: BranchShortages[] = [];
       for (const [locationId, branch] of branches) {
         const stock = stockByBranch.get(locationId) ?? new Map();
@@ -709,7 +718,7 @@ export async function openOdooSession(config: OdooConfig, fetcher: Fetcher = fet
         const rows: ShortageRow[] = [];
         for (const [productId, qty] of stock) {
           const info = meta.get(productId);
-          if (!info) continue;
+          if (!info || split.has(productId)) continue;
           rows.push({ id: productId, name: info.name, barcode: info.barcode, cost: info.cost, qty });
         }
         const items = rankShortages(rows, sold, windowDays, maxDaysLeft);
@@ -767,8 +776,12 @@ export async function openOdooSession(config: OdooConfig, fetcher: Fetcher = fet
         }
         picked.set(locationId, rows);
       }
+      // Basim 2026-10-16: no count task on a loose-piece variant (تجزئة).
+      const splitRows = await page("product.product", "search_read",
+        [[["product_template_attribute_value_ids.name", "ilike", "تجزئ"]], ["id"]], { order: "id asc" });
+      const split = new Set<number>(splitRows.map(row => Number(row.id)));
       const meta = new Map<number, { name: string; barcode: string | null }>();
-      const all = [...ids];
+      const all = [...ids].filter(id => !split.has(id));
       for (let start = 0; start < all.length; start += 1000) {
         const rows = await page("product.product", "search_read",
           [[["id", "in", all.slice(start, start + 1000)], ["sale_ok", "=", true], ["active", "=", true]], ["name", "barcode"]], { order: "id asc" });

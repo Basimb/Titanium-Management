@@ -5,6 +5,12 @@
  */
 export const CONVERSATION_NO_CHANGE_REPLY = "للتوضيح: ما نفّذت أي تغيير على المهام أو المشاريع في هذا الرد. احكيلي التغيير المطلوب حتى أراجعه معك.";
 
+/** Exact cancellation of a pending conversation only; never a task deletion command. */
+export function isConversationCancellation(text: string): boolean {
+  const value = text.normalize('NFKC').replace(/[\u064b-\u065f\u0670\u0640]/g, '').replace(/[أإآ]/g, 'ا').replace(/ة/g, 'ه').replace(/[.!،؟?]+$/u, '').replace(/\s+/g, ' ').trim().toLowerCase();
+  return /^(?:لا|لا شكرا|الغ|الغي|اللغي|الغيها|الغيه|اللغيها|الغاء|تراجع|وقف|وقفه|وقفها|اوقف|اوقفه|اوقفها|بلاش|cancel|no)(?: (?:الطلب|هالطلب|المسوده|مسوده المهمه|طلب المهمه))?$/.test(value);
+}
+
 function normalized(value: string): string {
   return value.normalize("NFKC").replace(/[\u064b-\u065f\u0670\u0640]/g, "")
     .replace(/[أإآ]/g, "ا").replace(/ى/g, "ي").toLowerCase();
@@ -58,7 +64,11 @@ export function isDiscussionOnlyRequest(text: string): boolean {
   if (/^لو سمحت(?:\s|$)/u.test(visible)) return false; // Courtesy, not a hypothetical.
   // A separate explicit instruction after a question must still be planned.
   if (/[?؟;؛\n]\s*(?:و)?(?:سجل|اضف|انشئ|احذف|عدل|غير|اعتمد|انقل|ارجع|الغ|ارشف|ذكرني|استلم|ارسل|نفذ)(?:\s|$)/u.test(visible)) return false;
+  // A work problem ending in a request for advice is not permission to log or change it.
+  if (/(?:شو اعمل|كيف اتصرف|من وين ابدا)\s*[?؟.!]*$/u.test(visible)
+    && !/(?:^|\s)(?:سجل|اضف|انشئ|احذف|عدل|اعتمد|انقل|ارسل|نفذ)(?:\s|$)/u.test(visible)) return true;
   if (/^(?:كيف|شو رايك|ما رايك|لو|ماذا لو|هل يمكن|هل ممكن|هل يجوز|هل اقدر|هل استطيع|ممكن تشرح|اشرح لي|اشرحلي|وضح لي|فهمني|بدي افهم|اريد ان افهم)(?:\s|[?؟،,:]|$)/u.test(visible)) return true;
   return /^(?:اكتب(?: لي|لي)?|صيغ(?: لي|لي)?|جهز(?: لي|لي)?)\s+(?:صياغة|مسودة|نص|مثال|رسالة|رد)(?:\s|[:：]|$)/u.test(visible)
     || /^(?:مثال|صياغة مقترحة|مسودة)\s*[:：]/u.test(visible);
 }
+

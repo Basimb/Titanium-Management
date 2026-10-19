@@ -21,7 +21,7 @@ test('conversational provider keeps task planner schema and untrusted context bo
   // Three kinds were removed with projects (projects, project_close_request,
   // project_draft) and one added back in their place (tasks_draft).
   // ...and two added on 2026-10-12 (free_reminder, outbound_reply).
-  assert.equal(body.tools.length,27);
+  assert.equal(body.tools.length,30);
   assert.ok(body.tools.every(tool=>tool.type==='function' && tool.function.strict===true));
   assert.equal(body.tools.find(tool=>tool.function.name==='chat').function.parameters.required.includes('message'),true);
   assert.equal(body.messages.length,2);

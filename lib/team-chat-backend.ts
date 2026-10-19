@@ -14,6 +14,7 @@ import { handleTeamChatRequest, teamChatConfigFromEnv, type TeamChatConfig, type
 import { chatDatabase, ensureSeedUsers } from "./titanium-server.ts";
 import { readTeamChatSettings } from "./team-chat-settings.ts";
 import { handleSecretaryEvent } from "./secretary-service.ts";
+import {serverWorkReady} from './amin-server-work.ts';
 import { inferSecretaryIntent, searchSecretaryWeb } from "./secretary-intent.ts";
 import { answerOdooQuestion, type OdooQuestionMatch } from "./odoo-questions.ts";
 import { answerClinicQuestion, type ClinicQuestionMatch } from "./clinic-questions.ts";
@@ -30,6 +31,8 @@ export async function handleTeamChatPost(request: Request): Promise<Response> {
       config: teamChatConfigFromEnv(settings), getDatabase: chatDatabase,
       ...(settings.SECRETARY_ENABLED === "1" ? { secretary: (database: ReturnType<typeof chatDatabase>, event: TeamChatEnvelope, config: TeamChatConfig) => handleSecretaryEvent(database, event, config, {
         infer: input => inferSecretaryIntent(input, { apiKey: settings.OPENAI_API_KEY, model: settings.OPENAI_MODEL }),
+        ownerDeliveryEnabled: settings.SECRETARY_FOLLOWUP_ENABLED === "1",
+        serverWorkEnabled: settings.SECRETARY_FOLLOWUP_ENABLED === '1' && serverWorkReady() && teamChatConfigFromEnv(settings).contacts.some(c=>c.userId==='basem'),
         ...(settings.SECRETARY_WEB_ENABLED === "1" ? { search: (query: string) => searchSecretaryWeb(query, { apiKey: settings.OPENAI_API_KEY, model: settings.OPENAI_SEARCH_MODEL }) } : {}),
         // Live questions about the pharmacy's own system. Every one of the four
         // connection settings must be present -- a half-filled config can never

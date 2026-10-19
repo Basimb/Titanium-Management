@@ -1,4 +1,6 @@
 import path from 'node:path';
+import { installSessionLogSafety } from './log-safety.mjs';
+installSessionLogSafety();
 import { fileURLToPath } from 'node:url';
 import { loadConfig } from './config.mjs';
 import { openStore, createAuthState } from './store.mjs';
@@ -86,6 +88,50 @@ async function main() {
       agentFollowups = createFollowupJobs({ db: jobsDb, config: () => ({
         enabled: process.env.SECRETARY_FOLLOWUP_ENABLED === '1', contacts,
         groupId: [...config.allowedGroups][0] ?? null, publicUrl: process.env.TITANIUM_PUBLIC_URL || undefined }) });
+      // Basim: Amin observes changes by staff and assistants, not only his own actions.
+      try {
+        const {createAminServerWorker,serverWorkInstalled,planAminServerStep,localAminServerRpc}=await import('../../../lib/amin-server-work.ts');
+        const {readTeamChatSettings}=await import('../../../lib/team-chat-settings.ts');
+        if(serverWorkInstalled()){
+          const hostCatalog=await localAminServerRpc('tools/list',{});
+          if(!hostCatalog?.ok||!Array.isArray(hostCatalog.result?.tools)||!hostCatalog.result.tools.some(t=>t.name==='file_hash'))throw Error('HOST_TOOLS_UNAVAILABLE');
+          const serverWorker=createAminServerWorker({db:jobsDb,
+            enabled:()=>process.env.SECRETARY_FOLLOWUP_ENABLED==='1' && contacts.some(c=>c.userId==='basem'),
+            plan:(messages,tools)=>{const settings=readTeamChatSettings();if(!settings.OPENAI_API_KEY)throw Error('MODEL_UNAVAILABLE');return planAminServerStep(messages,tools,{apiKey:settings.OPENAI_API_KEY,model:settings.OPENAI_MODEL});}});
+          const serverTimer=setInterval(()=>{void serverWorker.tick();},3000);serverTimer.unref();
+          const stopServer=()=>{clearInterval(serverTimer);serverWorker.stop();};process.once('SIGTERM',stopServer);process.once('SIGINT',stopServer);
+          console.info('Amin server work: ready; ownerOnly=true; hostToolCount='+hostCatalog.result.tools.length+'; writeApproval=per-action.');
+        }
+      }catch{console.warn('Amin server work: initialization_failed; existing WhatsApp functions continue.');}
+      // This is a scoped observer, never a claim that all direct access is gated.
+      try {
+        const { createAminChangeMonitor } = await import('../../../lib/amin-change-monitor.ts');
+        const repository = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
+        const monitor = createAminChangeMonitor({ db: jobsDb,
+          enabled: () => process.env.SECRETARY_FOLLOWUP_ENABLED === '1' && contacts.some(c => c.userId === 'basem'),
+          roots: [path.join(repository,'lib'),path.join(repository,'services/whatsapp-bridge/src'),path.join(repository,'scripts'),
+            path.resolve(repository,'../../public_html/idara'),path.resolve(repository,'../../public_html/amin')] });
+        const coverage=monitor.coverage();
+        console.info('Amin change monitor: ready; selectedSourceRoots='+coverage.paths.length+'; unavailableRoots='+coverage.unavailable.length+'; scope=management-audit-and-selected-files; universalGate=false.');
+        const monitorTimer=setInterval(()=>{try{monitor.tick();}catch{console.warn('Amin change monitor: tick_failed; no unverified report marked as sent.');}},30_000);
+        monitorTimer.unref();
+        const stopMonitor=()=>{clearInterval(monitorTimer);monitor.stop();};
+        process.once('SIGTERM',stopMonitor);process.once('SIGINT',stopMonitor);
+      } catch { console.warn('Amin change monitor: initialization_failed; other bridge functions continue.'); }
+      // Basim approved read-only product-card change notifications, excluding sales.
+      try {
+        const {createProductMonitor,createProductReader}=await import('../../../lib/amin-odoo-product-monitor.ts');
+        const {enqueueAgentMessage}=await import('../../../lib/agent-followups.ts');
+        const productMonitor=createProductMonitor({db:jobsDb,
+          enabled:()=>process.env.SECRETARY_FOLLOWUP_ENABLED==='1' && contacts.some(c=>c.userId==='basem') && !!process.env.ODOO_URL && !!process.env.ODOO_API_KEY,
+          read:createProductReader(()=>({url:process.env.ODOO_URL||'',db:process.env.ODOO_DB||'',username:process.env.ODOO_USERNAME||'',apiKey:process.env.ODOO_API_KEY||''})),
+          enqueue:(text,at)=>enqueueAgentMessage(jobsDb,{toUser:'basem',source:'amin_odoo_products',text},at),
+          statusPath:'/home/titani24/qa_data/amin/learning/odoo-product-monitor-status.json'});
+        const productTimer=setInterval(()=>{void productMonitor.tick();},10000);productTimer.unref();
+        void productMonitor.tick();
+        const stopProducts=()=>{clearInterval(productTimer);productMonitor.stop();};
+        process.once('SIGTERM',stopProducts);process.once('SIGINT',stopProducts);
+      }catch{console.warn('Amin product monitor: initialization_failed; other bridge functions continue.');}
       const { createOdooReportJobs } = await import('../../../lib/odoo-reports.ts');
       odooReportJobs = createOdooReportJobs({ db: jobsDb, config: () => ({
         enabled: process.env.ODOO_REPORT_ENABLED === '1' && !!process.env.ODOO_URL && !!process.env.ODOO_DB

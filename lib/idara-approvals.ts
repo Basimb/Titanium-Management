@@ -85,6 +85,17 @@ export async function idaraIntercept(init: RequestInit, now = Date.now): Promise
   try { body = JSON.parse(String(init.body ?? "")); } catch { return null; }
   // Amin's approval polls (Basim 2026-10-13: «اي طلب موافقه لاي احد يجي بنظام التصويت»).
   // Option ids AMN<question>_<Y|N>: the tap is recorded for Amin, nothing is executed here.
+  // Training arena daily question (Basim 2026-10-15): option ids TRN<n><A-D>. Recorded only; IDARA grades it.
+  const tr = /^TRN(\d{1,9})([ABCD])$/.exec(body.choice?.optionId ?? "");
+  if (tr && !body.groupId) {
+    const who = userIdFor(String(body.senderNumber ?? ""));
+    if (!who) return reply("ما قدرت أعرف رقمك.");
+    try {
+      appendFileSync("/home/titani24/qa_data/idara_training/votes.jsonl",
+        JSON.stringify({ at: now(), uid: who, n: Number(tr[1]), v: tr[2] }) + "\n");
+    } catch { return reply("⚠️ ما قدرت أسجّل جوابك — جرّب كمان مرة."); }
+    return reply("✅ وصل جوابك. النتيجة والشرح بيوصلوك بعد شوي.");
+  }
   const am = /^AMN([A-Za-z0-9]{1,60})_([YN])$/.exec(body.choice?.optionId ?? "");
   if (am && !body.groupId) {
     const who = userIdFor(String(body.senderNumber ?? ""));

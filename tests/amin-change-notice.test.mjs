@@ -1,0 +1,6 @@
+import test from 'node:test';import assert from 'node:assert/strict';
+import {formatAminChangeNotice} from '../lib/amin-change-notice.ts';
+test('empty batch produces no periodic notification',()=>assert.equal(formatAminChangeNotice([],[],Date.now()),''));
+test('read or unknown events never become a generic update',()=>assert.equal(formatAminChangeNotice([{actor_user_id:'staff',actor_name:'موظف',action:'read_file',entity_type:'system',entity_id:'x'}],[],Date.now()),''));
+test('recorded mutation is concise and attributed',()=>{const text=formatAminChangeNotice([{actor_user_id:'staff-1',actor_name:'ليث',action:'edit',entity_type:'task',entity_id:'x',details:JSON.stringify({summary:'تغيير موعد الجرد إلى الخميس'})}],[],Date.now());assert.match(text,/تغيير موعد الجرد إلى الخميس/);assert.match(text,/المسؤول: ليث/);assert.ok(!/لم أتحقق|رصدت تعديلًا/.test(text));assert.ok(!text.includes('staff-1'));});
+test('verified software change carries description and registered responsibility',()=>{const text=formatAminChangeNotice([],[{id:'1',summary:'إيقاف رسائل الفحص والتنبيهات المبهمة',actor:{id:'chat-session',name:'ChatGPT'},files:[]}],Date.now());assert.match(text,/إيقاف رسائل الفحص/);assert.match(text,/المسؤول المسجّل: ChatGPT/);assert.ok(text.length<350);assert.ok(!text.includes('chat-session'));});

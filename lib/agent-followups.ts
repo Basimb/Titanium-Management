@@ -6,6 +6,7 @@
  * Uses the same deliverNext(send) contract as secretary-jobs so the bridge drains it identically.
  */
 import { randomBytes } from "node:crypto";
+import { readFileSync } from "node:fs";
 import type { DatabaseSync } from "node:sqlite";
 import { formatPendingList, pendingApprovalsPoll, staleApprovals, markNudged } from "./approvals.ts";
 import { getManagementSnapshot, migrateManagementActions, type ManagementActor, type ManagementTask } from "./management-actions.ts";
@@ -222,7 +223,11 @@ export function planFollowups(db: DatabaseSync, config: FollowupConfig, at: numb
   // 8pm local, every day) -- deliberately computed and returned BEFORE the
   // work-hours gate below, since both slots sit outside the default 9-18
   // window that gate enforces for the reactive nudges further down.
-  const slot = hour === 8 ? "morning" : hour === 20 ? "evening" : null;
+  // باسم ١٧/١٠/٢٠٢٦ (طلب مؤقت): تذكير المهام (٨ الصبح و٨ المسا) بيطلع يوم الأحد بس، طول ما الملف
+  // qa_data/amin/task-reminders-sunday-only.json موجود. بتشيل الملف ← بيرجع كل يوم.
+  const sundayOnly = (() => { try { readFileSync("/home/titani24/qa_data/amin/task-reminders-sunday-only.json", "utf8"); return true; } catch { return false; } })();
+  const isSunday = new Date(at + offset * 60_000).getUTCDay() === 0;
+  const slot = (sundayOnly && !isSunday) ? null : hour === 8 ? "morning" : hour === 20 ? "evening" : null;
   if (slot) {
     const kind = slot === "morning" ? "auto_reminder_morning" : "auto_reminder_evening";
     for (const [userId, tasks] of autoReminderGroups(snapshot, userIdByName)) {

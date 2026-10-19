@@ -109,7 +109,10 @@ export async function ensureSeedUsers() {
         // pharmacy, same building). Shahad = department manager (coordinator/supervisor, answers the
         // clinics' Messenger/Instagram); Dr. Abdallah Gogazeh = staff (GP, clinic director). Members
         // only -- not DATA_READERS. Numbers in TEAM_CHAT_CONTACTS_JSON; department in staff.json.
-        ["shahad", "شهد أبو عنزة"], ["abdallah", "د. عبد الله قوقزة"]] as const).map(([id, name]) =>
+        ["shahad", "شهد أبو عنزة"], ["abdallah", "د. عبد الله قوقزة"],
+        // Basim, 2026-10-19: the pharmacy landline (96265727333) is a member of the staff group
+        // «Titanium»; it must be a known active contact or the group is refused. Member only.
+        ["pharmacy-landline", "هاتف الصيدلية"]] as const).map(([id, name]) =>
         db().prepare("INSERT OR IGNORE INTO users (id, name, role, active, created_at, updated_at) VALUES (?, ?, 'member', 1, ?, ?)").bind(id, name, now, now)),
   ]);
 }
