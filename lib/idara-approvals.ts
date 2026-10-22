@@ -102,7 +102,8 @@ export async function idaraIntercept(init: RequestInit, now = Date.now): Promise
     if (!who) return reply("ما قدرت أعرف رقمك.");
     try {
       appendFileSync("/home/titani24/qa_data/amin/votes.jsonl",
-        JSON.stringify({ at: now(), uid: who, q: am[1], v: am[2] }) + "\n");
+        // src:"wa" marks a vote that really came from a WhatsApp poll tap (Basim 22/10: approvals count only these).
+        JSON.stringify({ at: now(), uid: who, q: am[1], v: am[2], src: "wa" }) + "\n");
     } catch { return reply("⚠️ ما قدرت أسجّل تصويتك — احكيه لأمين كتابة."); }
     return reply(am[2] === "Y" ? "✅ تمام، انسجّلت موافقتك. أمين بكمّل." : "❌ تمام، انسجّل الرفض. ما رح يتنفّذ إشي.");
   }
