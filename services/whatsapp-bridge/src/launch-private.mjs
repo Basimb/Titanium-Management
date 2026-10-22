@@ -287,10 +287,20 @@ export async function launchPrivate({ env = process.env, args = process.argv.sli
       writeMarker(marker, fs, now);
       throw new Error();
     }
-    let requestedSignal;
+    // Basim 22/10/2026 (bridge watchdog): a child that ignored a shutdown signal kept
+    // bridge.lock held, so the minute cron could not restart it and the bridge stayed
+    // down until someone killed it by hand. Force it after 20s and count that as a clean stop.
+    let requestedSignal, forceTimer, forced = false;
     const handlers = new Map(['SIGTERM', 'SIGINT'].map(signal => [signal, () => {
       requestedSignal = signal;
       try { child.kill(signal); } catch { report('Unable to forward shutdown; waiting for the bridge child to exit.'); }
+      if (!forceTimer) {
+        forceTimer = setTimeout(() => {
+          forced = true;
+          report('Bridge child still running after shutdown signal; forcing it to stop.');
+          try { child.kill('SIGKILL'); } catch {}
+        }, 20_000);
+      }
     }]));
     for (const [signal, handler] of handlers) signalSource.on(signal, handler);
     const result = await new Promise(resolve => {
@@ -298,13 +308,14 @@ export async function launchPrivate({ env = process.env, args = process.argv.sli
       const finish = code => {
         if (finished) return;
         finished = true;
+        if (forceTimer) clearTimeout(forceTimer);
         for (const [signal, handler] of handlers) signalSource.removeListener(signal, handler);
         resolve(code);
       };
       child.once('error', () => finish(78));
       child.once('close', (code, signal) => {
         if (Number.isInteger(code)) finish(code);
-        else finish(requestedSignal && signal === requestedSignal ? 0 : 78);
+        else finish(requestedSignal && (signal === requestedSignal || (forced && signal === 'SIGKILL')) ? 0 : 78);
       });
     });
     if (result === 78) writeMarker(marker, fs, now);
