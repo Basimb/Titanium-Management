@@ -7,6 +7,7 @@ import { secretaryBusinessKnowledge } from "./secretary-business-knowledge.ts";
 import { secretaryOdooKnowledge } from "./secretary-odoo-knowledge.ts";
 import { secretaryAttachmentContext, secretaryAssetContext } from "./secretary-source-context.ts";
 import { createHash, randomBytes } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { matchOdooQuestion, looksLikeOdooQuestion, type OdooQuestionMatch } from "./odoo-questions.ts";
 import { matchClinicQuestion, type ClinicQuestionMatch } from "./clinic-questions.ts";
 import type { DatabaseSync } from "node:sqlite";
@@ -533,6 +534,21 @@ function actorFor(db: DatabaseSync, event: Event, config: TeamChatConfig) {
 const DATA_READERS = new Set(["basem", "khaled", "ayman", "shadi", "mohammad-eyad", "malik-hawanieh"]);
 function mayReadData(actor: ChatUser): boolean { return actor.role === "admin" || DATA_READERS.has(actor.id); }
 const DATA_DENIED = "هاي المعلومة عند الإدارة 🙏 إذا بتحتاجها لشغلك، احكي لمسؤولك.";
+// Basim 23/10/2026: العدّ الدوري (/jard/) أعمى. اللي وصله رابط جرد آخر 24 ساعة (outbox_sent jard_link_*)
+// ما بياخد كمية السيستم أبداً -- ولا حتى لو من DATA_READERS -- وبياخد جواب واضح بدل «احكي لمسؤولك».
+const JARD_BLIND = "هاد عدّ أعمى 🙏 ما بنقدر نعطيك الكمية اللي عالسيستم. اكتب اللي شايفه عالرف بعينك بس، وإذا في إشي غريب اكتبه بالملاحظة تحت الصنف.";
+function inJardCount(actor: ChatUser): boolean {
+  if (actor.id === "basem") return false;
+  try {
+    const sent = JSON.parse(readFileSync("/home/titani24/qa_data/amin/outbox_sent.json", "utf8")) as Record<string, { r?: { to?: string }; at?: string }>;
+    const since = Date.now() - 24 * 3600 * 1000;
+    for (const [k, v] of Object.entries(sent)) {
+      if (!k.startsWith("jard_link_") || v?.r?.to !== actor.id) continue;
+      if (Date.parse(String(v.at || "").replace(" ", "T") + "+03:00") > since) return true;
+    }
+  } catch { /* الملف مش موجود أو خربان: ما في جرد مفتوح */ }
+  return false;
+}
 function stateFor(db: DatabaseSync, actor: ChatUser): Snapshot { return getManagementSnapshot(db, actor) as unknown as Snapshot; }
 // Same base filter + overdue/pending-first ordering as the displayed task
 // list (readReply's "ordered" array) so a task's position number is always
@@ -1517,6 +1533,7 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
         const state = stateFor(db, asking);
         const duplicate = lookup(db, event, asking, state);
         if (duplicate) return duplicate;
+        if (inJardCount(asking)) return transaction(db, () => save(db, event, asking, { status: "summary", reply: JARD_BLIND }, [], now));
         if (!mayReadData(asking)) return transaction(db, () => save(db, event, asking, { status: "summary", reply: DATA_DENIED }, [], now));
         try {
           const answer = await dependencies.askOdoo(question, now);
@@ -1535,6 +1552,7 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
         const state = stateFor(db, asking);
         const duplicate = lookup(db, event, asking, state);
         if (duplicate) return duplicate;
+        if (inJardCount(asking)) return transaction(db, () => save(db, event, asking, { status: "summary", reply: JARD_BLIND }, [], now));
         if (!mayReadData(asking)) return transaction(db, () => save(db, event, asking, { status: "summary", reply: DATA_DENIED }, [], now));
         // A router that is slow, unreachable or unsure returns nothing, and the
         // message carries on to the ordinary secretary exactly as before.
