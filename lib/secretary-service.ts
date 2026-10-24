@@ -1350,11 +1350,13 @@ export function looksLikePollAnswer(text: unknown, choices: SecretaryChoices): b
   if (/(?:خلص|انهي|انهاء|انجز|استلم|سكر|اغلق|اقفل|سلم|حول|تحويل|مدد|تمديد|بدات|ابدا|اعتمد|مهمه|مهام|رقم)/u.test(value)) return true;
   return choices.options.some(option => { const label = pollNorm(option.label); return !!label && (value === label || (label.length >= 4 && value.length <= label.length + 6 && value.includes(label))); });
 }
-const OUTBOUND_WINDOW_MS = 48 * 3600_000;
+// Basim, 2026-10-24: «اه اعملها صح» -- was 48h / last 3; a jard link, a
+// reminder and a commission message on the same day pushed the older one out.
+const OUTBOUND_WINDOW_MS = 7 * 24 * 3600_000;
 type OutboundRow = { id: string; text: string; sent_at: number; source: string | null; choices_json: string | null; reply_noticed_at: number | null };
 function recentOutboundRows(db: DatabaseSync, userId: string, now: number): OutboundRow[] {
   try {
-    return db.prepare("SELECT id,text,sent_at,source,choices_json,reply_noticed_at FROM agent_outbox WHERE to_user=? AND state='sent' AND sent_at>? ORDER BY sent_at DESC LIMIT 3")
+    return db.prepare("SELECT id,text,sent_at,source,choices_json,reply_noticed_at FROM agent_outbox WHERE to_user=? AND state='sent' AND sent_at>? ORDER BY sent_at DESC LIMIT 10")
       .all(userId, now - OUTBOUND_WINDOW_MS) as OutboundRow[];
   } catch { return []; }
 }
