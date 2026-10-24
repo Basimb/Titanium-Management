@@ -2243,7 +2243,16 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
     }
   });
   const quote = event.replyToMessageId ? db.prepare("SELECT event_key,original_text,result_json,scope_json,created_at,rowid AS sequence FROM secretary_events WHERE conversation_key=? AND response_message_id=? ORDER BY created_at DESC,rowid DESC LIMIT 1").get(key, event.replyToMessageId) as { event_key: string; original_text: string; result_json: string; scope_json: string; created_at: number; sequence: number } | undefined : undefined;
-  if (event.replyToMessageId && (!quote || !scopeAllowed(JSON.parse(quote.scope_json), initial))) return transaction(db, () => save(db, event, actor, { status: "clarify", reply: "ما قدرت أربط هذا الرد بطلب متاح إلك. اذكر المهمة والتغيير المطلوب بدل الرد على رسالة قديمة أو لشخص آخر." }, [], now));
+  // Basim, 2026-10-24 («اتفاعل مع الموظفين صح»): a quoted reply to a message
+  // that is not one of the secretary's direct replies -- a jard link, an IDARA
+  // or outbox message, a reminder (agent_outbox keeps no WhatsApp id) -- used
+  // to get a dry refusal here before the model ever read it. Kholoud quoted
+  // her jard link («١٥ صنف باعثلي اجرد مش ٢٠») and got exactly that. Now an
+  // unknown quote is read like an ordinary message: the model still gets the
+  // recent outbound messages (recentOutbound, 48h) and the history, so it can
+  // understand what she is answering. A known quote whose task is no longer
+  // visible to this person is still not used, with a human question instead.
+  if (event.replyToMessageId && quote && !scopeAllowed(JSON.parse(quote.scope_json), initial)) return transaction(db, () => save(db, event, actor, { status: "clarify", reply: "أهلين، ما فهمت عليك منيح — بتحكي عن أي إشي بالضبط؟" }, [], now));
   const historyRows = conversationHistory(db, key, initial, now);
   const focusResult = quote ? JSON.parse(quote.result_json) : historyRows.length ? JSON.parse(historyRows[historyRows.length - 1].result_json) : null;
   const focusedTask = initial.tasks.find(task => task.id === focusResult?.taskId);
