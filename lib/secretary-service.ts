@@ -14,7 +14,7 @@ import type { DatabaseSync } from "node:sqlite";
 import { executeManagementAction, getManagementSnapshot, migrateManagementActions, ManagementActionError, ACTION_KEYS, type ManagementActor, type ManagementCommand, type ManagementResult } from "./management-actions.ts";
 import { resolveChatUser, normalizeContactNumber, type ChatUser } from "./team-chat-policy.ts";
 import type { TeamChatConfig, TeamChatEnvelope } from "./team-chat-gateway.ts";
-import { directTaskCreationIntent, emptySecretaryIntent, validateSecretaryIntent, type SecretaryIntent, type SecretaryModelInput } from "./secretary-intent.ts";
+import { directTaskCreationIntent, emptySecretaryIntent, validateSecretaryIntent, OWNER_MESSAGE_CONFIRM, type SecretaryIntent, type SecretaryModelInput } from "./secretary-intent.ts";
 import { priorityTaskQuery, type PriorityTaskQuery } from "./secretary-priority-query.ts";
 import { AGENT_KINDS } from "./secretary-intent.ts";
 import { applyDecision, createTasks, handleAgentIntent, type AgentResult, type TaskDraftTask } from "./secretary-agent.ts";
@@ -630,7 +630,7 @@ function lookup(db: DatabaseSync, event: Event, actor: ChatUser, state: Snapshot
   // now offered on an employee's own "\ud83d\udd50 \u0628\u062f\u064a \u062a\u0645\u062f\u064a\u062f" tap, not just on Basim's,
   // so replaying that reply must not be denied for the employee who asked.
   const taskPoll = typeof result.choices?.id === "string"
-    && (result.choices.id.startsWith("TSKQ") || result.choices.id.startsWith("EXTQ"));
+    && (result.choices.id.startsWith("TSKQ") || result.choices.id.startsWith("EXTQ") || result.choices.id.startsWith("CFM"));
   if (result.choices && (taskPoll ? (actor.active !== 1 || event.groupId !== null) : (actor.id !== "basem" || actor.role !== "admin" || actor.active !== 1 || event.groupId !== null))) return { status: "denied", reply: "" };
   if (result.status === "confirmation" || (result.status === "clarify" && isConfirmationAttempt(event.text))) {
     const lastInstruction = String(result.reply).lastIndexOf("«موافق");
@@ -1364,6 +1364,42 @@ function recentOutboundFor(db: DatabaseSync, userId: string, now: number): Secre
   const fmt = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Amman", dateStyle: "short", timeStyle: "short", hour12: false });
   return recentOutboundRows(db, userId, now).map(row => ({ text: String(row.text).slice(0, 600), sentAt: fmt.format(row.sent_at) }));
 }
+
+// 25/10/2026، محمد إياد: أمين بعتله 18:00 «تذكير بالأربع كروت» مرقّمة 1-4 ورد «امين ٤ و ٣ حولهم على شادي»،
+// والموديل قرأ ٣ و٤ أرقام مهام (ownershipCandidates مرقّمة بالـ input). الرقم بعد قائمة بعتها أمين = بند منها.
+const LIST_LINE = /^\s*‏?\*?⁦?([0-9]{1,2})⁩?\s*[.)\-–]\*?\s+(.+?)\s*$/u;
+const asciiDigits = (text: string) => text.replace(/[٠-٩]/g, d => String(d.charCodeAt(0) - 0x660)).replace(/[۰-۹]/g, d => String(d.charCodeAt(0) - 0x6f0));
+function numberedItems(text: string): Array<{ n: number; text: string }> {
+  const items: Array<{ n: number; text: string }> = [];
+  for (const line of asciiDigits(String(text ?? "")).split("\n")) { const m = LIST_LINE.exec(line); if (m) items.push({ n: Number(m[1]), text: clean(m[2], 160).replace(/\*/g, "") }); }
+  return items.length >= 2 && items.every((item, i) => item.n === i + 1) ? items : [];
+}
+const ORDINAL_WORDS: Record<string, number> = { "الاول": 1, "الاولي": 1, "الثاني": 2, "الثانيه": 2, "التاني": 2, "التانيه": 2, "الثالث": 3, "الثالثه": 3, "التالت": 3, "التالته": 3, "الرابع": 4, "الرابعه": 4, "الخامس": 5, "الخامسه": 5, "السادس": 6, "السادسه": 6, "السابع": 7, "السابعه": 7, "الثامن": 8, "الثامنه": 8, "التاسع": 9, "التاسعه": 9, "العاشر": 10, "العاشره": 10 };
+function referencedNumbers(text: string): number[] {
+  const value = asciiDigits(text.normalize("NFKC")).replace(/[أإآ]/g, "ا").replace(/ى/g, "ي").replace(/ة/g, "ه");
+  const found = [...value.matchAll(/(?<![0-9.,/#*])([0-9]{1,2})(?![0-9.,%/*])/g)].map(m => Number(m[1]));
+  for (const word of value.split(/[^\p{L}]+/u)) if (ORDINAL_WORDS[word]) found.push(ORDINAL_WORDS[word]);
+  return [...new Set(found)].filter(n => n >= 1);
+}
+function outboundListReference(db: DatabaseSync, userId: string, conversationKey: string, text: string, now: number): NonNullable<SecretaryModelInput["outboundListReference"]> | null {
+  const mentioned = referencedNumbers(text);
+  if (!mentioned.length || /مهم[ةه]|مهام/u.test(text)) return null;
+  const row = recentOutboundRows(db, userId, now).find(r => numberedItems(r.text).length);
+  if (!row) return null;
+  // A numbered list Amin showed in a direct reply AFTER that message is the fresher one -- leave it to history.
+  const later = db.prepare("SELECT result_json FROM secretary_events WHERE conversation_key=? AND created_at>? ORDER BY created_at DESC LIMIT 8").all(conversationKey, row.sent_at) as Array<{ result_json: string }>;
+  if (later.some(r => { try { return numberedItems(String(JSON.parse(r.result_json).reply ?? "")).length > 0; } catch { return false; } })) return null;
+  const items = numberedItems(row.text), hits = mentioned.filter(n => n <= items.length);
+  if (!hits.length) return null;
+  const fmt = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Amman", dateStyle: "short", timeStyle: "short", hour12: false });
+  return { sentAt: fmt.format(row.sent_at), items, mentioned: hits, resolved: hits.map(n => `${n}) ${items[n - 1].text}`).join(" ، ") };
+}
+// Amin's own last reply was an open question (15 min): a bare نعم/لا answers IT, not "nothing pending".
+function lastReplyIsOpenQuestion(db: DatabaseSync, key: string, now: number): boolean {
+  const row = db.prepare("SELECT result_json,created_at FROM secretary_events WHERE conversation_key=? ORDER BY created_at DESC,rowid DESC LIMIT 1").get(key) as { result_json: string; created_at: number } | undefined;
+  if (!row || row.created_at < now - 15 * 60_000) return false;
+  try { const r = JSON.parse(row.result_json); return r.status === "clarify" && !r.choices && /[؟?]\s*$/u.test(String(r.reply ?? "")); } catch { return false; }
+}
 /** A one-off/IDARA message (source NULL, no poll) the person has not yet been
  * acknowledged on -- their reply to it is worth telling Basim about once. */
 function noticeableOutbound(db: DatabaseSync, userId: string, now: number): OutboundRow | null {
@@ -1475,7 +1511,9 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
         // own label, a bare yes/no/ok) -- a real sentence goes on to be
         // understood normally, and the poll stays open for a tap.
         // SECRETARY_OPEN_CHOICE_STRICT=1 restores the old "type nothing" gate.
-        if (open && (process.env.SECRETARY_OPEN_CHOICE_STRICT === "1" || looksLikePollAnswer(event.text, open.choices))) {
+        // 25/10/2026: a CFM yes/no preview (staff relay) is answered by typing «نعم»/«لا» too.
+        const typedConfirm = !!open && open.choices.id.startsWith("CFM") && (isConfirmationAttempt(event.text) || isCancellation(event.text));
+        if (open && !typedConfirm && (process.env.SECRETARY_OPEN_CHOICE_STRICT === "1" || looksLikePollAnswer(event.text, open.choices))) {
           countOpenChoiceNudge(db, gateActor.id);
           return transaction(db, () => save(db, event, gateActor, { status: "clarify",
             reply: "\u261d\ufe0f \u0644\u0633\u0627 \u0641\u064a \u0633\u0624\u0627\u0644 \u0645\u0641\u062a\u0648\u062d \u0639\u0646\u062f\u0643. \u0627\u062e\u062a\u0627\u0631 \u0645\u0646 \u0627\u0644\u0642\u0627\u0626\u0645\u0629 \u2014 \u0627\u0644\u0643\u062a\u0627\u0628\u0629 \u0645\u0627 \u0628\u062a\u0646\u0641\u0639 \u0647\u0644\u0623.\n\u0625\u0630\u0627 \u0645\u0627 \u0628\u062f\u0643 \u0625\u0634\u064a\u060c \u0627\u062e\u062a\u0627\u0631 \u00ab" + CHOICE_CANCEL + "\u00bb.",
@@ -2380,7 +2418,9 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
   // secretary read it as a task confirmation. A short "تمام/وصلت/موافق" right
   // after such a message (no preview waiting, no draft) is a reply to THAT
   // message: acknowledge it, and tell Basim once.
-  if (!pending && !storedIntake && !review && event.groupId === null && event.inputKind !== "voice" && isShortAck(event.text)
+  // 25/10/2026، محمد إياد: أمين سأل «بدك أوصل طلبك لباسم؟»، رد «نعم» فانبلع («أنا معك. احكيلي كيف أقدر أساعدك»).
+  const answersOwnQuestion = !pending && !quote && lastReplyIsOpenQuestion(db, key, now);
+  if (!pending && !storedIntake && !review && !answersOwnQuestion && event.groupId === null && event.inputKind !== "voice" && isShortAck(event.text)
     && !db.prepare("SELECT 1 FROM secretary_task_choice WHERE conversation_key=? AND expires_at>?").get(key, now)
     && noticeableOutbound(db, actor.id, now)) return transaction(db, () => {
     const freshActor = actorFor(db, event, config); if (!freshActor || JSON.stringify(freshActor) !== JSON.stringify(actor)) return { status: "denied", reply: "" };
@@ -2389,7 +2429,7 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
     if (row) notifyBasimOfReply(db, freshActor, row, event.text, now);
     return save(db, event, freshActor, { status: "summary", reply: `تمام يا ${clean(freshActor.name, 60)}، وصلني ردك 👍${freshActor.id === "basem" ? "" : " وبلّغت باسم."}` }, [], now);
   });
-  if (!pending && isConfirmationAttempt(event.text)) return transaction(db, () => {
+  if (!pending && isConfirmationAttempt(event.text) && !answersOwnQuestion) return transaction(db, () => {
     const freshActor = actorFor(db, event, config); if (!freshActor || JSON.stringify(freshActor) !== JSON.stringify(actor)) return { status: "denied", reply: "" };
     const state = stateFor(db, freshActor); const duplicate = lookup(db, event, freshActor, state); if (duplicate) return duplicate;
     const focusSource = quote ?? historyRows[historyRows.length - 1];
@@ -2433,6 +2473,7 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
       db.prepare("DELETE FROM secretary_pending WHERE conversation_key=?").run(key);
       clearConfirmationView(db, key);
       clearSecretaryChoices(db, key);
+      clearOpenChoice(db, freshActor.id);
       if (isCancellation(event.text)) { log(db, freshActor, event, "secretary_cancel", { summary: "ألغى الطلب قبل التنفيذ" }, now); return save(db, event, freshActor, { status: "cancelled", reply: "ألغيت الطلب المعلّق، ما غيّرت المهمة." }, [], now); }
       if (live.expires_at <= now || live.snapshot_hash !== fingerprint(state)) return save(db, event, freshActor, { status: "stale", reply: "انتهى وقت التأكيد أو تغيّرت البيانات/الصلاحيات. ما نفذت الطلب؛ اذكره من جديد لأعرض الوضع الحالي." }, [], now);
       const command = JSON.parse(live.command_json);
@@ -2463,6 +2504,16 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
           .run(body, freshActor.id, now);
         log(db, freshActor, event, "secretary_playbook_updated", { summary: "حدّث تعليمات السكرتير الدائمة" }, now);
         return save(db, event, freshActor, { status: "applied", reply: "✅ حدّثت تعليمات السكرتير الدائمة. أي حدا يكتب «تعليمات السكرتير» رح ياخد هالنص الجديد." }, [], now);
+      }
+      // 25/10/2026، محمد إياد: «نعم» على معاينة التوصيل -- هلأ بينبعت فعلًا للزميل (أو لباسم).
+      if (command.action === "staff_relay" || command.action === "owner_message") {
+        const toUserId = String(command.toUserId || "");
+        const target = state.users.find(u => u.id === toUserId && u.active === 1);
+        if (event.groupId !== null || !target || !config.contacts.some(c => c.userId === toUserId) || (command.action === "owner_message" && dependencies.ownerDeliveryEnabled !== true))
+          return save(db, event, freshActor, { status: "clarify", reply: "ما قدرت أوصل الطلب من هالسياق." }, [], now);
+        const queuedId = enqueueAgentMessage(db, { toUser: toUserId, text: `📩 طلب من ${clean(freshActor.name)} (عن طريق أمين):\n${clean(String(command.body || ""), 2000)}` }, now);
+        log(db, freshActor, event, "secretary_staff_relay", { summary: "أدرج طلب موظف لزميل بعد موافقته؛ لم يثبت التسليم", toUserId, outboxId: queuedId }, now);
+        return save(db, event, freshActor, { status: "queued", batchId: queuedId, reply: `✅ تمام، حطّيت طلبك لـ${clean(target.name, 60)} بطابور الإرسال. لسه ما عندي تأكيد إنه وصل.` }, [], now);
       }
       if (command.action === "schedule_reminder") return reminder(db, event, freshActor, state, command.taskId, command.dueAt, now);
       if (command.action === "close_direct") return closeDirect(db, event, freshActor, state, String(command.taskId), now, { originalText: live.original_text, sourceMessageId: live.source_message_id, confirmationRequired: true, confirmedBy: freshActor.id, confirmationMessageId: event.messageId });
@@ -2508,6 +2559,8 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
     knowledgeContext: event.groupId === null ? safeKnowledge(db, actor, review?.question || event.text)
       .slice(0, 3).map(hit => ({ title: hit.title, snippet: hit.snippet.slice(0, 600) })) : [],
     recentOutbound: event.groupId === null && !review ? recentOutboundFor(db, actor.id, now) : [],
+    outboundListReference: event.groupId === null && !review && actor.role !== "admin" ? outboundListReference(db, actor.id, key, event.text, now) ?? undefined : undefined,
+    canRelayToStaff: event.groupId === null && !review && actor.id !== "basem" && actor.active === 1,
     ...(event.groupId === null ? { retrieveInternal: (request: import('./amin-retrieval.ts').AminReferenceQuery) => {
       // Re-resolve the sender on every read; the model cannot choose an identity or scope.
       const current = actorFor(db, event, config);
@@ -2601,7 +2654,7 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
   // but if it turns out to be a task/approval action after all, the poll in
   // front of them still comes first, exactly as before.
   if (actor.role !== "admin" && event.groupId === null && !event.choice
-    && !["summary", "details", "report", "help", "chat", "clarify", "search", "message_status", "knowledge", "approvals", "free_reminder", "outbound_reply", "owner_message", "remind"].includes(plan.kind)) {
+    && !["summary", "details", "report", "help", "chat", "clarify", "search", "message_status", "knowledge", "approvals", "free_reminder", "outbound_reply", "owner_message", "remind", "staff_relay"].includes(plan.kind)) {
     const open = openChoiceFor(db, actor.id, now);
     if (open) return transaction(db, () => save(db, event, actor, { status: "clarify",
       reply: "☝️ لسا في سؤال مفتوح عندك. اختار من القائمة أول، وبعدها احكيلي.\nإذا ما بدك إشي، اختار «" + CHOICE_CANCEL + "».", choices: open.choices }, [], now));
@@ -2795,6 +2848,23 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
       const queued=queueAminServerWork(db,freshActor,{eventKey:eventKey(event),conversation:key,request:event.text,now});
       log(db,freshActor,event,'amin_server_job_queued',{jobId:queued.id},now);
       return save(db,event,freshActor,{status:'queued',reply:queued.reply},[],now);
+    }
+    // 25/10/2026، محمد إياد: «امين ٤ و ٣ حولهم على شادي بدي اسعار تكلفتهم». نأكد مرة وحدة بالاسم والبنود
+    // (موافق/إلغاء أو «نعم» كتابة) عبر secretary_pending، وعلى «نعم» بينبعت. نفس الشي لسؤال «بدك أوصل طلبك لباسم؟».
+    if (plan.kind === "staff_relay" || (plan.kind === "clarify" && plan.message === OWNER_MESSAGE_CONFIRM && input.canNotifyOwner === true && !review)) {
+      const toUserId = plan.kind === "staff_relay" ? plan.recipientIds[0] : "basem";
+      const target = state.users.find(u => u.id === toUserId && u.active === 1);
+      if (review || event.groupId !== null || !target || !config.contacts.some(c => c.userId === toUserId))
+        return save(db, event, freshActor, { status: "clarify", reply: "ما بقدر أوصل لهالزميل من هون؛ احكي معه مباشرة." }, [], now);
+      let body = plan.kind === "staff_relay" ? String(plan.fields.body || "").trim() : clean(event.text, 2000);
+      const listRef = input.outboundListReference;
+      if (listRef && !listRef.mentioned.every(n => body.includes(listRef.items[n - 1].text.slice(0, 12)))) body += ` — البنود: ${listRef.resolved}`;
+      const token = "T" + randomBytes(3).toString("hex").toUpperCase();
+      const command = { action: plan.kind === "staff_relay" ? "staff_relay" : "owner_message", toUserId, body: body.slice(0, 2000) };
+      db.prepare("DELETE FROM secretary_pending WHERE conversation_key=?").run(key);
+      db.prepare("INSERT INTO secretary_pending VALUES(?,?,?,?,?,?,?)").run(key, token, JSON.stringify(command), initialHash, event.text, event.messageId, now + CONFIRM_MS);
+      log(db, freshActor, event, "secretary_relay_preview", { summary: "عرض توصيل طلب قبل الإرسال", toUserId, confirmationRequired: true }, now);
+      return save(db, event, freshActor, { status: "confirmation", reply: `قصدك أبعت لـ${clean(target.name, 60)}:\n«${clean(command.body, 1500)}»؟\n\nاضغط «🟢 موافق» أو اكتب «نعم»؛ وللتراجع «لا». صالح 10 دقائق.`, choices: confirmChoices(token, now) }, [], now);
     }
     if (plan.kind === "owner_message") {
       const allowed=dependencies.ownerDeliveryEnabled===true && event.groupId===null && !review && freshActor.id!=="basem" && state.users.some(u=>u.id==="basem"&&u.role==="admin"&&u.active===1) && config.contacts.some(c=>c.userId==="basem");

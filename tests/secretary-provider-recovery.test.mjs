@@ -35,7 +35,8 @@ test('context budget preserves catalogs and complete pending preview',async()=>{
  // kind (real new capabilities, not bloat) were added to the system prompt --
  // still a sanity guard against unbounded prompt growth, not a hard model limit.
  // 2026-10-12: + free_reminder / outbound_reply / RECENT OUTBOUND lines.
- assert.deepEqual(sent.tasks,input.tasks);assert.ok(body.messages[0].content.length<30000);
+ // 2026-10-25: + NUMBERED REFERENCES / staff_relay / yes-no-after-own-question lines (Mohammad Eyad case).
+ assert.deepEqual(sent.tasks,input.tasks);assert.ok(body.messages[0].content.length<31500);
 });
 
 
