@@ -7,7 +7,7 @@ import { secretaryBusinessKnowledge } from "./secretary-business-knowledge.ts";
 import { secretaryOdooKnowledge } from "./secretary-odoo-knowledge.ts";
 import { secretaryAttachmentContext, secretaryAssetContext } from "./secretary-source-context.ts";
 import { createHash, randomBytes } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { readFileSync, existsSync } from "node:fs";
 import { matchOdooQuestion, looksLikeOdooQuestion, type OdooQuestionMatch } from "./odoo-questions.ts";
 import { matchClinicQuestion, type ClinicQuestionMatch } from "./clinic-questions.ts";
 import type { DatabaseSync } from "node:sqlite";
@@ -548,6 +548,50 @@ function inJardCount(actor: ChatUser): boolean {
     }
   } catch { /* الملف مش موجود أو خربان: ما في جرد مفتوح */ }
   return false;
+}
+// Basim 29/10/2026 «صلحو»: سؤال الموظف عن حالة جرده («عندي جرد؟»، «خلصت؟»، «ما فتحته») كان يروح لـ«احكي لمسؤولك».
+// هلأ بيقرأ دفعات الجرد اللي انبعتتله (روابط /jard/?t= بالـoutbox + jard.log) وبيجاوبه بالضبط — بلا أي كمية من السيستم.
+const JARD_STATUS_RE = /(?:جرد|الجرد|جردي|رابط)/u;
+const JARD_STATUS_ASK = /(?:عندي|ضايل|ضل|ضلّ|باقي|خلصت|خلّصت|خلصته|خلصتها|خلصتو|فتحت|فتحته|فتحتو|بعثتلي|بعتلي|بعتتلي|بعتولي|وصلني|معلق|معلّق|مفتوح|اجرد|أجرد|نسيت|وين\s*(?:ال)?رابط)/u;
+function isJardStatusQuestion(text: string): boolean { return JARD_STATUS_RE.test(text) && JARD_STATUS_ASK.test(text) && text.length < 300; }
+function jardStatusReply(actor: ChatUser): string {
+  const J = "/home/titani24/qa_data/jard";
+  const ids = new Map<string, number>();
+  const since = Date.now() - 7 * 86400_000;
+  const at = (s: string) => Date.parse(String(s || "").replace(" ", "T") + "+03:00");
+  try {
+    const ob = JSON.parse(readFileSync("/home/titani24/qa_data/amin/outbox.json", "utf8")) as Array<{ uid?: string; at?: string; text?: string }>;
+    for (const e of Array.isArray(ob) ? ob : []) {
+      if (e?.uid !== actor.id || !(at(String(e.at)) > since)) continue;
+      for (const m of String(e.text || "").matchAll(/jard\/\?t=([a-f0-9]{24})/g)) ids.set(m[1], at(String(e.at)));
+    }
+  } catch { /* بلا outbox */ }
+  try {
+    for (const ln of readFileSync(`${J}/jard.log`, "utf8").split("\n")) {
+      let m = ln.match(/^(\S+ \S+) auto (\S+) \S+ ([a-f0-9]{24})/u);
+      if (m && m[2] === actor.id && at(m[1]) > since) ids.set(m[3], at(m[1]));
+      m = ln.match(/^(\S+ \S+) replace ([a-f0-9]{24}) -> ([a-f0-9]{24}).*uid=(\S+)/u);
+      if (m && m[4] === actor.id) { ids.delete(m[2]); if (at(m[1]) > since) ids.set(m[3], at(m[1])); }
+    }
+  } catch { /* بلا سجل */ }
+  type B = { branch_ar?: string; shift_ar?: string; date?: string; items?: unknown[] };
+  type S = { done?: boolean; counts?: Record<string, unknown> };
+  const open: string[] = []; let last = "";
+  for (const [t] of [...ids.entries()].sort((a, b) => a[1] - b[1])) {
+    const bf = `${J}/batches/${t}.json`;
+    if (!existsSync(bf)) continue;   /* دفعة ملغية أو مستبدلة */
+    let b: B; let st: S = {};
+    try { b = JSON.parse(readFileSync(bf, "utf8")); } catch { continue; }
+    try { st = JSON.parse(readFileSync(`${J}/batches/${t}.state.json`, "utf8")); } catch { /* ما انفتحت */ }
+    const n = Array.isArray(b.items) ? b.items.length : 0;
+    const label = `${b.branch_ar || ""} · ${b.shift_ar || ""} · ${String(b.date || "").slice(0, 5)}`;
+    if (st.done) { last = label; continue; }
+    const c = Object.values(st.counts || {}).filter(v => v !== "" && v !== null && v !== undefined).length;
+    open.push(`• ${label} — ${c ? `انعدّ ${c} من ${n}` : `ما انفتح (${n} صنف)`}\nhttps://titanium-pharmacy.com/jard/?t=${t}`);
+  }
+  if (open.length) return `عندك ${open.length === 1 ? "جرد واحد" : open.length + " جردات"} لسا ما خلص:\n${open.join("\n")}\nكمّل من الرابط وعدّ اللي بتشوفه بإيدك بس 👍`;
+  if (last) return `ما عندك ولا جرد معلّق ✅ كل اللي انبعتلك خلّصته، وآخره ${last}.\nالجرد الجاي بيوصلك برابط جديد عالواتساب.`;
+  return "ما وصلك ولا رابط جرد آخر أسبوع. الجرد بيوصلك تلقائياً برابط عالواتساب بأول شيفتك.";
 }
 function stateFor(db: DatabaseSync, actor: ChatUser): Snapshot { return getManagementSnapshot(db, actor) as unknown as Snapshot; }
 // Same base filter + overdue/pending-first ordering as the displayed task
@@ -1543,6 +1587,15 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
   // here: they keep going to the group on their own timetable, as he confirmed
   // in the same breath ("التقارير التلقائيه لا مالها دخل").
   if (event.groupId !== null && !isAddressedToSecretary(event.text)) return { status: "denied", reply: "" };
+  if (event.choice === undefined && !event.replyToMessageId && event.inputKind !== "voice" && isJardStatusQuestion(event.text)) {
+    const asking = actorFor(db, event, config);
+    if (asking && asking.active === 1 && config.enabled) {
+      const state = stateFor(db, asking);
+      const duplicate = lookup(db, event, asking, state);
+      if (duplicate) return duplicate;
+      return transaction(db, () => save(db, event, asking, { status: "summary", reply: jardStatusReply(asking) }, [], now));
+    }
+  }
   if (dependencies.askClinic && event.choice === undefined && !event.replyToMessageId && event.inputKind !== "voice") {
     const clinicQuestion = matchClinicQuestion(event.text);
     if (clinicQuestion) {
