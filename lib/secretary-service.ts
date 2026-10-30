@@ -7,7 +7,7 @@ import { secretaryBusinessKnowledge } from "./secretary-business-knowledge.ts";
 import { secretaryOdooKnowledge } from "./secretary-odoo-knowledge.ts";
 import { secretaryAttachmentContext, secretaryAssetContext } from "./secretary-source-context.ts";
 import { createHash, randomBytes } from "node:crypto";
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync, existsSync, appendFileSync } from "node:fs";
 import { matchOdooQuestion, looksLikeOdooQuestion, type OdooQuestionMatch } from "./odoo-questions.ts";
 import { matchClinicQuestion, type ClinicQuestionMatch } from "./clinic-questions.ts";
 import type { DatabaseSync } from "node:sqlite";
@@ -531,6 +531,23 @@ function actorFor(db: DatabaseSync, event: Event, config: TeamChatConfig) {
 // pharmacy's and the clinics' figures stay with the people who run them. Only these
 // accounts may ask the Odoo / clinic questions; anyone else gets a polite pointer, never
 // a number. Enforced here, before any data is fetched, for direct messages and groups alike.
+// باسم 30/10/2026 (حالة شادي «اعطيني اسماء الموظفين»): أسماء الزملاء وأدوارهم بتتجاوب مباشرة لأي موظف بالخاص —
+// من qa_data/amin/lists.json (الصيدلية + العيادات)، الاسم والدور بس، بدون أرقام أو أي بيانات خاصة.
+function isStaffNamesQuestion(text: string): boolean {
+  const t = text.normalize("NFKC").replace(/[ً-ٰٟـ]/g, "").replace(/[أإآ]/g, "ا").replace(/ى/g, "ي").replace(/ة/g, "ه");
+  return /(?:اسماء|اسامي|قائمه|قايمه|كشف)\s+(?:ال)?(?:موظفين|زملاء|فريق|شباب)/u.test(t) || /مين\s+(?:ال)?موظفين/u.test(t);
+}
+function staffNamesReply(): string | null {
+  try {
+    const data = JSON.parse(readFileSync("/home/titani24/qa_data/amin/lists.json", "utf8")) as { lists?: Record<string, { name?: string; members?: Array<{ uid?: string; name?: string; role?: string }> }> };
+    const seen = new Set<string>(); const parts: string[] = [];
+    for (const list of Object.values(data.lists || {})) {
+      const lines = (list.members || []).filter(m => m.name && !seen.has(String(m.uid))).map(m => { seen.add(String(m.uid)); return "- " + m.name + (m.role && m.role !== "غير محدد" ? " (" + m.role + ")" : ""); });
+      if (lines.length) parts.push((list.name || "") + ":\n" + lines.join("\n"));
+    }
+    return parts.length ? "أسماء الموظفين:\n\n" + parts.join("\n\n") : null;
+  } catch { return null; }
+}
 const DATA_READERS = new Set(["basem", "khaled", "ayman", "shadi", "mohammad-eyad", "malik-hawanieh"]);
 function mayReadData(actor: ChatUser): boolean { return actor.role === "admin" || DATA_READERS.has(actor.id); }
 const DATA_DENIED = "هاي المعلومة عند الإدارة 🙏 إذا بتحتاجها لشغلك، احكي لمسؤولك.";
@@ -1587,6 +1604,16 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
   // here: they keep going to the group on their own timetable, as he confirmed
   // in the same breath ("التقارير التلقائيه لا مالها دخل").
   if (event.groupId !== null && !isAddressedToSecretary(event.text)) return { status: "denied", reply: "" };
+  if (event.choice === undefined && !event.replyToMessageId && event.groupId === null && isStaffNamesQuestion(event.text)) {
+    const asking = actorFor(db, event, config);
+    const namesReply = asking && asking.active === 1 && config.enabled ? staffNamesReply() : null;
+    if (asking && namesReply) {
+      const state = stateFor(db, asking);
+      const duplicate = lookup(db, event, asking, state);
+      if (duplicate) return duplicate;
+      return transaction(db, () => save(db, event, asking, { status: "summary", reply: namesReply }, [], now));
+    }
+  }
   if (event.choice === undefined && !event.replyToMessageId && event.inputKind !== "voice" && isJardStatusQuestion(event.text)) {
     const asking = actorFor(db, event, config);
     if (asking && asking.active === 1 && config.enabled) {
@@ -1596,8 +1623,13 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
       return transaction(db, () => save(db, event, asking, { status: "summary", reply: jardStatusReply(asking) }, [], now));
     }
   }
+  // باسم 30/10/2026 (حالة الريم): موظف مش من DATA_READERS ما بيروح لفروع أرقام العيادات/أودو تحت،
+  // فسؤال الشغل العادي ما بياخذ «هاي المعلومة عند الإدارة» — بيكمل لأمين العادي اللي بيجاوب من دروسه
+  // (وهالمسار ما معه أرقام النظام أصلًا). الستة اللي إلهم قراءة ما تغيّر عليهم إشي.
+  const earlyAsker = actorFor(db, event, config);
+  const staffNoData = !!earlyAsker && !mayReadData(earlyAsker);
   if (dependencies.askClinic && event.choice === undefined && !event.replyToMessageId && event.inputKind !== "voice") {
-    const clinicQuestion = matchClinicQuestion(event.text);
+    const clinicQuestion = staffNoData ? null : matchClinicQuestion(event.text);
     if (clinicQuestion) {
       const asking = actorFor(db, event, config);
       if (asking && asking.active === 1 && config.enabled) {
@@ -1619,7 +1651,7 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
     // The written-out wordings answer first and cost nothing. Only what they
     // do not recognise -- and only when it reads like a question at all -- is
     // worth one routing call to the model.
-    let question = matchOdooQuestion(event.text);
+    let question = staffNoData ? null : matchOdooQuestion(event.text);
     if (question) {
       const asking = actorFor(db, event, config);
       if (asking && asking.active === 1 && config.enabled) {
@@ -1639,7 +1671,7 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
             reply: "ما قدرت أوصل لنظام الصيدلية هلأ. جرّب بعد شوي." }, [], now));
         }
       }
-    } else if ((dependencies.classifyOdoo || dependencies.exploreOdoo) && looksLikeOdooQuestion(event.text)) {
+    } else if (!staffNoData && (dependencies.classifyOdoo || dependencies.exploreOdoo) && looksLikeOdooQuestion(event.text)) {
       const asking = actorFor(db, event, config);
       if (asking && asking.active === 1 && config.enabled) {
         const state = stateFor(db, asking);
@@ -2901,6 +2933,24 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
       const queued=queueAminServerWork(db,freshActor,{eventKey:eventKey(event),conversation:key,request:event.text,now});
       log(db,freshActor,event,'amin_server_job_queued',{jobId:queued.id},now);
       return save(db,event,freshActor,{status:'queued',reply:queued.reply},[],now);
+    }
+    // باسم 30/10/2026 (حالة شادي، تحويل جرد محمد عيد): أمين ما بيلف بالأسئلة. إذا الرسالتين اللي قبل ردّ عليهم
+    // بسؤال توضيح ورجع بدّه يسأل مرة ثالثة، بيرفع الطلب لباسم استفتاء (موافق/مش موافق) وبيبلّغ الموظف إنه وصل.
+    if (plan.kind === "clarify" && plan.message !== OWNER_MESSAGE_CONFIRM && !review && event.groupId === null && freshActor.id !== "basem"
+      && state.users.some(u => u.id === "basem" && u.active === 1) && config.contacts.some(c => c.userId === "basem")) {
+      const last = db.prepare("SELECT original_text,result_json FROM secretary_events WHERE conversation_key=? AND created_at>? ORDER BY created_at DESC,rowid DESC LIMIT 4").all(key, now - 2 * 3600_000) as Array<{ original_text: string; result_json: string }>;
+      const lastStatus = (r?: { result_json: string }) => { try { return String(JSON.parse(String(r?.result_json || "{}")).status || ""); } catch { return ""; } };
+      if (last.length >= 2 && lastStatus(last[0]) === "clarify" && lastStatus(last[1]) === "clarify") {
+        const thread = [...last.slice().reverse().map(r => clean(String(r.original_text || ""), 300)), clean(event.text, 600)].filter(Boolean).join("\n• ");
+        const escQ = "ESC" + randomBytes(4).toString("hex").toUpperCase();
+        const escChoices = { id: "AMNQ" + escQ, title: "طلب " + clean(freshActor.name, 40) + " — توافق؟", expiresAt: now + 23 * 3600_000, options: [{ id: "AMN" + escQ + "_Y", label: "✅ موافق" }, { id: "AMN" + escQ + "_N", label: "❌ مش موافق" }] };
+        db.prepare("INSERT INTO agent_outbox (id,to_user,text,choices_json,state,created_at) VALUES (?,?,?,?,'pending',?)")
+          .run(randomBytes(8).toString("hex"), "basem", ("📩 طلب من " + clean(freshActor.name) + " — أمين ما قدر يحسمه لحاله:\n• " + thread).slice(0, 3500), JSON.stringify(escChoices), now);
+        log(db, freshActor, event, "amin_escalate_to_basem", { summary: "بعد سؤالين توضيح بدون نتيجة، انرفع الطلب لباسم استفتاء", q: escQ }, now);
+        // رقم 4: سجل الاستفتاء — shahad_relay.php بيقرأه مع تصويت باسم (votes.jsonl) وبيبلّغ الموظف وبيبعت الموافَق عليه للغرفة.
+        try { appendFileSync("/home/titani24/qa_data/amin/votes_q.jsonl", JSON.stringify({ q: escQ, at: new Date(now).toISOString(), kind: "esc", uid: freshActor.id, name: freshActor.name, what: thread.slice(0, 2500) }) + "\n"); } catch { /* الاستفتاء وصل باسم بكل الأحوال */ }
+        return save(db, event, freshActor, { status: "queued", reply: "وصل طلبك للدكتور باسم، وأول ما يقرر بنكمل 🙏" }, [], now);
+      }
     }
     // 25/10/2026، محمد إياد: «امين ٤ و ٣ حولهم على شادي بدي اسعار تكلفتهم». نأكد مرة وحدة بالاسم والبنود
     // (موافق/إلغاء أو «نعم» كتابة) عبر secretary_pending، وعلى «نعم» بينبعت. نفس الشي لسؤال «بدك أوصل طلبك لباسم؟».
