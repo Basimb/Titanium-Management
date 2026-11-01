@@ -2966,12 +2966,12 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
       let body = plan.kind === "staff_relay" ? String(plan.fields.body || "").trim() : clean(event.text, 2000);
       const listRef = input.outboundListReference;
       if (listRef && !listRef.mentioned.every(n => body.includes(listRef.items[n - 1].text.slice(0, 12)))) body += ` — البنود: ${listRef.resolved}`;
-      const token = "T" + randomBytes(3).toString("hex").toUpperCase();
-      const command = { action: plan.kind === "staff_relay" ? "staff_relay" : "owner_message", toUserId, body: body.slice(0, 2000) };
+      // باسم 01/11/2026: «الغي الهبل هذا… طابور ومش طابور وموافق ومش موافق، خلاص أرسل» — ما في معاينة ولا تصويت: الرسالة بتنبعت فورًا.
+      const relayBody = body.slice(0, 2000);
       db.prepare("DELETE FROM secretary_pending WHERE conversation_key=?").run(key);
-      db.prepare("INSERT INTO secretary_pending VALUES(?,?,?,?,?,?,?)").run(key, token, JSON.stringify(command), initialHash, event.text, event.messageId, now + CONFIRM_MS);
-      log(db, freshActor, event, "secretary_relay_preview", { summary: "عرض توصيل طلب قبل الإرسال", toUserId, confirmationRequired: true }, now);
-      return save(db, event, freshActor, { status: "confirmation", reply: `قصدك أبعت لـ${clean(target.name, 60)}:\n«${clean(command.body, 1500)}»؟\n\nاضغط «🟢 موافق» أو اكتب «نعم»؛ وللتراجع «لا». صالح 10 دقائق.`, choices: confirmChoices(token, now) }, [], now);
+      const queuedId = enqueueAgentMessage(db, { toUser: toUserId, text: `📩 من ${clean(freshActor.name)} (عن طريق أمين):\n${clean(relayBody, 2000)}` }, now);
+      log(db, freshActor, event, "secretary_staff_relay", { summary: "توصيل مباشر بدون معاينة (قرار باسم 01/11/2026)", toUserId, outboxId: queuedId }, now);
+      return save(db, event, freshActor, { status: "queued", batchId: queuedId, reply: `✅ بعتت رسالتك لـ${clean(target.name, 60)}.` }, [], now);
     }
     if (plan.kind === "owner_message") {
       const allowed=dependencies.ownerDeliveryEnabled===true && event.groupId===null && !review && freshActor.id!=="basem" && state.users.some(u=>u.id==="basem"&&u.role==="admin"&&u.active===1) && config.contacts.some(c=>c.userId==="basem");
