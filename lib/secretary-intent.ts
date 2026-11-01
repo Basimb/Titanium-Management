@@ -655,7 +655,9 @@ export async function inferSecretaryIntent(input: SecretaryModelInput, options: 
   const requestBody = { model, max_completion_tokens: 1300, tool_choice: "required", parallel_tool_calls: false,
       messages, tools: [...finalTools,...aminReadTools(input)] };
   const send = async (body: unknown) => {
-    try { return await jsonResponse(await (options.fetcher || fetch)("https://api.openai.com/v1/chat/completions", {
+    // باسم 02/11/2026: رصيد OpenAI خلص ← مفتاح xai- بيروح لـ x.ai (Grok)، غيره لـ OpenAI.
+    const providerUrl = String(options.apiKey).startsWith("xai-") ? "https://api.x.ai/v1/chat/completions" : "https://api.openai.com/v1/chat/completions";
+    try { return await jsonResponse(await (options.fetcher || fetch)(providerUrl, {
       method: "POST", headers: { authorization: `Bearer ${options.apiKey}`, "content-type": "application/json" },
       redirect: "error", signal: AbortSignal.timeout(Math.max(1,deadline-Date.now())), body: JSON.stringify(body),
     })); } catch (error) { if (error instanceof SecretaryProviderError) throw error; throw new SecretaryProviderError("provider_transport", 30); }
@@ -666,7 +668,7 @@ export async function inferSecretaryIntent(input: SecretaryModelInput, options: 
     let result;
     try {result=await send({...requestBody,tools});}
     catch(error){
-      if(!(error instanceof SecretaryProviderError)||error.code!=="schema_rejected")throw error;
+      if(!(error instanceof SecretaryProviderError)||(error.code!=="schema_rejected"&&error.code!=="provider_http_400"))throw error;
       result=await send({...requestBody,tools:tools.map(t=>({...t,function:{...t.function,strict:false}}))});
     }
     const choice=result?.choices?.[0],calls=choice?.message?.tool_calls;

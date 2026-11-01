@@ -24,13 +24,27 @@ import { odooPersonFor } from "./odoo-people.ts";
 import { openOdooSession } from "./odoo-client.ts";
 import { idaraIntercept } from "./idara-approvals.ts";
 
+import { readFileSync } from "node:fs";
+/* باسم 02/11/2026 «حولي اياه على احد عنده رصيد»: مزوّد السكرتيرة بيتحدد من qa_data/amin/secretary_provider.json
+   ({"use":"xai","model":"..."} أو {"use":"openai"}) — بينقرأ مع كل رسالة، فالرجعة لـ OpenAI بتعديل الملف بدون إعادة تشغيل. */
+function secretaryProvider(settings: { OPENAI_API_KEY?: string; OPENAI_MODEL?: string }): { apiKey?: string; model?: string } {
+  try {
+    const p = JSON.parse(readFileSync("/home/titani24/qa_data/amin/secretary_provider.json", "utf8"));
+    if (p && p.use === "xai") {
+      const cr = JSON.parse(readFileSync("/home/titani24/.config/amin-council/credentials.json", "utf8"));
+      if (typeof cr?.grok === "string" && cr.grok.startsWith("xai-")) return { apiKey: cr.grok, model: String(p.model || "grok-4-fast-non-reasoning") };
+    }
+  } catch { /* fall back to OpenAI settings */ }
+  return { apiKey: settings.OPENAI_API_KEY, model: settings.OPENAI_MODEL };
+}
+
 export async function handleTeamChatPost(request: Request): Promise<Response> {
   try {
     const settings = readTeamChatSettings();
     return handleTeamChatRequest(request, {
       config: teamChatConfigFromEnv(settings), getDatabase: chatDatabase,
       ...(settings.SECRETARY_ENABLED === "1" ? { secretary: (database: ReturnType<typeof chatDatabase>, event: TeamChatEnvelope, config: TeamChatConfig) => handleSecretaryEvent(database, event, config, {
-        infer: input => inferSecretaryIntent(input, { apiKey: settings.OPENAI_API_KEY, model: settings.OPENAI_MODEL }),
+        infer: input => inferSecretaryIntent(input, secretaryProvider(settings)),
         ownerDeliveryEnabled: settings.SECRETARY_FOLLOWUP_ENABLED === "1",
         serverWorkEnabled: settings.SECRETARY_FOLLOWUP_ENABLED === '1' && serverWorkReady() && teamChatConfigFromEnv(settings).contacts.some(c=>c.userId==='basem'),
         ...(settings.SECRETARY_WEB_ENABLED === "1" ? { search: (query: string) => searchSecretaryWeb(query, { apiKey: settings.OPENAI_API_KEY, model: settings.OPENAI_SEARCH_MODEL }) } : {}),
