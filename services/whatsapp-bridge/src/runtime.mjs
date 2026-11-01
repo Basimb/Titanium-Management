@@ -321,10 +321,11 @@ export function createBridgeRuntime({ config, store, auth, makeWASocket, waVersi
                 const dir = `${base}/announce`;
                 let names = [];
                 try { names = await readdir(dir); } catch { return; }
-                const groups = { titanium: '120363323474480147@g.us', dev: '120363178431513880@g.us' };
+                // Basim 30/10/2026: clinics = جروب «تطوير عيادات تيتانيوم ٢٠٢٦» (announcements only, same rules).
+                const groups = { titanium: '120363323474480147@g.us', dev: '120363178431513880@g.us', clinics: '120363424811955086@g.us' };
                 const nowKey = new Date(Date.now() + 3 * 3600_000).toISOString().slice(0, 16).replace(/[-T:]/g, '');
                 for (const name of names.sort()) {
-                  const m = /^(titanium|dev)__(\d{12})__[a-z0-9-]{1,60}\.txt$/.exec(name);
+                  const m = /^(titanium|dev|clinics)__(\d{12})__[a-z0-9-]{1,60}\.txt$/.exec(name);
                   if (!m || m[2] > nowKey) continue;
                   const text = (await readFile(`${dir}/${name}`, 'utf8')).trim();
                   await rename(`${dir}/${name}`, `${dir}/${name}.sending`);

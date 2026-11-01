@@ -2936,7 +2936,8 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
     }
     // باسم 30/10/2026 (حالة شادي، تحويل جرد محمد عيد): أمين ما بيلف بالأسئلة. إذا الرسالتين اللي قبل ردّ عليهم
     // بسؤال توضيح ورجع بدّه يسأل مرة ثالثة، بيرفع الطلب لباسم استفتاء (موافق/مش موافق) وبيبلّغ الموظف إنه وصل.
-    if (plan.kind === "clarify" && plan.message !== OWNER_MESSAGE_CONFIRM && !review && event.groupId === null && freshActor.id !== "basem"
+    // باسم 01/11/2026: «لا تضلك ترسل موافقات… اتكلم معهم عادي» — ما في رفع لباسم من حكي الموظفين؛ أمين بيضل يحكي مع الموظف ويسأله لحد ما يفهم.
+    if (false && plan.kind === "clarify" && plan.message !== OWNER_MESSAGE_CONFIRM && !review && event.groupId === null && freshActor.id !== "basem"
       && state.users.some(u => u.id === "basem" && u.active === 1) && config.contacts.some(c => c.userId === "basem")) {
       const last = db.prepare("SELECT original_text,result_json FROM secretary_events WHERE conversation_key=? AND created_at>? ORDER BY created_at DESC,rowid DESC LIMIT 4").all(key, now - 2 * 3600_000) as Array<{ original_text: string; result_json: string }>;
       const lastStatus = (r?: { result_json: string }) => { try { return String(JSON.parse(String(r?.result_json || "{}")).status || ""); } catch { return ""; } };
