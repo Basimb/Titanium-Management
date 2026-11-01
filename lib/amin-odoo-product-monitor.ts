@@ -12,6 +12,8 @@ export function productFields(schema:Record<string,any>){
  }
  return fields;
 }
+const SEEN=new Map<string,number>();
+function recentSig(s:string){const t=Date.now();for(const [k,v] of SEEN)if(t-v>600000)SEEN.delete(k);if(SEEN.has(s))return true;SEEN.set(s,t);return false;}
 function stable(v:any):any{return Array.isArray(v)?(v.every(x=>typeof x==='number')?[...v].sort((a,b)=>a-b):v.map(stable)):v&&typeof v==='object'?Object.fromEntries(Object.keys(v).sort().map(k=>[k,stable(v[k])])):v;}
 const encode=(v:any)=>JSON.stringify(stable(v));
 function value(v:any){if(v===true)return 'نعم';if(v===false||v===null||v===undefined)return 'بدون';if(Array.isArray(v)&&v.length===2&&typeof v[1]==='string')return clean(v[1],80);return clean(typeof v==='object'?JSON.stringify(v):v,80);}
@@ -48,7 +50,10 @@ export function createProductMonitor(o:{db:DatabaseSync;read:ReturnType<typeof c
     if(!Number.isInteger(row.id))throw Error('odoo_invalid_product');
     const data=Object.fromEntries(Object.keys(fields).map(k=>[k,row[k]??null]));const old=db.prepare('SELECT data FROM amin_product_snapshots WHERE model=? AND id=?').get(model,row.id) as any;
     const diffs=old?Object.keys(fields).filter(k=>encode(JSON.parse(old.data)[k])!==encode(data[k])).map(k=>({field:k,label:fields[k],before:JSON.parse(old.data)[k],after:data[k]})):[];
-    if(!baseline&&(diffs.length||!old))changed.push({row,diff:diffs,data:encode(data)});
+    // Basim 01/11/2026: one alert per change (template + variant used to send the same change twice), and none for changes saved by Basim's own account (uid 10).
+    const sig=clean(row.name||row.display_name||row.id,95)+'|'+encode(diffs.map(d=>[d.label,d.before,d.after]));
+    const mine=Array.isArray(row.write_uid)&&row.write_uid[0]===10;
+    if(!baseline&&(diffs.length||!old)&&!mine&&!recentSig(sig))changed.push({row,diff:diffs,data:encode(data)});
     db.prepare('INSERT OR REPLACE INTO amin_product_snapshots VALUES(?,?,?)').run(model,row.id,encode(data));
    }
    // One private owner message per batch, capped to fit the delivery queue; all differences remain in local audit.

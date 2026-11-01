@@ -1477,6 +1477,9 @@ export function isShortAck(text: string): boolean {
 function notifyBasimOfReply(db: DatabaseSync, actor: ChatUser, row: OutboundRow, reply: string, now: number) {
   db.prepare("UPDATE agent_outbox SET reply_noticed_at=? WHERE id=? AND reply_noticed_at IS NULL").run(now, row.id);
   if (actor.id === "basem") return;
+  // باسم 01/11/2026: ردود قصيرة زي «اوكي/تم/تمام/خلص» ما بتنبعتله — بس الرد اللي فيه كلام فعلي.
+  const ackN = pollNorm(reply.trim());
+  if (isShortAck(reply) || (ackN.length <= 25 && /^(?:اوكي|اوكيه|اوكى|خلص|تمام|تم|ماشي|اه|ايوه|نعم|طيب|حاضر)(?:\s|$)/u.test(ackN))) return;
   const sent = clean(String(row.text)).replace(/\s+/g, " ").slice(0, 80);
   enqueueAgentMessage(db, { toUser: "basem", text: `📩 ${clean(actor.name)} ردّ على رسالة «${sent}${String(row.text).length > 80 ? "…" : ""}»:\n${clean(reply).slice(0, 400)}` }, now);
 }
