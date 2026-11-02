@@ -22,7 +22,7 @@ import { approvalDecisionPollFor, formatApprovalChoice, listApprovals, requestDe
 import { activeRules } from "./rules.ts";
 import { searchKnowledge, formatKnowledgeHits } from "./knowledge.ts";
 import { migrateSecretaryMemory, rememberSecretaryMistake, recallSecretaryMemory, personalMemoryCommand, updatePersonalMemory, personalMemory } from "./secretary-memory.ts";
-import { enqueueAgentMessage, recordOpenChoice, clearOpenChoice, openChoiceFor, countOpenChoiceNudge } from "./agent-followups.ts";
+import { enqueueAgentMessage, ensureRelayColumns, recordOpenChoice, clearOpenChoice, openChoiceFor, countOpenChoiceNudge } from "./agent-followups.ts";
 import { safeConversationalReply, isConversationCancellation } from "./secretary-conversation-policy.ts";
 import { secretaryReviewRequest, isSecretaryIdentityQuery, isAddressedToSecretary, SECRETARY_IDENTITY } from "./secretary-review.ts";
 import { migrateSecretaryOutbox, getSecretaryOutboxRecipients, createSecretaryOutboxPreview, confirmSecretaryOutboxPreview, getSecretaryOutboxStatus, secretaryOutboxDeliveryLabel, SecretaryOutboxError } from "./secretary-outbox.ts";
@@ -1491,7 +1491,7 @@ function notifyBasimOfReply(db: DatabaseSync, actor: ChatUser, row: OutboundRow,
   const ackN = pollNorm(reply.trim());
   if (isShortAck(reply) || (ackN.length <= 25 && /^(?:اوكي|اوكيه|اوكى|خلص|تمام|تم|ماشي|اه|ايوه|نعم|طيب|حاضر)(?:\s|$)/u.test(ackN))) return;
   const sent = clean(String(row.text)).replace(/\s+/g, " ").slice(0, 80);
-  enqueueAgentMessage(db, { toUser: "basem", text: `📩 ${clean(actor.name)} ردّ على رسالة «${sent}${String(row.text).length > 80 ? "…" : ""}»:\n${clean(reply).slice(0, 400)}` }, now);
+  enqueueAgentMessage(db, { toUser: "basem", text: `📩 ${clean(actor.name)} ردّ على رسالة «${sent}${String(row.text).length > 80 ? "…" : ""}»:\n${clean(reply).slice(0, 400)}`, relayFrom: actor.id }, now);
 }
 function freeReminder(db: DatabaseSync, event: Event, actor: ChatUser, body: string, remindAt: string, now: number): Result {
   const due = Date.parse(remindAt);
@@ -1542,6 +1542,30 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
   if(config.enabled&&event.choice&&/^ASQ[0-9a-f]{32}$/.test(event.choice.questionId)){
     const a=actorFor(db,event,config);if(!a||event.groupId!==null||a.id!=='basem'||a.role!=='admin')return {status:'denied',reply:''};
     return transaction(db,()=>{const fresh=actorFor(db,event,config);if(!fresh||fresh.id!==a.id||fresh.role!==a.role||fresh.active!==1)return {status:'denied',reply:''};const state=stateFor(db,fresh),prior=lookup(db,event,fresh,state);if(prior)return prior;const r=aminServerVote(db,fresh,{conversation:conversation(event,fresh),choice:event.choice!,now})!;if(r.status==='queued'||r.status==='cancelled')clearOpenChoice(db,fresh.id);return save(db,event,fresh,r,[],now);});
+  }
+  // باسم 02/11/2026: «ارسلها استلمو» كرد على «📩 طلب من براء» — الرد (الاقتباس) على رسالة حوّلها أمين من موظف
+  // بيروح لصاحب الطلب مباشرة، بدون ما أمين يسأل «لمين؟». لباسم بس، وبالخاص بس.
+  if (config.enabled && event.groupId === null && !event.choice && event.replyToMessageId) {
+    const ra = actorFor(db, event, config);
+    if (ra && ra.id === "basem" && ra.role === "admin" && ra.active === 1) {
+      ensureRelayColumns(db);
+      const src = db.prepare("SELECT id,text,relay_from AS relayFrom FROM agent_outbox WHERE wa_message_id=? AND to_user='basem' AND relay_from IS NOT NULL LIMIT 1")
+        .get(event.replyToMessageId) as { id: string; text: string; relayFrom: string } | undefined;
+      const target = src ? (db.prepare("SELECT id,name,active FROM users WHERE id=?").get(src.relayFrom) as { id: string; name: string; active: number } | undefined) : undefined;
+      if (src && target && target.id !== "basem") {
+        return transaction(db, () => {
+          const fresh = actorFor(db, event, config);
+          if (!fresh || fresh.id !== "basem" || fresh.active !== 1) return { status: "denied", reply: "" } as Result;
+          const prior = lookup(db, event, fresh, stateFor(db, fresh)); if (prior) return prior;
+          if (target.active !== 1 || !config.contacts.some(c => c.userId === target.id))
+            return save(db, event, fresh, { status: "clarify", reply: `ما بقدر أوصل لـ${clean(target.name, 60)} من هون.` }, [], now);
+          const asked = clean(String(src.text).split("\n").slice(1).join(" ")).replace(/\s+/g, " ").trim().slice(0, 80);
+          const queuedId = enqueueAgentMessage(db, { toUser: target.id, text: `📩 من د. باسم${asked ? ` (ردًا على «${asked}»)` : ""}:\n${clean(event.text, 2000)}` }, now);
+          log(db, fresh, event, "secretary_owner_quote_reply", { summary: "رد باسم المقتبس انبعت لصاحب الطلب", toUserId: target.id, outboxId: queuedId }, now);
+          return save(db, event, fresh, { status: "queued", batchId: queuedId, reply: `✅ بعتت ردك لـ${clean(target.name, 60)}.` }, [], now);
+        });
+      }
+    }
   }
   // ---------------------------------------------------------------------
   // An open poll is the only thing this person can answer.
@@ -2610,7 +2634,7 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
         const target = state.users.find(u => u.id === toUserId && u.active === 1);
         if (event.groupId !== null || !target || !config.contacts.some(c => c.userId === toUserId) || (command.action === "owner_message" && dependencies.ownerDeliveryEnabled !== true))
           return save(db, event, freshActor, { status: "clarify", reply: "ما قدرت أوصل الطلب من هالسياق." }, [], now);
-        const queuedId = enqueueAgentMessage(db, { toUser: toUserId, text: `📩 طلب من ${clean(freshActor.name)} (عن طريق أمين):\n${clean(String(command.body || ""), 2000)}` }, now);
+        const queuedId = enqueueAgentMessage(db, { toUser: toUserId, text: `📩 طلب من ${clean(freshActor.name)} (عن طريق أمين):\n${clean(String(command.body || ""), 2000)}`, relayFrom: freshActor.id }, now);
         log(db, freshActor, event, "secretary_staff_relay", { summary: "أدرج طلب موظف لزميل بعد موافقته؛ لم يثبت التسليم", toUserId, outboxId: queuedId }, now);
         return save(db, event, freshActor, { status: "queued", batchId: queuedId, reply: `✅ تمام، حطّيت طلبك لـ${clean(target.name, 60)} بطابور الإرسال. لسه ما عندي تأكيد إنه وصل.` }, [], now);
       }
@@ -2980,7 +3004,7 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
       // باسم 01/11/2026: «الغي الهبل هذا… طابور ومش طابور وموافق ومش موافق، خلاص أرسل» — ما في معاينة ولا تصويت: الرسالة بتنبعت فورًا.
       const relayBody = body.slice(0, 2000);
       db.prepare("DELETE FROM secretary_pending WHERE conversation_key=?").run(key);
-      const queuedId = enqueueAgentMessage(db, { toUser: toUserId, text: `📩 من ${clean(freshActor.name)} (عن طريق أمين):\n${clean(relayBody, 2000)}` }, now);
+      const queuedId = enqueueAgentMessage(db, { toUser: toUserId, text: `📩 من ${clean(freshActor.name)} (عن طريق أمين):\n${clean(relayBody, 2000)}`, relayFrom: freshActor.id }, now);
       log(db, freshActor, event, "secretary_staff_relay", { summary: "توصيل مباشر بدون معاينة (قرار باسم 01/11/2026)", toUserId, outboxId: queuedId }, now);
       return save(db, event, freshActor, { status: "queued", batchId: queuedId, reply: `✅ بعتت رسالتك لـ${clean(target.name, 60)}.` }, [], now);
     }
@@ -2990,7 +3014,7 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
       if(!allowed || approved.kind!=="owner_message")return save(db,event,freshActor,{status:"clarify",reply:approved.message||"ما قدرت أوصل الطلب لباسم من هالسياق."},[],now);
       const links=[...history.filter(t=>t.role==="user").slice(-2).flatMap(t=>[...t.content.matchAll(/https?:\/\/[^\s<>]+/gu)].map(m=>m[0]))].filter(url=>{try{const u=new URL(url);return u.protocol==="https:"&&!u.username&&!u.password&&!/api.?key|token|password|secret|auth|signature|[?&]key=/i.test(u.href);}catch{return false;}}).slice(-2);
       const text="📩 طلب من "+clean(freshActor.name)+":\n"+clean(event.text).slice(0,2000)+(links.length?"\n\nرابط مذكور في الحوار (لم أفحص محتواه):\n"+[...new Set(links)].join("\n"):"");
-      const queuedId=enqueueAgentMessage(db,{toUser:"basem",text},now);
+      const queuedId=enqueueAgentMessage(db,{toUser:"basem",text,relayFrom:freshActor.id},now);
       log(db,freshActor,event,"secretary_owner_message",{summary:"أدرج طلب الموظف لباسم في طابور الإرسال؛ لم يثبت الإرسال أو التسليم"},now);
       return save(db,event,freshActor,{status:"queued",batchId:queuedId,reply:"حطّيت طلبك بطابور الإرسال لباسم. لسه ما عندي تأكيد إنه انبعت أو وصل."},[],now);
     }

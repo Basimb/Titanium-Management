@@ -400,8 +400,20 @@ export function planFollowups(db: DatabaseSync, config: FollowupConfig, at: numb
  * choices, when given, is a real tappable WhatsApp poll to attach alongside the
  * text (see approvalDecisionPoll in approvals.ts) -- 'group' targets ignore it,
  * same as the interactive sendReply path (WhatsApp polls don't work in groups). */
-export function enqueueAgentMessage(db: DatabaseSync, input: { toUser: string; text: string; choices?: SecretaryChoices; deliverAfter?: number; source?: string }, at: number): string {
+/* باسم 02/11/2026: لما باسم يعمل رد (اقتباس) على رسالة أمين حوّلله فيها طلب موظف، الرد بيروح لصاحب الطلب.
+   عشان هيك كل رسالة طالعة بتحفظ رقم رسالة الواتساب (wa_message_id) ومين صاحب الطلب الأصلي (relay_from). */
+const relayColumnsReady = new WeakSet<DatabaseSync>();
+export function ensureRelayColumns(db: DatabaseSync): void {
+  if (relayColumnsReady.has(db)) return;
+  const cols = new Set((db.prepare("PRAGMA table_info(agent_outbox)").all() as { name: string }[]).map(c => c.name));
+  if (!cols.has("wa_message_id")) db.exec("ALTER TABLE agent_outbox ADD COLUMN wa_message_id TEXT");
+  if (!cols.has("relay_from")) db.exec("ALTER TABLE agent_outbox ADD COLUMN relay_from TEXT");
+  db.exec("CREATE INDEX IF NOT EXISTS idx_agent_outbox_wa ON agent_outbox(wa_message_id)");
+  relayColumnsReady.add(db);
+}
+export function enqueueAgentMessage(db: DatabaseSync, input: { toUser: string; text: string; choices?: SecretaryChoices; deliverAfter?: number; source?: string; relayFrom?: string }, at: number): string {
   migrateManagementActions(db);
+  ensureRelayColumns(db);
   const id = randomBytes(8).toString("hex");
   // Every poll carries the universal way out, and every poll sent to a person
   // is remembered as the one they now have open -- see recordOpenChoice.
@@ -410,6 +422,7 @@ export function enqueueAgentMessage(db: DatabaseSync, input: { toUser: string; t
   const deliverAfter = typeof input.deliverAfter === "number" && input.deliverAfter > at ? Math.floor(input.deliverAfter) : null;
   db.prepare("INSERT INTO agent_outbox (id,to_user,text,choices_json,state,created_at,deliver_after,source) VALUES (?,?,?,?,'pending',?,?,?)")
     .run(id, input.toUser, input.text.slice(0, 3800), choices ? JSON.stringify(choices) : null, at, deliverAfter, input.source || "system");
+  if (input.relayFrom) db.prepare("UPDATE agent_outbox SET relay_from=? WHERE id=?").run(input.relayFrom, id);
   if (choices && deliverAfter === null) recordOpenChoice(db, input.toUser, choices);
   return id;
 }
@@ -486,7 +499,9 @@ export function createFollowupJobs({ db, config, now = Date.now }: { db: Databas
         db.prepare("INSERT OR REPLACE INTO agent_followups (id,kind,target_user,entity_id,sent_at,response) VALUES (?,?,?,?,?,'sending')").run(plan.id, queued ? "queued" : plan.kind, plan.targetUser, plan.entityId, at);
         const controller = new AbortController(); let timeout: ReturnType<typeof setTimeout> | undefined;
         try {
-          await Promise.race([send({ to: plan.to, text: plan.text, messageId: newMessageId(), signal: controller.signal, ...(plan.choices ? { choices: plan.choices } : {}) }),
+          const waMessageId = newMessageId();
+          if (queued) { ensureRelayColumns(db); db.prepare("UPDATE agent_outbox SET wa_message_id=? WHERE id=?").run(waMessageId, plan.id); }
+          await Promise.race([send({ to: plan.to, text: plan.text, messageId: waMessageId, signal: controller.signal, ...(plan.choices ? { choices: plan.choices } : {}) }),
             new Promise<never>((_, reject) => { timeout = setTimeout(() => { controller.abort(); reject(new Error("delivery_uncertain")); }, 15_000); })]);
           db.prepare("UPDATE agent_followups SET response='sent' WHERE id=?").run(plan.id);
           if (queued) db.prepare("UPDATE agent_outbox SET state='sent',sent_at=? WHERE id=?").run(at, plan.id);
