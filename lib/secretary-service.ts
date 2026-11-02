@@ -66,6 +66,8 @@ const SENSITIVE = new Set(["edit_task", "cancel_claim", "submit", "approve", "re
 // bare digit works exactly like tapping the matching option in
 // taskCommandsLegendPoll below -- see legendDigitOptionId's own comment for
 // why a bare digit only resolves this way sometimes.
+/* باسم 02/11/2026: «شيل قصة المهام من السيرفر كله» — أرقام المهام (1–5)، تصويتات المهام، إغلاق/تمديد/تحويل المهمة: كلها مطفية */
+const TASKS_OFF = true;
 const TASK_COMMANDS_LEGEND = "🧭 أوامر المهام السريعة — ارسل الرقم مباشرة:\n\n1️⃣ 🟢 اضافة مهمة\n2️⃣ 🔵 اضافة ملاحظة\n3️⃣ 🟣 تحويل المهمة\n4️⃣ 🟠 تمديد التاريخ\n5️⃣ 🔴 انهاء المهمة";
 // Basim: "بدي هذه تتحول تصويت للكل وفي كل مكان" -- the legend above is plain
 // text everywhere it's sent, so attach a poll alongside it (same trick as
@@ -214,6 +216,7 @@ function taskPriorityPoll(taskId: string, now: number): SecretaryChoices {
     options: PRIORITY_POLL_VALUES.map(value => ({ id: `PR${taskId}_${value}`, label: PRIORITY_POLL_LABELS[value] })) };
 }
 function parseTaskPriorityChoice(event: Event): { taskId: string; priority: "red" | "yellow" | "green" } | null {
+  if (TASKS_OFF) return null;
   const choice = event.choice;
   if (!choice || !choice.questionId.startsWith("PRQ")) return null;
   const taskId = choice.questionId.slice(3);
@@ -224,6 +227,7 @@ function parseTaskPriorityChoice(event: Event): { taskId: string; priority: "red
   return (PRIORITY_POLL_VALUES as readonly string[]).includes(value) ? { taskId, priority: value as "red" | "yellow" | "green" } : null;
 }
 function parseExtensionDurationChoice(event: Event): { taskId: string; days: number } | null {
+  if (TASKS_OFF) return null;
   const choice = event.choice;
   if (!choice || !choice.questionId.startsWith("EXTQ")) return null;
   const taskId = choice.questionId.slice(4);
@@ -265,6 +269,7 @@ function bareDigit(text: string): number | null {
   return /^[0-9]{1,3}$/.test(value) ? Number(value) : null;
 }
 function parseTaskChoicePollChoice(event: Event): { token: string; index: number } | null {
+  if (TASKS_OFF) return null;
   const choice = event.choice;
   if (!choice || !choice.questionId.startsWith("TDQ")) return null;
   const token = choice.questionId.slice(3);
@@ -462,6 +467,7 @@ function resolveTaskCommandsLegendChoice(db: DatabaseSync, event: Event, config:
  * enough to point them at "اضافة مهمة" for anything the task poll doesn't
  * cover. */
 function notifyTaskLegend(db: DatabaseSync, toUser: string, now: number, withPoll = true) {
+  return; /* باسم 02/11/2026: قصة المهام انلغت — ما في «أوامر المهام السريعة» */
   if (toUser === "basem" || toUser === "group") return;
   enqueueAgentMessage(db, { toUser, text: TASK_COMMANDS_LEGEND, ...(withPoll ? { choices: taskCommandsLegendPoll(now) } : {}) }, now);
 }
@@ -1063,6 +1069,7 @@ function taskCloseDecisionPoll(taskId: string, at: number): SecretaryChoices {
     options: [{ id: `TCL${taskId}Y`, label: "🟢 اعتماد" }, { id: `TCL${taskId}N`, label: "🔴 رفض" }] };
 }
 function parseTaskCloseDecisionPollChoice(event: Event): { taskId: string; decision: "approved" | "rejected" } | null {
+  if (TASKS_OFF) return null;
   const choice = event.choice;
   if (!choice || !choice.questionId.startsWith("TCLQ")) return null;
   const taskId = choice.questionId.slice(4);
@@ -1102,6 +1109,7 @@ function resolveTaskCloseDecisionRejectChoice(db: DatabaseSync, event: Event): E
 // content a tap can't carry (a note's body, a colleague's name, a new date),
 // so those are handled below by their own deterministic tap branches instead.
 function parseTaskActionPollChoice(event: Event): { taskId: string; action: "claim" | "submit" | "note" | "transfer" | "extend" | "edit" | "none" } | null {
+  if (TASKS_OFF) return null;
   const choice = event.choice;
   if (!choice || !choice.questionId.startsWith("TSKQ")) return null;
   const taskId = choice.questionId.slice(4);
@@ -1139,6 +1147,7 @@ function parseTaskActionPollChoice(event: Event): { taskId: string; action: "cla
 // parseApprovalPollChoice/parseTaskActionPollChoice: nothing is looked up
 // against a model and no live state can have gone stale.
 function parseTaskPickerChoice(event: Event): { taskId: string } | null {
+  if (TASKS_OFF) return null;
   const choice = event.choice;
   if (!choice || choice.questionId !== "TPKQ" || !choice.optionId.startsWith("TPK")) return null;
   const taskId = choice.optionId.slice(3);
@@ -1159,6 +1168,7 @@ function parseApprovalPickerChoice(event: Event): { approvalId: string } | null 
   return /^[a-zA-Z0-9_-]{1,200}$/.test(approvalId) ? { approvalId } : null;
 }
 function parseUnownedTaskPollChoice(event: Event): { taskId: string; target: string } | null {
+  if (TASKS_OFF) return null;
   const choice = event.choice;
   if (!choice || !choice.questionId.startsWith("UNOWNQ")) return null;
   const taskId = choice.questionId.slice(6);
@@ -1713,7 +1723,8 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
   }
   event = resolveConfirmChoice(event);
   const beforeLegend = event.text;
-  event = resolveTaskCommandsLegendChoice(db, event, config, now);
+  // باسم 02/11/2026: «قصة مهام الأرقام وإغلاق المهمة شيلها كلها» — الرقم 1–5 ما عاد أمر مهام
+  void resolveTaskCommandsLegendChoice;
   // Basim, 2026-09-19: "جيت افتح مهمه ولقيتو سالني عن اللي فاتحها الصبح ...
   // ورجع نشرها كمان مره". He tapped "1" to open a NEW task and the assistant
   // answered with a finished confirmation for "برمجة كاميرات دابوق" -- the
