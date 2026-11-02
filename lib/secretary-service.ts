@@ -854,9 +854,9 @@ function readReply(plan: SecretaryIntent, actor: ChatUser, state: Snapshot, now:
     // ask by folding in TASK_COMMANDS_LEGEND for employees, and drops the
     // unfulfilled "I'll re-review" promise for everyone.
     const isBasem = actor.id === "basem" && actor.role === "admin";
-    const body = isBasem
-      ? "احكيلي بطريقتك: شو مهامي؟ اشرح مهمة جديدة، سجل تحديث، أو اعتمد/ارفض طلب معلّق. اسألني عن أي مهمة بالاسم وبجاوبك."
-      : `احكيلي بطريقتك: شو مهامي؟ سجل تحديث على مهمة قيد التنفيذ، أو اسألني عن أي مهمة بالاسم.\n${TASK_COMMANDS_LEGEND}\nولو عندك مهمة معروضة عليك وبعدك ما استلمتها: اكتب «استلمت» لبدء التنفيذ.`;
+    /* باسم 02/11/2026: قصة المهام انلغت — نص المساعدة بلا أوامر مهام */
+    void isBasem;
+    const body = "احكيلي بطريقتك شو بدك: سؤال عن البيع أو المخزون أو الأسعار، رسالة لزميل، جرد، أو أي إشي بالشغل.";
     return { result: { status: "summary", reply: `${greeting}${SECRETARY_IDENTITY}\n${body}` }, scope: [] };
   }
   if (plan.kind === "details") {
@@ -2436,7 +2436,7 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
   // callerQuestion already normalized أ/إ/آ -> ا above, so match only the
   // normalized alef form ("الان", never "الآن") or this never fires.
   const teamReminderMatch = /^(?:ابعت|ارسل|بعت)\s*(?:ال)?تذكير(?:ات)?\s*(?:المهام)?\s*(?:الان|هلق|دلوقتي|حالا)?[.!؟\s]*$/u.test(callerQuestion);
-  if (teamReminderMatch && actor.id === "basem" && actor.role === "admin" && event.groupId === null) return transaction(db, () => {
+  if (false && teamReminderMatch && actor.id === "basem" && actor.role === "admin" && event.groupId === null) return transaction(db, () => {   /* باسم 02/11/2026: قصة المهام انلغت */
     const freshActor = actorFor(db, event, config); if (!freshActor || freshActor.id !== "basem" || freshActor.role !== "admin" || freshActor.active !== 1) return { status: "denied", reply: "" };
     const state = stateFor(db, freshActor); const duplicate = lookup(db, event, freshActor, state); if (duplicate) return duplicate;
     const groups = ownerTaskGroups(state);
@@ -2717,16 +2717,16 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
   const workloadQuery = !review && !taskDraft && !event.replyToMessageId && (actor.role === "admin" || actor.role === "manager")
     && /مهام|شغل|مشغول/.test(listText) && /أكثر|اكثر/.test(listText) && /مين|من |موظف|حدا|واحد|مشغول/.test(listText);
   try {
+    // باسم 02/11/2026 «شيل قصة المهام من السيرفر كله»: ولا رد مهام محلي (قوائم المهام، أكثر موظف عنده مهام،
+    // فلاتر الأولوية، قائمة فتح مهمة) — كل رسالة بتروح للموديل، وأدوات المهام انشالت منه (secretary-intent).
+    void workloadQuery; void priorityQuery; void directTaskList; void menuCreation; void directCreation;
     plan = directContinuation ? directContinuation
-      : workloadQuery ? emptySecretaryIntent("report", "WORKLOAD_LEADERBOARD")
-      : priorityQuery ? emptySecretaryIntent(priorityQuery.kind === "clarify" ? "clarify" : "summary", priorityQuery.kind === "clarify" ? priorityQuery.reply : null)
-      : directTaskList ? emptySecretaryIntent("summary")
-        : menuCreation ?? directCreation ?? validateSecretaryIntent(await dependencies.infer(input), input);
+        : validateSecretaryIntent(await dependencies.infer(input), input);
   } catch (error) {
     // Only standalone, unqualified read questions may recover from provider failure.
     // Never reinterpret a write, priority filter, quoted reply, or active intake.
     const generalTasks = event.text.normalize("NFKC").replace(/[أإآ]/g, "ا").replace(/[\u064B-\u065F\u0670ـ]/g, "").replace(/[؟?!.،,]/g, "").replace(/\s+/g, " ").trim();
-    if (!review && !event.replyToMessageId && !taskDraft
+    if (false && !review && !event.replyToMessageId && !taskDraft   /* باسم 02/11/2026: قصة المهام انلغت */
       && /^(?:(?:شو|ايش|ما هي|اعرض|اعرضلي|وريني) )?(?:المهام(?: المطلوب[ةه]| المتاح[ةه]| الموجود[ةه])?|مهامي)(?: عندنا| عندي)?$/.test(generalTasks)) {
       plan = emptySecretaryIntent("summary");
     } else {
