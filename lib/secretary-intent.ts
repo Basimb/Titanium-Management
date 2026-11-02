@@ -651,7 +651,9 @@ export async function inferSecretaryIntent(input: SecretaryModelInput, options: 
   const messages: any[] = [{ role: "system", content: plannerPrompt(input) }, { role: "user", content: JSON.stringify(plannerContext(input)) }];
   const deadline=Date.now()+18000;
   const turns=typeof input.retrieveInternal==='function' ? 4 : 3;
-  const finalTools=secretaryTools(true).filter(t=>(t.function.name!=='server_work'||input.canRunServerWork===true)&&(t.function.name!=='staff_relay'||input.canRelayToStaff===true));
+  // باسم 02/11/2026: «شيل قصة المهام من السيرفر كله» — أمين ما عاد بيفتح أو بيدير مهام (نظام المهام القديم)
+  const TASK_TOOLS=new Set(["summary","report","details","remind","nudge","task_draft","tasks_draft","command","extension","priority_change","close_request","ownership_request","task_transfer_request"]);
+  const finalTools=secretaryTools(true).filter(t=>!TASK_TOOLS.has(t.function.name)&&(t.function.name!=='server_work'||input.canRunServerWork===true)&&(t.function.name!=='staff_relay'||input.canRelayToStaff===true));
   const requestBody = { model, max_completion_tokens: 1300, tool_choice: "required", parallel_tool_calls: false,
       messages, tools: [...finalTools,...aminReadTools(input)] };
   const send = async (body: unknown) => {

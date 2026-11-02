@@ -45,6 +45,8 @@ const DAY = 24 * 60 * 60_000, SILENT_AFTER = 3 * DAY, STALE_APPROVAL_AFTER = 2 *
 // six hours instead -- at most two in a working day, and the task is still
 // chased the same day it goes quiet.
 const NUDGE_EVERY = 6 * HOUR;
+/* باسم 02/11/2026: قصة المهام انلغت من أمين كله */
+const TASKS_OFF = true;
 const newMessageId = () => "3EB0" + randomBytes(18).toString("hex").toUpperCase();
 const clean = (value: string) => value.replace(/[\x00-\x1f\u202a-\u202e\u2066-\u2069]/g, " ").slice(0, 200);
 // Small per-file duplicates of secretary-service.ts's PRIORITIES/LABELS and
@@ -218,6 +220,10 @@ export function planFollowups(db: DatabaseSync, config: FollowupConfig, at: numb
     if (alreadySent(db, "welcome", welcome.userId, null, at - DAY)) continue;
     plans.push({ id: randomBytes(8).toString("hex"), kind: "welcome", targetUser: welcome.userId, entityId: null, to: `${number}@s.whatsapp.net`, text: welcome.text });
   }
+  // باسم 02/11/2026: «شيل قصة المهام من السيرفر كله» — ما في ولا تذكير مهام بعد هيك
+  // (تذكير 8 الصبح/8 المسا، لسا ما استلمت، متأخرة، بدون تحديث، طلبات معلّقة، مهام ما استلمها حدا، ملخص المتأخر).
+  // بتضل بس رسالة الترحيب، والرسايل المحطوطة بالطابور (agent_outbox) بتنبعت عادي من nextQueued.
+  if (TASKS_OFF) return plans;
 
   // Twice-daily team task reminder (Basim asked for one at 8am and one at
   // 8pm local, every day) -- deliberately computed and returned BEFORE the
