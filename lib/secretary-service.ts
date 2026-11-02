@@ -2757,6 +2757,19 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
     void workloadQuery; void priorityQuery; void directTaskList; void menuCreation; void directCreation;
     plan = directContinuation ? directContinuation
         : validateSecretaryIntent(await dependencies.infer(input), input);
+    // باسم 03/11/2026 (1 و 2): «بدك أوصل طلبك لباسم؟» كانت تتحوّل لباسم فورًا — فكل جملة ما انفهمت (باركود، اسم صنف،
+    // «30 tab») كانت توصله لحالها. هلأ: ما في تحويل إلا إذا الموظف طلبه صراحة؛ وبدل التحويل أمين بيرجع يفكّر مرة وحدة
+    // على إنه الرسالة جواب على آخر سؤال سأله، وبيكمّل الشغل بنفسه.
+    if (!directContinuation && !review && plan.kind === "clarify" && plan.message === OWNER_MESSAGE_CONFIRM) {
+      const lastAsk = [...history].reverse().find(t => t.role === "assistant")?.content || "";
+      const retryInput: SecretaryModelInput = { ...input, canNotifyOwner: false,
+        text: `${event.text}\n\n[ملاحظة النظام: هالرسالة من الموظف، وغالبًا جواب على آخر سؤال سألته إله${lastAsk ? ` («${clean(lastAsk, 300)}»)` : ""}. اربطها بالمحادثة وكمّل الشغل بنفسك وجاوبه هو. ما في تحويل لحدا.]` };
+      let wantsRelay = false;
+      try { const raw = await dependencies.infer(retryInput); wantsRelay = raw.kind === "owner_message" || raw.kind === "staff_relay"; plan = validateSecretaryIntent(raw, retryInput); }
+      catch { plan = emptySecretaryIntent("clarify", ""); }
+      if (wantsRelay || (plan.kind === "clarify" && (!plan.message || plan.message === OWNER_MESSAGE_CONFIRM)))
+        plan = emptySecretaryIntent("clarify", "وصلتني 👍 كمّل التفاصيل هون وأنا بتابع معك. وإذا بدك توصل القصة لد. باسم اكتبلي «وصّلها لد. باسم» وببعتله ياها كاملة برسالة وحدة.");
+    }
   } catch (error) {
     // Only standalone, unqualified read questions may recover from provider failure.
     // Never reinterpret a write, priority filter, quoted reply, or active intake.
@@ -2993,7 +3006,7 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
     }
     // 25/10/2026، محمد إياد: «امين ٤ و ٣ حولهم على شادي بدي اسعار تكلفتهم». نأكد مرة وحدة بالاسم والبنود
     // (موافق/إلغاء أو «نعم» كتابة) عبر secretary_pending، وعلى «نعم» بينبعت. نفس الشي لسؤال «بدك أوصل طلبك لباسم؟».
-    if (plan.kind === "staff_relay" || (plan.kind === "clarify" && plan.message === OWNER_MESSAGE_CONFIRM && input.canNotifyOwner === true && !review)) {
+    if (plan.kind === "staff_relay") {
       const toUserId = plan.kind === "staff_relay" ? plan.recipientIds[0] : "basem";
       const target = state.users.find(u => u.id === toUserId && u.active === 1);
       if (review || event.groupId !== null || !target || !config.contacts.some(c => c.userId === toUserId))
@@ -3013,7 +3026,7 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
       const approved=validateSecretaryIntent(plan,input);
       if(!allowed || approved.kind!=="owner_message")return save(db,event,freshActor,{status:"clarify",reply:approved.message||"ما قدرت أوصل الطلب لباسم من هالسياق."},[],now);
       const links=[...history.filter(t=>t.role==="user").slice(-2).flatMap(t=>[...t.content.matchAll(/https?:\/\/[^\s<>]+/gu)].map(m=>m[0]))].filter(url=>{try{const u=new URL(url);return u.protocol==="https:"&&!u.username&&!u.password&&!/api.?key|token|password|secret|auth|signature|[?&]key=/i.test(u.href);}catch{return false;}}).slice(-2);
-      const text="📩 طلب من "+clean(freshActor.name)+":\n"+clean(event.text).slice(0,2000)+(links.length?"\n\nرابط مذكور في الحوار (لم أفحص محتواه):\n"+[...new Set(links)].join("\n"):"");
+      const text="📩 طلب من "+clean(freshActor.name)+":\n"+clean(String(plan.fields.body||event.text),2000)+(links.length?"\n\nرابط مذكور في الحوار (لم أفحص محتواه):\n"+[...new Set(links)].join("\n"):"");
       const queuedId=enqueueAgentMessage(db,{toUser:"basem",text,relayFrom:freshActor.id},now);
       log(db,freshActor,event,"secretary_owner_message",{summary:"أدرج طلب الموظف لباسم في طابور الإرسال؛ لم يثبت الإرسال أو التسليم"},now);
       return save(db,event,freshActor,{status:"queued",batchId:queuedId,reply:"حطّيت طلبك بطابور الإرسال لباسم. لسه ما عندي تأكيد إنه انبعت أو وصل."},[],now);
