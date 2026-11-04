@@ -1557,12 +1557,18 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
   }
   // باسم 02/11/2026: «ارسلها استلمو» كرد على «📩 طلب من براء» — الرد (الاقتباس) على رسالة حوّلها أمين من موظف
   // بيروح لصاحب الطلب مباشرة، بدون ما أمين يسأل «لمين؟». لباسم بس، وبالخاص بس.
-  if (config.enabled && event.groupId === null && !event.choice && event.replyToMessageId) {
+  // باسم 05/11/2026: «قلو استلم» بدون اقتباس، بعد ما وصله «📩» من موظف بآخر نص ساعة ← بيروح لنفس الموظف.
+  const TELL_RE = /^(?:قلو|قله|قلّه|قوله|قولو|قلها|قوليلها|قولها|ردله|ردلها|رد عليه|رد عليها|بلغه|بلّغه|بلغها|بلّغها|ابعتله|ابعتلها|ابعثله|ابعثلها)\s+/u;
+  const tellMatch = !event.replyToMessageId ? TELL_RE.exec(event.text.trim()) : null;
+  if (config.enabled && event.groupId === null && !event.choice && (event.replyToMessageId || tellMatch)) {
     const ra = actorFor(db, event, config);
     if (ra && ra.id === "basem" && ra.role === "admin" && ra.active === 1) {
       ensureRelayColumns(db);
-      const src = db.prepare("SELECT id,text,relay_from AS relayFrom FROM agent_outbox WHERE wa_message_id=? AND to_user='basem' AND relay_from IS NOT NULL LIMIT 1")
-        .get(event.replyToMessageId) as { id: string; text: string; relayFrom: string } | undefined;
+      const src = (event.replyToMessageId
+        ? db.prepare("SELECT id,text,relay_from AS relayFrom FROM agent_outbox WHERE wa_message_id=? AND to_user='basem' AND relay_from IS NOT NULL LIMIT 1").get(event.replyToMessageId)
+        : db.prepare("SELECT id,text,relay_from AS relayFrom FROM agent_outbox WHERE to_user='basem' AND relay_from IS NOT NULL AND relay_from<>'basem' AND created_at>? ORDER BY created_at DESC LIMIT 1").get(now - 30 * 60_000)
+      ) as { id: string; text: string; relayFrom: string } | undefined;
+      const said = tellMatch ? event.text.trim().slice(tellMatch[0].length).trim() : event.text;
       const target = src ? (db.prepare("SELECT id,name,active FROM users WHERE id=?").get(src.relayFrom) as { id: string; name: string; active: number } | undefined) : undefined;
       if (src && target && target.id !== "basem") {
         return transaction(db, () => {
@@ -1572,7 +1578,7 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
           if (target.active !== 1 || !config.contacts.some(c => c.userId === target.id))
             return save(db, event, fresh, { status: "clarify", reply: `ما بقدر أوصل لـ${clean(target.name, 60)} من هون.` }, [], now);
           const asked = clean(String(src.text).split("\n").slice(1).join(" ")).replace(/\s+/g, " ").trim().slice(0, 80);
-          const queuedId = enqueueAgentMessage(db, { toUser: target.id, text: `📩 من د. باسم${asked ? ` (ردًا على «${asked}»)` : ""}:\n${clean(event.text, 2000)}` }, now);
+          const queuedId = enqueueAgentMessage(db, { toUser: target.id, text: `📩 من د. باسم${asked ? ` (ردًا على «${asked}»)` : ""}:\n${clean(said || event.text, 2000)}` }, now);
           log(db, fresh, event, "secretary_owner_quote_reply", { summary: "رد باسم المقتبس انبعت لصاحب الطلب", toUserId: target.id, outboxId: queuedId }, now);
           return save(db, event, fresh, { status: "queued", batchId: queuedId, reply: `✅ بعتت ردك لـ${clean(target.name, 60)}.` }, [], now);
         });
@@ -2372,6 +2378,13 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
       return perform(db, event, fresh, state, { action: noteFollowup.action, taskId: task.id, comment: event.text.trim() }, now, { originalText: event.text, sourceMessageId: event.messageId, confirmationRequired: false });
     });
   }
+  // باسم 05/11/2026: «نعم» لأمين رجّعت «انتهى وقت الطلب السابق» بسبب طلب تأكيد قديم منتهي. المنتهي بينشال قبل ما نقرأ،
+  // فالرسالة بتكمل عادي.
+  { const old = db.prepare("SELECT token,expires_at FROM secretary_pending WHERE conversation_key=?").get(key) as { token: string; expires_at: number } | undefined;
+    if (old && old.expires_at <= now - 30 * 60_000 && !isCancellation(event.text)) { // منتهي من أكثر من نص ساعة = منسي
+      db.prepare("DELETE FROM secretary_pending WHERE conversation_key=? AND token=? AND expires_at<=?").run(key, old.token, now - 30 * 60_000);
+      clearConfirmationView(db, key); clearSecretaryChoices(db, key);
+    } }
   const pending = db.prepare("SELECT * FROM secretary_pending WHERE conversation_key=?").get(key) as Pending | undefined;
   const storedIntake = intakeRow(db, key);
   const pendingDraft = pendingTaskDraft(pending, initialHash, now);

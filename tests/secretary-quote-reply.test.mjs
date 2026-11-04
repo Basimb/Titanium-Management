@@ -51,3 +51,23 @@ test('a staff member quoting a message is not routed', async t => {
     config, { infer: async () => ({ kind: 'clarify', message: 'ok', recipientIds: [], fields: {} }), now: () => now }).catch(() => {});
   assert.equal(db.prepare("SELECT count(*) n FROM agent_outbox WHERE to_user='baraa'").get().n, 0);
 });
+
+test('«قلو استلم» without a quote goes to the employee of the last relay (Basim 05/11, Malik)', async t => {
+  const { db, config } = fixture(t);
+  enqueueAgentMessage(db, { toUser: 'basem', text: '📩 طلب من براء:\nConcor 5 plus الرف 16 والسيستم 5', relayFrom: 'baraa' }, now - 60_000);
+  const res = await handleSecretaryEvent(db, { messageId: 'E-9', senderNumber: '12025550103', groupId: null, text: 'قلو استلم', receivedAt: now, responseMessageId: 'R-9' },
+    config, { infer: async () => assert.fail('must not reach the model'), now: () => now });
+  assert.equal(res.status, 'queued');
+  const out = db.prepare("SELECT text FROM agent_outbox WHERE to_user='baraa'").all();
+  assert.equal(out.length, 1);
+  assert.match(out[0].text, /استلم/);
+  assert.doesNotMatch(out[0].text, /قلو/);
+});
+
+test('an old relay (over half an hour) is not used for an unquoted «قلو»', async t => {
+  const { db, config } = fixture(t);
+  enqueueAgentMessage(db, { toUser: 'basem', text: '📩 طلب من براء:\nx', relayFrom: 'baraa' }, now - 40 * 60_000);
+  await handleSecretaryEvent(db, { messageId: 'E-10', senderNumber: '12025550103', groupId: null, text: 'قلو استلم', receivedAt: now, responseMessageId: 'R-10' },
+    config, { infer: async () => ({ kind: 'clarify', message: 'مين؟' }), now: () => now }).catch(() => {});
+  assert.equal(db.prepare("SELECT count(*) n FROM agent_outbox WHERE to_user='baraa'").get().n, 0);
+});

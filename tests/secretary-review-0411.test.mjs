@@ -81,3 +81,14 @@ test('a long stocktake question (Jood 04/11, offer pack) reaches Amin, not the l
   await f.say('مطلوب مني جرد حليب sahha 3 pro حجم ال ٤٠٠ / انا عندي علبتين ع الرف وفي كمان العرض العلبتين مع بعض العرض بحسبو ضمن الجرد،', async () => { asked = true; return emptySecretaryIntent('clarify', 'سؤال منيح'); });
   assert.equal(asked, true);
 });
+
+test('«نعم» with only an expired old confirmation goes on normally, no «انتهى وقت الطلب» (Basim 05/11)', async t => {
+  const f = fixture(t);
+  await f.say('مرحبا', async () => emptySecretaryIntent('clarify', 'هلا، شو بدك؟'));
+  const key = f.db.prepare('SELECT conversation_key k FROM secretary_events LIMIT 1').get()?.k;
+  assert.ok(key);
+  f.db.prepare('INSERT INTO secretary_pending VALUES(?,?,?,?,?,?,?)').run(key, 'TOK', '{"action":"team_reminders"}', 'h', 'x', 'm', now - 31 * 60_000);
+  let asked = false;
+  const res = await f.say('نعم', async () => { asked = true; return emptySecretaryIntent('clarify', 'تمام، كمّل'); });
+  assert.doesNotMatch(res.reply, /انتهى وقت الطلب/);
+});
