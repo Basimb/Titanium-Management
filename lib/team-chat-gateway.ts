@@ -144,14 +144,22 @@ export async function handleTeamChatRequest(request: Request, dependencies: {
     if (!actor) return response({ status: "denied", reply: "" }, 403);
     if (event.receivedAt > now + 60_000 || now - event.receivedAt > MAX_MESSAGE_AGE) return response({ error: "Message is too old or has invalid time." }, 400);
     if (!allowedQuota(actor.id, now)) return response({ error: "Please retry shortly." }, 429);
-    const result = await dependencies.secretary(sqlite, event, config);
+    // باسم 04/11/2026 «بلش اه»: لما الموديل يطلّع رد مش مرتب (invalid_plan/invalid_response…)، بنعيد مرة وحدة
+    // قبل ما نرد على الموظف. آمن: الفشل بيصير قبل أي تنفيذ، والحدث ما بينحفظ إلا لما ينجح.
+    let result;
+    try { result = await dependencies.secretary(sqlite, event, config); }
+    catch (first) {
+      if (!(first instanceof SecretaryProviderError) || first.retryAfterSeconds) throw first;
+      console.warn("secretary_provider_retry", first.code);
+      result = await dependencies.secretary(sqlite, event, config);
+    }
     return response(result, result.status === "denied" && !result.reply ? 403 : 200);
   } catch (error) {
     if (error instanceof SecretaryProviderError) {
       console.warn("secretary_provider_failure", error.code);
       if (error.retryAfterSeconds) return new Response(JSON.stringify({ error: error.code }), { status: 503,
         headers: { ...RESPONSE_HEADERS, "content-type": "application/json", "retry-after": String(error.retryAfterSeconds) } });
-      return response({ status: "unavailable", reply: "ما قدرت أفهم الطلب بشكل موثوق، وما نفّذت تغييرًا. وضّح المطلوب بجملة ثانية." });
+      return response({ status: "unavailable", reply: "معلش، صار عندي خلل هلأ وما قدرت أرتّب ردّي — الغلط مني مش منك 🙏 ابعتلي رسالتك كمان مرة بعد دقيقة." });
     }
     // Never leak DB paths, provider credentials, employee text, or provider responses.
     return response({ error: "Message could not be processed. No success is being claimed." }, 503);
