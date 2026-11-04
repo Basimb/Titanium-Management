@@ -373,7 +373,7 @@ export function validateSecretaryIntent(value: unknown, input: SecretaryModelInp
     return plan;
   }
   if (plan.kind === "owner_message") {
-    if (review || input.canNotifyOwner !== true || plan.action !== null || plan.intakeMode !== null || plan.taskId !== null || !Array.isArray(plan.recipientIds) || plan.recipientIds.length || Object.entries(plan.fields).some(([k,v])=>k!=="body"&&v!==null)) return emptySecretaryIntent("clarify", "التبليغ لباسم غير متاح بهالسياق؛ وضّحلي طلبك.");
+    if (review || input.canNotifyOwner !== true || plan.action !== null || plan.intakeMode !== null || plan.taskId !== null || !Array.isArray(plan.recipientIds) || plan.recipientIds.length) return emptySecretaryIntent("clarify", "التبليغ لباسم غير متاح بهالسياق؛ وضّحلي طلبك.");
     const text=normalizedArabic(input.text);
     const explicit=/(?:بلغ|خبر|وصل|احكي|ارفع|ابعث|ابعت|ارسل)/u.test(text) && /(?:باسم|الدكتور|لدكتور|د\s*باسم)/u.test(text);
     const negated=/(?:لا|ما|مش|بدون)\s+(?:(?:ت|ي)?(?:بلغ|خبر|وصل|حكي|ارفع|بعث|بعت|رسل))/u.test(text);

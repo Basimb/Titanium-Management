@@ -22,6 +22,7 @@ import { approvalDecisionPollFor, formatApprovalChoice, listApprovals, requestDe
 import { activeRules } from "./rules.ts";
 import { searchKnowledge, formatKnowledgeHits } from "./knowledge.ts";
 import { migrateSecretaryMemory, rememberSecretaryMistake, recallSecretaryMemory, personalMemoryCommand, updatePersonalMemory, personalMemory } from "./secretary-memory.ts";
+import { describeStaffImage, imageMessageText, isStaffImagePath } from "./secretary-image.ts";
 import { enqueueAgentMessage, ensureRelayColumns, recordOpenChoice, clearOpenChoice, openChoiceFor, countOpenChoiceNudge } from "./agent-followups.ts";
 import { safeConversationalReply, isConversationCancellation } from "./secretary-conversation-policy.ts";
 import { secretaryReviewRequest, isSecretaryIdentityQuery, isAddressedToSecretary, SECRETARY_IDENTITY } from "./secretary-review.ts";
@@ -350,6 +351,7 @@ const LEGEND_FUZZY_KEYWORDS: Record<string, RegExp> = {
   LGDEXTEND: /(?:^| )(?:تمديد|مدد|تأجيل|اجل)(?:$| )/,
 };
 function legendFuzzyPhraseOption(text: string): string | null {
+  if (TASKS_OFF) return null; // باسم 04/11/2026: «خلصت» ما عاد بيرد «ما عندك مهمة» (جود، خطة التهيئة)
   const normalized = text.normalize("NFKC").replace(/[أإآ]/g, "ا").replace(/[ً-ٰٟـ؟?!.،,]/g, "").replace(/ة/g, "ه").replace(/\s+/g, " ").trim();
   if (!normalized || normalized.split(" ").length > 8 || /(?:^| )(?:ما|مو|مش|لا|لم|لن)(?:$| )/.test(normalized)) return null;
   for (const optionId of Object.keys(LEGEND_FUZZY_KEYWORDS)) if (LEGEND_FUZZY_KEYWORDS[optionId].test(normalized)) return optionId;
@@ -576,7 +578,9 @@ function inJardCount(actor: ChatUser): boolean {
 // هلأ بيقرأ دفعات الجرد اللي انبعتتله (روابط /jard/?t= بالـoutbox + jard.log) وبيجاوبه بالضبط — بلا أي كمية من السيستم.
 const JARD_STATUS_RE = /(?:جرد|الجرد|جردي|رابط)/u;
 const JARD_STATUS_ASK = /(?:عندي|ضايل|ضل|ضلّ|باقي|خلصت|خلّصت|خلصته|خلصتها|خلصتو|فتحت|فتحته|فتحتو|بعثتلي|بعتلي|بعتتلي|بعتولي|وصلني|معلق|معلّق|مفتوح|اجرد|أجرد|نسيت|وين\s*(?:ال)?رابط)/u;
-function isJardStatusQuestion(text: string): boolean { return JARD_STATUS_RE.test(text) && JARD_STATUS_ASK.test(text) && text.length < 300; }
+// باسم 04/11/2026: سؤال فيه «ليش/كيف/ولا/بستفسر…» عن الجرد مش سؤال عن الروابط — بيروح لأمين يجاوبه (محمد عيد «ليش تبعتلي تنبيه»، الريم عن القلفز، جود عن الحبات).
+const JARD_STATUS_NOT = /(?:ليش|ليه|كيف|بستفسر|استفسار|سؤال|بدي\s*(?:ا|أ)س(?:ا|أ)ل|و\s*لا\s|ازا|اذا|إذا|يعني)/u;
+function isJardStatusQuestion(text: string): boolean { return JARD_STATUS_RE.test(text) && JARD_STATUS_ASK.test(text) && !JARD_STATUS_NOT.test(text) && text.length < 300; }
 function jardStatusReply(actor: ChatUser): string {
   const J = "/home/titani24/qa_data/jard";
   const ids = new Map<string, number>();
@@ -1537,8 +1541,15 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
   // one read-only query over any table. Runs as the ASKING PERSON in Odoo --
   // hence the user id -- so Odoo's own record rules decide what comes back.
   exploreOdoo?: (userId: string, text: string, at: number) => Promise<string | null>;
+  describeImage?: (path: string, caption: string) => Promise<string>;
 }): Promise<Result> {
   migrateSecretary(db); const now = (dependencies.now || Date.now)();
+  // باسم 04/11/2026: صورة من موظف ← بتنقرأ وبتدخل لأمين كجزء من كلامه (lib/secretary-image.ts).
+  if (event.imageFile !== undefined) {
+    if (!isStaffImagePath(event.imageFile) || event.groupId !== null) return { status: "denied", reply: "" };
+    const description = await (dependencies.describeImage || describeStaffImage)(event.imageFile, event.text === "صورة" ? "" : event.text).catch(() => "");
+    event = { ...event, text: imageMessageText(event.text, description) };
+  }
   if(config.enabled&&event.choice&&/^ASQ[0-9a-f]{32}$/.test(event.choice.questionId)){
     const a=actorFor(db,event,config);if(!a||event.groupId!==null||a.id!=='basem'||a.role!=='admin')return {status:'denied',reply:''};
     return transaction(db,()=>{const fresh=actorFor(db,event,config);if(!fresh||fresh.id!==a.id||fresh.role!==a.role||fresh.active!==1)return {status:'denied',reply:''};const state=stateFor(db,fresh),prior=lookup(db,event,fresh,state);if(prior)return prior;const r=aminServerVote(db,fresh,{conversation:conversation(event,fresh),choice:event.choice!,now})!;if(r.status==='queued'||r.status==='cancelled')clearOpenChoice(db,fresh.id);return save(db,event,fresh,r,[],now);});
@@ -2550,7 +2561,7 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
     const state = stateFor(db, freshActor); const duplicate = lookup(db, event, freshActor, state); if (duplicate) return duplicate;
     const row = noticeableOutbound(db, freshActor.id, now);
     if (row) notifyBasimOfReply(db, freshActor, row, event.text, now);
-    return save(db, event, freshActor, { status: "summary", reply: `تمام يا ${clean(freshActor.name, 60)}، وصلني ردك 👍${freshActor.id === "basem" ? "" : " وبلّغت باسم."}` }, [], now);
+    return save(db, event, freshActor, { status: "summary", reply: `تمام يا ${clean(freshActor.name, 60)} 👍` }, [], now);
   });
   if (!pending && isConfirmationAttempt(event.text) && !answersOwnQuestion) return transaction(db, () => {
     const freshActor = actorFor(db, event, config); if (!freshActor || JSON.stringify(freshActor) !== JSON.stringify(actor)) return { status: "denied", reply: "" };
@@ -2740,6 +2751,7 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
   const priorityQuery = review ? priorityTaskQuery(readQuestion, input)
     : !event.replyToMessageId && (!taskDraft || /مهام|اعط|أعط|وريني|اعرض|اسرد/u.test(event.text)) ? priorityTaskQuery(event.text, input) : null;
   let plan: SecretaryIntent;
+  let ownerConfirmed = false;
   const listText = event.text.normalize("NFKC").replace(/[أإآ]/g, "ا").replace(/[\u064B-\u065F\u0670ـ؟?!.،,]/g, "").replace(/\s+/g, " ").trim();
   const directTaskList = !review && !taskDraft && !event.replyToMessageId
     && /^(?:(?:وريني|اعرض|اعرضلي|اعطيني|اعطني|شو|ارسل|ارسللي|ابعث|ابعثلي|ابعت|ابعتلي|بدي اشوف|بدي شوف|خليني اشوف|خليني شوف) )?المهام(?: المطلوبة| المطلوبه| المتاحة| المتاحه| الموجودة| الموجوده)?(?: كلها| جميعها)?(?: اشوف| بشوف| لاشوف| لأشوف)?(?: كمان مره| كمان مرة| مرة ثانية| مره ثانيه)?$/.test(listText);
@@ -2755,8 +2767,21 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
     // باسم 02/11/2026 «شيل قصة المهام من السيرفر كله»: ولا رد مهام محلي (قوائم المهام، أكثر موظف عنده مهام،
     // فلاتر الأولوية، قائمة فتح مهمة) — كل رسالة بتروح للموديل، وأدوات المهام انشالت منه (secretary-intent).
     void workloadQuery; void priorityQuery; void directTaskList; void menuCreation; void directCreation;
-    plan = directContinuation ? directContinuation
-        : validateSecretaryIntent(await dependencies.infer(input), input);
+    const raw0 = directContinuation ? null : await dependencies.infer(input);
+    plan = directContinuation ? directContinuation : validateSecretaryIntent(raw0!, input);
+    // باسم 04/11/2026: أمين سأل «بدك أرفعها لباسم؟» والموظف رد «اه/تمام ابعته» ← هاد طلب صريح: بتروح لباسم برسالة وحدة كاملة.
+    if (!directContinuation && !review && plan.kind === "clarify" && plan.message === OWNER_MESSAGE_CONFIRM && input.canNotifyOwner === true) {
+      const lastAsk0 = [...history].reverse().find(t => t.role === "assistant")?.content || "";
+      const offered = /باسم/u.test(lastAsk0) && /(?:ارفع|أرفع|اوصل|أوصل|اوصّل|أوصّل|ابعت|أبعت|ابلغ|أبلغ|ابلّغ|أبلّغ|ارسل|أرسل)/u.test(lastAsk0) && /[؟?]/u.test(lastAsk0);
+      const said = event.text.normalize("NFKC").replace(/[أإآ]/g, "ا").trim();
+      const confirms = isConfirmationAttempt(event.text) || /^(?:اه|ااه|ايوه|ايوا|ايه|اكيد|نعم|تمام|ماشي|يلا|طيب|ابعت\S*|ارسل\S*|ارفع\S*|بعت\S*|وصل\S*|بلغ\S*)(?:\s|$)/u.test(said);
+      if (offered && confirms) {
+        const modelBody = String(raw0?.fields?.body || "").trim();
+        ownerConfirmed = true;
+        plan = { ...emptySecretaryIntent("owner_message"), fields: { ...emptySecretaryIntent().fields,
+          body: (modelBody.length > said.length + 10 ? modelBody : clean(lastAsk0, 1500)).slice(0, 2000) } };
+      }
+    }
     // باسم 03/11/2026 (1 و 2): «بدك أوصل طلبك لباسم؟» كانت تتحوّل لباسم فورًا — فكل جملة ما انفهمت (باركود، اسم صنف،
     // «30 tab») كانت توصله لحالها. هلأ: ما في تحويل إلا إذا الموظف طلبه صراحة؛ وبدل التحويل أمين بيرجع يفكّر مرة وحدة
     // على إنه الرسالة جواب على آخر سؤال سأله، وبيكمّل الشغل بنفسه.
@@ -3023,13 +3048,13 @@ export async function handleSecretaryEvent(db: DatabaseSync, event: Event, confi
     }
     if (plan.kind === "owner_message") {
       const allowed=dependencies.ownerDeliveryEnabled===true && event.groupId===null && !review && freshActor.id!=="basem" && state.users.some(u=>u.id==="basem"&&u.role==="admin"&&u.active===1) && config.contacts.some(c=>c.userId==="basem");
-      const approved=validateSecretaryIntent(plan,input);
+      const approved=ownerConfirmed?plan:validateSecretaryIntent(plan,input);
       if(!allowed || approved.kind!=="owner_message")return save(db,event,freshActor,{status:"clarify",reply:approved.message||"ما قدرت أوصل الطلب لباسم من هالسياق."},[],now);
       const links=[...history.filter(t=>t.role==="user").slice(-2).flatMap(t=>[...t.content.matchAll(/https?:\/\/[^\s<>]+/gu)].map(m=>m[0]))].filter(url=>{try{const u=new URL(url);return u.protocol==="https:"&&!u.username&&!u.password&&!/api.?key|token|password|secret|auth|signature|[?&]key=/i.test(u.href);}catch{return false;}}).slice(-2);
       const text="📩 طلب من "+clean(freshActor.name)+":\n"+clean(String(plan.fields.body||event.text),2000)+(links.length?"\n\nرابط مذكور في الحوار (لم أفحص محتواه):\n"+[...new Set(links)].join("\n"):"");
       const queuedId=enqueueAgentMessage(db,{toUser:"basem",text,relayFrom:freshActor.id},now);
       log(db,freshActor,event,"secretary_owner_message",{summary:"أدرج طلب الموظف لباسم في طابور الإرسال؛ لم يثبت الإرسال أو التسليم"},now);
-      return save(db,event,freshActor,{status:"queued",batchId:queuedId,reply:"حطّيت طلبك بطابور الإرسال لباسم. لسه ما عندي تأكيد إنه انبعت أو وصل."},[],now);
+      return save(db,event,freshActor,{status:"queued",batchId:queuedId,reply:"✅ بعتتها لد. باسم."},[],now);
     }
     if (plan.kind === "outbound_reply") {
       const row = event.groupId === null ? noticeableOutbound(db, freshActor.id, now) : null;

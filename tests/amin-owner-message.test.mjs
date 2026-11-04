@@ -19,7 +19,7 @@ function fixture(t){
 }
 test('staff handoff is persisted once for Basim, exact original text, no fabricated delivery or task change',async t=>{
  const f=fixture(t);const text='بلّغ الدكتور يشوف الملف لما يفضى';
- const result=await f.say(text);assert.equal(result.status,'queued');assert.match(result.reply,/طابور/);assert.match(result.reply,/لسه/);
+ const result=await f.say(text);assert.equal(result.status,'queued');assert.match(result.reply,/لد\. باسم/); // باسم 04/11/2026: «✅ بعتتها لد. باسم.» بدل جملة الطابور
  const rows=f.db.prepare('SELECT * FROM agent_outbox').all();assert.equal(rows.length,1);assert.equal(rows[0].to_user,'basem');assert.equal(rows[0].state,'pending');assert.ok(rows[0].text.includes(text));assert.ok(!rows[0].text.includes('ملخصًا مختلقًا'));
  assert.equal(f.seen.actor.id,'staff-test');assert.ok(f.seen.trainingLessons.some(x=>x.id==='owner-handoff'));
  const replay=await f.say(text);assert.equal(replay.status,'duplicate');assert.equal(f.db.prepare('SELECT count(*) AS n FROM agent_outbox').get().n,1);

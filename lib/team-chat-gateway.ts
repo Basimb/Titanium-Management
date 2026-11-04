@@ -79,12 +79,14 @@ export type TeamChatEnvelope = {
   responseMessageId?: string | null;
   inputKind?: "text" | "voice";
   choice?: { questionId: string; optionId: string };
+  imageFile?: string;
 };
 
 function envelope(value: unknown): TeamChatEnvelope | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const v = value as Record<string, unknown>;
-  if (Object.keys(v).some(key => !["groupId", "messageId", "receivedAt", "senderNumber", "text", "replyToMessageId", "responseMessageId", "inputKind", "choice"].includes(key))
+  if (Object.keys(v).some(key => !["groupId", "messageId", "receivedAt", "senderNumber", "text", "replyToMessageId", "responseMessageId", "inputKind", "choice", "imageFile"].includes(key))
+    || (v.imageFile !== undefined && (typeof v.imageFile !== "string" || !/^\/home\/titani24\/\.titanium-team-chat\/media\/\d{8,15}\/[A-Za-z0-9_-]{1,80}\.(?:jpg|jpeg|png|webp)$/.test(v.imageFile) || v.groupId !== null))
     || (v.inputKind !== undefined && v.inputKind !== "text" && v.inputKind !== "voice")
     || ["replyToMessageId", "responseMessageId"].some(key => v[key] != null && (typeof v[key] !== "string" || !/^[A-Za-z0-9._:@-]{1,160}$/.test(v[key] as string)))
     || typeof v.messageId !== "string" || !/^[A-Za-z0-9._:@-]{1,160}$/.test(v.messageId)

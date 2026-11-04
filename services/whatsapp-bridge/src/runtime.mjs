@@ -186,7 +186,6 @@ export function createBridgeRuntime({ config, store, auth, makeWASocket, waVersi
     // and stickers are saved to ~/.titanium-team-chat/media/<number>/ with an
     // index.jsonl line (time, sender, type, caption, file). Saves only; never
     // forwards anything, never touches groups. One short receipt per sender per minute.
-    const mediaReplyAt = new Map();
     current.ev.on('messages.upsert', event => {
       void (async () => {
         if (event.type !== 'notify') return;
@@ -229,11 +228,12 @@ export function createBridgeRuntime({ config, store, auth, makeWASocket, waVersi
             const caption = typeof media.caption === 'string' ? media.caption.slice(0, 2000) : '';
             await appendFile(`${base}/media/index.jsonl`, JSON.stringify({ at: new Date(sentAt).toISOString(), number, name: m.pushName || null, kind, mime, bytes: total, caption, fileName: media.fileName || null, file }) + '\n', { mode: 0o600 });
             output.info(`Amin media: saved ${kind} from ${number}.`);
-            const last = mediaReplyAt.get(number) || 0;
-            if (now() - last > 60_000 && ready && !stopped && current === socket) {
-              mediaReplyAt.set(number, now());
-              const label = kind === 'video' ? 'وصل الفيديو وانحفظ' : kind === 'document' ? 'وصل الملف وانحفظ' : 'وصلت الصورة وانحفظت';
-              await current.sendMessage(remote, { text: `📎 ${label} عندي. إذا في طلب معها اكتبه بكلمتين.`, linkPreview: null });
+            // باسم 04/11/2026: ما في رد «وصلت الصورة وانحفظت». الصورة (مش الملصق ولا الفيديو) بتروح لأمين كرسالة:
+            // بتنقرأ وبتنربط بالموضوع اللي الموظف بيحكي فيه، وأمين بيرد على أساسها (lib/secretary-image.ts).
+            if (kind === 'image' && ['jpg', 'jpeg', 'png', 'webp'].includes(ext) && /^[a-zA-Z0-9_-]{1,200}$/.test(String(m.key.id || ''))
+              && ready && !stopped && current === socket && config.tasksEnabled !== false) {
+              store.enqueue({ chatJid: identity.normalizeJid(remote), body: { messageId: m.key.id, senderNumber: number, groupId: null,
+                text: caption.trim() || 'صورة', receivedAt: now(), imageFile: file } });
             }
           } catch (error) { output.info(`Amin media: failed (${String(error?.message || 'error').slice(0, 40)}).`); }
         }
