@@ -74,3 +74,10 @@ test('an image path outside the media folder is refused', async t => {
   const res = await f.say('صورة', async () => assert.fail('no'), { imageFile: '/etc/passwd' }, { describeImage: async () => 'x' });
   assert.equal(res.status, 'denied');
 });
+
+test('a long stocktake question (Jood 04/11, offer pack) reaches Amin, not the link list', async t => {
+  const f = fixture(t);
+  let asked = false;
+  await f.say('مطلوب مني جرد حليب sahha 3 pro حجم ال ٤٠٠ / انا عندي علبتين ع الرف وفي كمان العرض العلبتين مع بعض العرض بحسبو ضمن الجرد،', async () => { asked = true; return emptySecretaryIntent('clarify', 'سؤال منيح'); });
+  assert.equal(asked, true);
+});

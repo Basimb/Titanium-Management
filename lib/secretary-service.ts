@@ -579,8 +579,9 @@ function inJardCount(actor: ChatUser): boolean {
 const JARD_STATUS_RE = /(?:جرد|الجرد|جردي|رابط)/u;
 const JARD_STATUS_ASK = /(?:عندي|ضايل|ضل|ضلّ|باقي|خلصت|خلّصت|خلصته|خلصتها|خلصتو|فتحت|فتحته|فتحتو|بعثتلي|بعتلي|بعتتلي|بعتولي|وصلني|معلق|معلّق|مفتوح|اجرد|أجرد|نسيت|وين\s*(?:ال)?رابط)/u;
 // باسم 04/11/2026: سؤال فيه «ليش/كيف/ولا/بستفسر…» عن الجرد مش سؤال عن الروابط — بيروح لأمين يجاوبه (محمد عيد «ليش تبعتلي تنبيه»، الريم عن القلفز، جود عن الحبات).
-const JARD_STATUS_NOT = /(?:ليش|ليه|كيف|بستفسر|استفسار|سؤال|بدي\s*(?:ا|أ)س(?:ا|أ)ل|و\s*لا\s|ازا|اذا|إذا|يعني)/u;
-function isJardStatusQuestion(text: string): boolean { return JARD_STATUS_RE.test(text) && JARD_STATUS_ASK.test(text) && !JARD_STATUS_NOT.test(text) && text.length < 300; }
+const JARD_STATUS_NOT = /(?:ليش|ليه|كيف|بستفسر|استفسار|سؤال|بدي\s*(?:ا|أ)س(?:ا|أ)ل|و\s*لا\s|ازا|اذا|إذا|يعني|بحسب|بنحسب|نحسب|احسب|بعدّ|بنعد|ضمن|العرض|عرض)/u;
+// 04/11/2026 جود: «مطلوب مني جرد حليب… العلبتين مع بعض العرض بحسبو ضمن الجرد» — رسالة طويلة = سؤال حقيقي، مش سؤال عن الروابط.
+function isJardStatusQuestion(text: string): boolean { return JARD_STATUS_RE.test(text) && JARD_STATUS_ASK.test(text) && !JARD_STATUS_NOT.test(text) && text.trim().length <= 80; }
 function jardStatusReply(actor: ChatUser): string {
   const J = "/home/titani24/qa_data/jard";
   const ids = new Map<string, number>();
