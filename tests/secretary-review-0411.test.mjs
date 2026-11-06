@@ -92,3 +92,17 @@ test('«نعم» with only an expired old confirmation goes on normally, no «ا
   const res = await f.say('نعم', async () => { asked = true; return emptySecretaryIntent('clarify', 'تمام، كمّل'); });
   assert.doesNotMatch(res.reply, /انتهى وقت الطلب/);
 });
+
+test('«بكرا عطلتي لا تبعتلي جرد» reaches Amin, not the link list (Ruba 05/11)', async t => {
+  const f = fixture(t);
+  let asked = false;
+  await f.say('وانا بكرا عطلتي لو سمحت لا تبعتلي جرد', async () => { asked = true; return emptySecretaryIntent('clarify', 'تمام'); });
+  assert.equal(asked, true);
+});
+
+test('an explicit ask for Basim that also names another person is still sent (Shahad 05/11)', async t => {
+  const f = fixture(t);
+  const res = await f.say('بصير تحكي لدكتور باسم انه حساب دكتور احمد ما بنقدر نحاسب فيه', async () => ({ ...ownerMsg('حساب د. أحمد ما بنقدر نسجّل عليه دفع — شهد'), recipientIds: ['kh'] }));
+  assert.equal(res.status, 'queued');
+  assert.equal(f.toBasem().length, 1);
+});

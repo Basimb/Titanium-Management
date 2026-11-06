@@ -261,6 +261,8 @@ export function validateSecretaryIntent(value: unknown, input: SecretaryModelInp
   if (!creation && plan.fields.dueDate === "unscheduled") return emptySecretaryIntent("clarify", "ترك الموعد لاحقًا يخص مسودة المهمة؛ لتغيير موعد مهمة قائمة حدد التعديل المقصود.");
   if (!Array.isArray(plan.recipientIds) || plan.recipientIds.length > 50 || plan.recipientIds.some(id => typeof id !== "string" || !id || id.length > 100)
     || new Set(plan.recipientIds).size !== plan.recipientIds.length) throw new Error("Invalid message recipients.");
+  // باسم 06/11/2026: أسماء زيادة على نوع ما بيبعت لحدا (owner_message، رد عادي…) كانت ترمي invalid_plan ← بنشيلها بس.
+  if (plan.kind === "owner_message" && plan.recipientIds.length) plan = { ...plan, recipientIds: [] };
   if (plan.kind !== "message_team" && plan.kind !== "staff_relay" && plan.recipientIds.length) throw new Error("Unexpected message recipients.");
   if (plan.kind === "message_team" || plan.kind === "message_status") {
     if (!input.canMessageTeam || input.actor.id !== "basem" || input.actor.role !== "admin") return emptySecretaryIntent("clarify", "إرسال رسائل الفريق متاح لباسم من محادثته الخاصة فقط.");
@@ -373,9 +375,9 @@ export function validateSecretaryIntent(value: unknown, input: SecretaryModelInp
     return plan;
   }
   if (plan.kind === "owner_message") {
-    if (review || input.canNotifyOwner !== true || plan.action !== null || plan.intakeMode !== null || plan.taskId !== null || !Array.isArray(plan.recipientIds) || plan.recipientIds.length) return emptySecretaryIntent("clarify", "التبليغ لباسم غير متاح بهالسياق؛ وضّحلي طلبك.");
+    if (review || input.canNotifyOwner !== true || plan.action !== null || plan.intakeMode !== null || plan.taskId !== null || !Array.isArray(plan.recipientIds) ) return emptySecretaryIntent("clarify", "التبليغ لباسم غير متاح بهالسياق؛ وضّحلي طلبك."); // باسم 06/11/2026: طلب شهد لباسم انرفض لأنه الموديل حط د. أحمد كاسم ثاني — الأسماء الثانية ما بتمنع
     const text=normalizedArabic(input.text);
-    const explicit=/(?:بلغ|خبر|وصل|احكي|ارفع|ابعث|ابعت|ارسل)/u.test(text) && /(?:باسم|الدكتور|لدكتور|د\s*باسم)/u.test(text);
+    const explicit=/(?:بلغ|خبر|وصل|حكي|ارفع|ابعث|ابعت|ارسل|قول|قلو|قله)/u.test(text) && /(?:باسم|الدكتور|لدكتور|د\s*باسم)/u.test(text);
     const negated=/(?:لا|ما|مش|بدون)\s+(?:(?:ت|ي)?(?:بلغ|خبر|وصل|حكي|ارفع|بعث|بعت|رسل))/u.test(text);
     if(negated || isDiscussionOnlyRequest(input.text))return emptySecretaryIntent("clarify", "وضّحلي: بدك أوصل إشي لباسم ولا لا؟");
     if(!explicit)return emptySecretaryIntent("clarify", OWNER_MESSAGE_CONFIRM);
@@ -677,6 +679,10 @@ export async function inferSecretaryIntent(input: SecretaryModelInput, options: 
       result=await send({...requestBody,tools:tools.map(t=>({...t,function:{...t.function,strict:false}}))});
     }
     const choice=result?.choices?.[0],calls=choice?.message?.tool_calls;
+    // باسم 06/11/2026: «مجاز اليوم» / «ما وصلني ايميل» طلعلهم رد الخلل لأنه Claude رد بكلام عادي بدل أداة.
+    // الكلام العادي بدون أي أداة = رد محادثة بس (ما في تنفيذ)، فبنرجّعه للموظف بدل الخطأ.
+    if((!Array.isArray(calls)||!calls.length)&&typeof choice?.message?.content==="string"&&choice.message.content.trim()&&choice.message.content.length<=1500)
+      return emptySecretaryIntent("clarify",choice.message.content.trim());
     if(choice?.finish_reason!=="tool_calls"||!Array.isArray(calls)||calls.length!==1||typeof calls[0]?.function?.name!=="string"||typeof calls[0].function.arguments!=="string"||calls[0].function.arguments.length>10000)throw new SecretaryProviderError("invalid_response");
     const call=calls[0];
     if(AMIN_READ_NAMES.has(call.function.name)){
