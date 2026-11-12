@@ -87,7 +87,7 @@ async function main() {
       const { createFollowupJobs } = await import('../../../lib/agent-followups.ts');
       agentFollowups = createFollowupJobs({ db: jobsDb, config: () => ({
         enabled: process.env.SECRETARY_FOLLOWUP_ENABLED === '1', contacts,
-        groupId: [...config.allowedGroups][0] ?? null, publicUrl: process.env.TITANIUM_PUBLIC_URL || undefined }) });
+        groupId: [...config.allowedGroups][0] ?? null, groupIds: [...config.allowedGroups], publicUrl: process.env.TITANIUM_PUBLIC_URL || undefined }) });
       // Basim: Amin observes changes by staff and assistants, not only his own actions.
       try {
         const {createAminServerWorker,serverWorkInstalled,planAminServerStep,localAminServerRpc}=await import('../../../lib/amin-server-work.ts');

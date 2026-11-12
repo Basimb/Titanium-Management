@@ -1,0 +1,36 @@
+cf-build ok — balance=17852.634
+cf-build ok — balance=17852.634
+cf-build ok — balance=17852.634
+cf-build ok — balance=17852.634 | suppliers=160 | issues=182
+cf-build ok — balance=17852.634 | suppliers=160 | issues=182
+cf-build ok — balance=17852.634 | suppliers=160 | issues=182
+cf-build ok — balance=17852.634 | suppliers=160 | issues=182
+cf-build v3 ok — balance=17852.634 | open_live=22497.844 | rows=166 | issues=182 | live_idx=10
+/bin/node[1598809]: ../src/node_platform.cc:61:std::unique_ptr<long unsigned int> node::WorkerThreadsTaskRunner::DelayedTaskScheduler::Start(): Assertion `(0) == (uv_thread_create(t.get(), start_thread, this))' failed.
+ 1: 0x7f7d8970e19c node::Abort() [/lib64/libnode.so.93]
+ 2: 0x7f7d8970e4d2 node::Assert(node::AssertionInfo const&) [/lib64/libnode.so.93]
+ 3: 0x7f7d8978cf74 node::WorkerThreadsTaskRunner::WorkerThreadsTaskRunner(int) [/lib64/libnode.so.93]
+ 4: 0x7f7d8978d0c2 node::NodePlatform::NodePlatform(int, v8::TracingController*) [/lib64/libnode.so.93]
+ 5: 0x7f7d896cf2ae node::V8Platform::Initialize(int) [/lib64/libnode.so.93]
+ 6: 0x7f7d896cc398 node::InitializeOncePerProcess(int, char**, node::InitializationSettingsFlags, node::ProcessFlags::Flags) [/lib64/libnode.so.93]
+ 7: 0x7f7d896cc69d node::InitializeOncePerProcess(int, char**) [/lib64/libnode.so.93]
+ 8: 0x7f7d896cc6fc node::Start(int, char**) [/lib64/libnode.so.93]
+ 9: 0x7f7d8862a610  [/lib64/libc.so.6]
+10: 0x7f7d8862a6c0 __libc_start_main [/lib64/libc.so.6]
+11: 0x5576592300f5 _start [/bin/node]
+/bin/node[2612217]: ../src/node_platform.cc:61:std::unique_ptr<long unsigned int> node::WorkerThreadsTaskRunner::DelayedTaskScheduler::Start(): Assertion `(0) == (uv_thread_create(t.get(), start_thread, this))' failed.
+ 1: 0x7ffa67f0e19c node::Abort() [/lib64/libnode.so.93]
+ 2: 0x7ffa67f0e4d2 node::Assert(node::AssertionInfo const&) [/lib64/libnode.so.93]
+ 3: 0x7ffa67f8cf74 node::WorkerThreadsTaskRunner::WorkerThreadsTaskRunner(int) [/lib64/libnode.so.93]
+ 4: 0x7ffa67f8d0c2 node::NodePlatform::NodePlatform(int, v8::TracingController*) [/lib64/libnode.so.93]
+ 5: 0x7ffa67ecf2ae node::V8Platform::Initialize(int) [/lib64/libnode.so.93]
+ 6: 0x7ffa67ecc398 node::InitializeOncePerProcess(int, char**, node::InitializationSettingsFlags, node::ProcessFlags::Flags) [/lib64/libnode.so.93]
+ 7: 0x7ffa67ecc69d node::InitializeOncePerProcess(int, char**) [/lib64/libnode.so.93]
+ 8: 0x7ffa67ecc6fc node::Start(int, char**) [/lib64/libnode.so.93]
+ 9: 0x7ffa66e2a610  [/lib64/libc.so.6]
+10: 0x7ffa66e2a6c0 __libc_start_main [/lib64/libc.so.6]
+11: 0x55b5aedc90f5 _start [/bin/node]
+node[793893]: pthread_create: Resource temporarily unavailable
+/usr/bin/timeout: the monitored command dumped core
+node[940637]: pthread_create: Resource temporarily unavailable
+/usr/bin/timeout: the monitored command dumped core

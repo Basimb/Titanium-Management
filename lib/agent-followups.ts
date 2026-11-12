@@ -15,7 +15,7 @@ import { CHOICE_CANCEL, withWayOut, type SecretaryChoices } from "./secretary-ch
 
 // overdueDigest: the once-a-day list of overdue tasks in the group. Off unless
 // asked for -- Basim, 2026-10-09: "4 وقفها".
-export type FollowupConfig = { enabled: boolean; contacts: Array<{ userId: string; number: string }>; groupId?: string | null; workStartHour?: number; workEndHour?: number; timezoneOffsetMinutes?: number; publicUrl?: string; overdueDigest?: boolean };
+export type FollowupConfig = { enabled: boolean; contacts: Array<{ userId: string; number: string }>; groupId?: string | null; groupIds?: string[]; workStartHour?: number; workEndHour?: number; timezoneOffsetMinutes?: number; publicUrl?: string; overdueDigest?: boolean };
 type Planned = { id: string; kind: "overdue_task" | "silent_task" | "stale_approval" | "daily_digest" | "auto_reminder_morning" | "auto_reminder_evening" | "unclaimed_task" | "stale_unclaimed" | "unowned_task" | "welcome"; targetUser: string; entityId: string | null; to: string; text: string; choices?: SecretaryChoices };
 // Basim (2026-09-15): every reminder poll used to die an hour after it was
 // built, while WhatsApp keeps the bubble tappable forever -- so a tap that
@@ -417,7 +417,7 @@ export function enqueueAgentMessage(db: DatabaseSync, input: { toUser: string; t
   const id = randomBytes(8).toString("hex");
   // Every poll carries the universal way out, and every poll sent to a person
   // is remembered as the one they now have open -- see recordOpenChoice.
-  const choices = input.toUser !== "group" && input.choices ? withWayOut(input.choices) : null;
+  const choices = !input.toUser.startsWith("group") && input.choices ? withWayOut(input.choices) : null;
   // A free reminder ("ذكرني الساعة 5") waits in the outbox until deliver_after.
   const deliverAfter = typeof input.deliverAfter === "number" && input.deliverAfter > at ? Math.floor(input.deliverAfter) : null;
   db.prepare("INSERT INTO agent_outbox (id,to_user,text,choices_json,state,created_at,deliver_after,source) VALUES (?,?,?,?,'pending',?,?,?)")
@@ -475,6 +475,12 @@ function nextQueued(db: DatabaseSync, config: FollowupConfig, at: number): Plann
   if (row.toUser === "group") {
     if (!config.groupId || groupBudgetRemaining(db, at) <= 0) { db.prepare("UPDATE agent_outbox SET state='failed' WHERE id=?").run(row.id); return null; }
     return { id: row.id, kind: "daily_digest", targetUser: "group", entityId: null, to: config.groupId, text: row.text };
+  }
+  // Basim 12/11/2026 («بدي اياها لجروب تيتانيوم»): a named group, "group:<jid>" — only one of the allowlisted groups.
+  if (row.toUser.startsWith("group:")) {
+    const jid = row.toUser.slice(6);
+    if (!(config.groupIds ?? []).includes(jid) || groupBudgetRemaining(db, at) <= 0) { db.prepare("UPDATE agent_outbox SET state='failed' WHERE id=?").run(row.id); return null; }
+    return { id: row.id, kind: "daily_digest", targetUser: "group", entityId: null, to: jid, text: row.text };
   }
   const number = config.contacts.find(contact => contact.userId === row.toUser)?.number.replace(/\D/g, "").replace(/^00/, "");
   if (!number) { db.prepare("UPDATE agent_outbox SET state='failed' WHERE id=?").run(row.id); return null; }
