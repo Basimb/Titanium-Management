@@ -167,8 +167,11 @@ try {
   cashDrugDet.sort((x,y)=>y[1].reduce((p,q)=>p+q,0)-x[1].reduce((p,q)=>p+q,0));
   details['موردون أدوية (كاش)']=cashDrugDet;
   // تفصيل تحصيل التأمين حسب الشركة — الشهر الحالي (من إيداعات البنك حسب الطرف)
+  // 19/11/2026 باسم: تفصيل التأمين من نفس معيار المجموع (الحساب المقابل 110202/110204 بقيود البنك) مش من اسم الطرف — حتى ما يظهر نفس المبلغ بتفصيلين
   const insDet=[];
-  for(const r of bankIn){ const n=pname(r.partner_id); if(!n) continue; if(!INS.test(n)) continue; const amt=r.debit?r.debit:0; const a=Array(NC).fill(0); a[col25(0,'actual')]=r3(amt); insDet.push([n,a]); }
+  { const insRows = await rpc('object','execute_kw',[DB, uid, KEY, 'account.move.line','read_group',
+      [[['account_id.code','in',['110202','110204']],['parent_state','=','posted'],['credit','>',0],['date','>=',LIVE_START],['date','<=',TODAY],['move_id.line_ids.account_id.code','=','110102']], ['credit'], ['partner_id']], { lazy:false }]);
+    for(const g of insRows){ const amt=g.credit||0; if(amt<0.001) continue; const a=Array(NC).fill(0); a[col25(0,'actual')]=r3(amt); insDet.push([pname(g.partner_id)||'غير محدد',a]); } }
   const cbIn = await rpc('object','execute_kw',[DB, uid, KEY, 'account.move.line','search_read',
     [[['account_id.code','in',['110101','110102']],['parent_state','=','posted'],['debit','>',0],['date','>=',LIVE_START],['date','<=',TODAY]], ['move_id']]]);
   const cbIds=[...new Set(cbIn.map(r=>r.move_id&&r.move_id[0]).filter(Boolean))];
