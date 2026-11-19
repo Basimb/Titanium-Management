@@ -10,7 +10,7 @@ function catIn(acc,code){
   if(code==='110202'||code==='110204') return acc==='box'?'مبيعات كاش':'تحصيل تأمين';
   if(code==='110104') return acc==='bank'?'تحصيل فيزا':'تحويل من فيزا';
   if(code==='110201') return 'دخل العيادات';
-  if(code==='110101'||code==='110103'||code==='110106') return 'تحويلات داخلية (وارد)';
+  if(code==='110101'||code==='110102'||code==='110103'||code==='110106') return 'تحويلات داخلية (وارد)';
   if(/^42/.test(code)) return 'أرباح/تسويات';
   if(code==='210401'||code==='210404'||code==='210405') return 'جاري شركاء (وارد)';
   return 'متحصلات أخرى';
@@ -48,7 +48,7 @@ function catOut(acc,code,pn,memo){
   if(OUTMAP[code]) return OUTMAP[code];
   if(/^65/.test(code)) return 'استهلاكات';
   if(code==='110205'){const _m=memo||'';if(/عمول/.test(_m))return 'عمولات بيع للعاملين';if(/مزاول/.test(_m))return 'رسوم مزاولة المهنة';if(/علاوة|مكافأ|مكافا|اضافي|إضافي/.test(_m))return 'إضافي وعلاوات ومكافآت';if(/راتب|رواتب/.test(_m))return /متأخر|متاخر|202[0-5]/.test(_m)?'رواتب متأخرة':'الرواتب والأجور';return 'سلف/ذمم موظفين';}
-  if(code==='110102'||code==='110103'||code==='110106') return 'إيداعات/تحويلات بنكية';
+  if(code==='110101'||code==='110102'||code==='110103'||code==='110106') return 'إيداعات/تحويلات بنكية';
   if(code==='110104') return 'تحويل لفيزا';
   if(code==='210401'||code==='210404'||code==='210405') return 'جاري شركاء (صادر)';
   if(code==='110100'||/^1103/.test(code)||/^51/.test(code)) return 'SKIP';
