@@ -3,7 +3,7 @@
 import fs from 'node:fs';
 import https from 'node:https';
 import { URL } from 'node:url';
-import { computeMonthly } from './cf-flows.mjs';
+import { computeMonthly, SKIP_MOVES } from './cf-flows.mjs';
 process.env.UV_THREADPOOL_SIZE = process.env.UV_THREADPOOL_SIZE || '2';
 
 const CFG_PATH = process.env.CFG || '/home/titani24/.titanium-team-chat/config.json';
@@ -131,7 +131,7 @@ try {
   for(const r of bankIn){ const n=pname(r.partner_id); if(!n) continue; if(INS.test(n)) insurIn+=r.debit||0; else othIn+=r.debit||0; }
   // موردون أدوية (كاش) + أخرى كاش (فروقات صندوق) — يومية نقدية فقط (الإيداعات البنكية تحويل داخلي تُستثنى)
   const cashOut = await rpc('object','execute_kw',[DB, uid, KEY, 'account.move.line','read_group',
-    [[['account_id.code','=','110101'],['parent_state','=','posted'],['credit','>',0],['journal_id.type','=','cash'],['date','>=',LIVE_START],['date','<=',TODAY]],
+    [[['account_id.code','=','110101'],['parent_state','=','posted'],['credit','>',0],['journal_id.type','=','cash'],['move_id','not in',[...SKIP_MOVES]],['date','>=',LIVE_START],['date','<=',TODAY]],
      ['credit'], ['partner_id']], { lazy:false }]);
   let supCashDrug=0, cashOther=0;
   for(const r of cashOut){ if(r.partner_id) supCashDrug+=r.credit||0; else cashOther+=r.credit||0; }
@@ -174,7 +174,7 @@ try {
     for(const g of insRows){ const amt=g.credit||0; if(amt<0.001) continue; const a=Array(NC).fill(0); a[col25(0,'actual')]=r3(amt); insDet.push([pname(g.partner_id)||'غير محدد',a]); } }
   const cbIn = await rpc('object','execute_kw',[DB, uid, KEY, 'account.move.line','search_read',
     [[['account_id.code','in',['110101','110102']],['parent_state','=','posted'],['debit','>',0],['date','>=',LIVE_START],['date','<=',TODAY]], ['move_id']]]);
-  const cbIds=[...new Set(cbIn.map(r=>r.move_id&&r.move_id[0]).filter(Boolean))];
+  const cbIds=[...new Set(cbIn.map(r=>r.move_id&&r.move_id[0]).filter(Boolean))].filter(id=>!SKIP_MOVES.has(id));
   const arDet=[];
   if(cbIds.length){ const arRows = await rpc('object','execute_kw',[DB, uid, KEY, 'account.move.line','read_group',
     [[['account_id.code','=','110201'],['parent_state','=','posted'],['credit','>',0],['move_id','in',cbIds]], ['credit'], ['partner_id']], { lazy:false }]);

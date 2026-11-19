@@ -4,6 +4,8 @@ const pn_=p=>Array.isArray(p)?String(p[1]):'';
 const ac_=a=>Array.isArray(a)?(String(a[1]).match(/^\d+/)||[])[0]:'';
 const mo_=d=>{const m=String(d||'').match(/^\d{4}-(\d{2})/);return m?(+m[1]-1):-1;};
 const rr=v=>Math.round(v*1000)/1000;
+// 19/11/2026 باسم: قيود تجارب تطلع من الكاش فلو كله (قبض ذمة 10 انسجل مرتين 17/11 وعكسهم: CSH1/2026/01513 + 01514 + 01516 + 01526) — القيود بأودو ما انلمست
+export const SKIP_MOVES=new Set([520549,520550,520552,521088]);
 // بنود تُحسب بقيمتها الكاملة (بلا توزيع تناسبي) حتى تظهر صحيحة متل ما هي بأودو
 const DIRECT=new Set(['شراء صيدلية دابوق (رند)']);
 function catIn(acc,code){
@@ -82,7 +84,7 @@ async function flowsFor(rpc,uid,DB,KEY,accCode,tag,dateFrom,detCat,detMonth){
     for(const k in farqOut){if(recvIn[k]){farqOut[k].forEach(id=>washIds.add(id));recvIn[k].forEach(id=>washIds.add(id));}}}
   const IN={},OUT={}; const add=(bag,n,m,v)=>{if(m<0)return;(bag[n]=bag[n]||Array(12).fill(0))[m]+=v;}; const detBag={};
   const realNet=Array(12).fill(0);
-  for(const m in byMove){if(washIds.has(m))continue;const ls=byMove[m];let co=0,ci=0,mm=-1;
+  for(const m in byMove){if(washIds.has(m)||SKIP_MOVES.has(+m))continue;const ls=byMove[m];let co=0,ci=0,mm=-1;
     for(const l of ls){if(ac_(l.account_id)===accCode){co+=l.credit||0;ci+=l.debit||0;if(mm<0)mm=mo_(l.date);}}
     if(mm>=0)realNet[mm]+=ci-co;
     const oth=ls.filter(l=>ac_(l.account_id)!==accCode);
