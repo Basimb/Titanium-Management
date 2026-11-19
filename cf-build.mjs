@@ -166,7 +166,50 @@ try {
     const a=Array(NC).fill(0); a[col25(0,'actual')]=r3(amt); cashDrugDet.push([pname(r.partner_id),a]); }
   cashDrugDet.sort((x,y)=>y[1].reduce((p,q)=>p+q,0)-x[1].reduce((p,q)=>p+q,0));
   details['موردون أدوية (كاش)']=cashDrugDet;
+  // تفصيل تحصيل التأمين حسب الشركة — الشهر الحالي (من إيداعات البنك حسب الطرف)
+  const insDet=[];
+  for(const r of bankIn){ const n=pname(r.partner_id); if(!n) continue; if(!INS.test(n)) continue; const amt=r.debit?r.debit:0; const a=Array(NC).fill(0); a[col25(0,'actual')]=r3(amt); insDet.push([n,a]); }
+  const cbIn = await rpc('object','execute_kw',[DB, uid, KEY, 'account.move.line','search_read',
+    [[['account_id.code','in',['110101','110102']],['parent_state','=','posted'],['debit','>',0],['date','>=',LIVE_START],['date','<=',TODAY]], ['move_id']]]);
+  const cbIds=[...new Set(cbIn.map(r=>r.move_id&&r.move_id[0]).filter(Boolean))];
+  const arDet=[];
+  if(cbIds.length){ const arRows = await rpc('object','execute_kw',[DB, uid, KEY, 'account.move.line','read_group',
+    [[['account_id.code','=','110201'],['parent_state','=','posted'],['credit','>',0],['move_id','in',cbIds]], ['credit'], ['partner_id']], { lazy:false }]);
+    for(const g of arRows){ const amt=g.credit||0; if(amt<0.001) continue; const a=Array(NC).fill(0); a[col25(0,'actual')]=r3(amt); arDet.push([pname(g.partner_id)||'\u063a\u064a\u0631 \u0645\u062d\u062f\u062f',a]); } }
+  arDet.sort((x,y)=>y[1][col25(0,'actual')]-x[1][col25(0,'actual')]);
+  const cbOut = await rpc('object','execute_kw',[DB, uid, KEY, 'account.move.line','search_read',
+    [[['account_id.code','in',['110101','110102']],['parent_state','=','posted'],['credit','>',0],['date','>=',LIVE_START],['date','<=',TODAY]], ['move_id']]]);
+  const cbOutIds=[...new Set(cbOut.map(r=>r.move_id&&r.move_id[0]).filter(Boolean))];
+  const comDet=[];
+  if(cbOutIds.length){ const comRows = await rpc('object','execute_kw',[DB, uid, KEY, 'account.move.line','read_group',
+    [[['account_id.code','in',['110205','610004']],['parent_state','=','posted'],['debit','>',0],['move_id','in',cbOutIds],'|',['account_id.code','=','610004'],['name','ilike','\u0639\u0645\u0648\u0644']], ['debit'], ['partner_id']], { lazy:false }]);
+    for(const g of comRows){ const amt=g.debit||0; if(amt<0.001) continue; const a=Array(NC).fill(0); a[col25(0,'actual')]=r3(amt); comDet.push([pname(g.partner_id)||'\u063a\u064a\u0631 \u0645\u062d\u062f\u062f',a]); } }
+  const comAcc = await rpc('object','execute_kw',[DB, uid, KEY, 'account.move.line','read_group',
+    [[['account_id.code','=','110205'],['parent_state','=','posted'],['credit','>',0],['date','>=',PREV_END.slice(0,8)+'01'],['date','<=',PREV_END],['move_id.line_ids.account_id.code','=','610004']], ['credit'], ['partner_id']], { lazy:false }]);
+  for(const g of comAcc){ const nm=pname(g.partner_id)||'\u063a\u064a\u0631 \u0645\u062d\u062f\u062f'; const acc=g.credit||0; if(acc<0.001) continue;
+    let row=comDet.find(x=>x[0]===nm); if(!row){ row=[nm,Array(NC).fill(0)]; comDet.push(row); }
+    row[1][col25(0,'remain')]=r3(Math.max(0, acc-(row[1][col25(0,'actual')]||0))); }
+  comDet.sort((x,y)=>x[0].localeCompare(y[0],'ar'));
+  details['\u0639\u0645\u0648\u0644\u0627\u062a \u0628\u064a\u0639 \u0644\u0644\u0639\u0627\u0645\u0644\u064a\u0646']=comDet;
+  details['\u062a\u062d\u0635\u064a\u0644 \u0630\u0645\u0645 \u0639\u0645\u0644\u0627\u0621']=arDet;
+  details['تحصيل تأمين']=insDet;
 
+  // 19/11/2026 باسم: ذمم الموظفين الفعلية (110205) لكل موظف، مقسومة عمولة/راتب — الباقي للموظف على الشركة
+  let staff_due=[]; try{
+    const sdAll = await rpc('object','execute_kw',[DB, uid, KEY, 'account.move.line','read_group',
+      [[['account_id.code','=','110205'],['parent_state','=','posted'],['partner_id','!=',false]], ['balance'], ['partner_id']], { lazy:false }]);
+    const sdCom = await rpc('object','execute_kw',[DB, uid, KEY, 'account.move.line','read_group',
+      [[['account_id.code','=','110205'],['parent_state','=','posted'],['partner_id','!=',false],['date','>=','2026-01-01'],'|',['name','ilike','عمول'],['move_id.line_ids.account_id.code','=','610004']], ['debit','credit'], ['partner_id']], { lazy:false }]);
+    const comOpen={}; for(const g of sdCom){ if(g.partner_id) comOpen[g.partner_id[0]] = (g.credit||0)-(g.debit||0); }
+    for(const g of sdAll){ if(!g.partner_id) continue; const due=-(g.balance||0); if(due<0.001) continue;
+      const comm=Math.min(due, Math.max(0, comOpen[g.partner_id[0]]||0));
+      staff_due.push({ partner:pname(g.partner_id), due:r3(due), comm:r3(comm), sal:r3(due-comm) }); }
+    staff_due.sort((a,b)=>b.due-a.due);
+  }catch(_){ staff_due=null; }
+  let accrued=[]; try{ const ac = await rpc('object','execute_kw',[DB, uid, KEY, 'account.move.line','read_group',
+    [[['account_id.code','=like','6%'],['parent_state','=','posted'],['date','>=','2026-01-01'],['date','<=','2026-12-31']], ['balance'], ['account_id','date:month']], { lazy:false }]);
+    const am={}; for(const g of ac){ const nm=pname(g.account_id); const mi=MONTHS.indexOf(String(g['date:month']||'').split(' ')[0]); if(!nm||mi<0) continue; if(!am[nm]) am[nm]=Array(12).fill(0); am[nm][mi]+=g.balance||0; }
+    accrued=Object.keys(am).sort().map(k=>[k,am[k].map(r3)]); }catch(_){ accrued=[]; }
   const cheque_issues=[];
   for(const row of over){ const amt=r3(row.credit||0); if(amt<0.001) continue;
     cheque_issues.push({ partner:pname(row.partner_id), due:String(row['date_maturity:month']||''), amount:amt }); }
@@ -182,7 +225,7 @@ try {
     closing_oct: real_open_live,
     live_income: { 'مبيعات كاش': r3(cashSales), 'تحصيل فيزا': r3(cardSales), 'تحصيل تأمين': r3(insurIn), 'متحصلات أخرى وتسويات': r3(othIn), 'موردون أدوية (كاش)': r3(supCashDrug), 'أخرى (كاش)': r3(cashOther), 'الرواتب والأجور': r3(salByTransfer), 'مصاريف بنكية': r3(bankOther) },
     monthly,
-    details, cheque_issues,
+    details, cheque_issues, accrued, staff_due,
     errors: [], note: 'يُحدَّث آليًا كل 8 ساعات — الشهر الحالي مقسوم فعلي/باقي' });
   const fdone = Object.values(details).reduce((a,c)=>a+c.length,0);
   console.log(`cf-build v3 ok — balance=${current['الإجمالي']} | open_live=${real_open_live} | rows=${fdone} | issues=${cheque_issues.length} | live_idx=${LIVE_BASE}`);

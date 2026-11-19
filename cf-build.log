@@ -34,3 +34,26 @@ node[793893]: pthread_create: Resource temporarily unavailable
 /usr/bin/timeout: the monitored command dumped core
 node[940637]: pthread_create: Resource temporarily unavailable
 /usr/bin/timeout: the monitored command dumped core
+/usr/bin/timeout: the monitored command dumped core
+/usr/bin/timeout: the monitored command dumped core
+/usr/bin/timeout: the monitored command dumped core
+/usr/bin/timeout: the monitored command dumped core
+/usr/bin/timeout: the monitored command dumped core
+cf-build v3 ok — balance=12579.508 | open_live=24019.374 | rows=195 | issues=180 | live_idx=10
+/usr/bin/timeout: the monitored command dumped core
+cf-build v3 ok — balance=14330.382 | open_live=24019.374 | rows=195 | issues=180 | live_idx=10
+node[498845]: pthread_create: Resource temporarily unavailable
+/usr/bin/timeout: the monitored command dumped core
+/usr/bin/timeout: the monitored command dumped core
+cf-build v3 ok — balance=17141.716 | open_live=24019.374 | rows=196 | issues=180 | live_idx=10
+node[915835]: pthread_create: Resource temporarily unavailable
+cf-build v3 ok — balance=18093.545 | open_live=24019.374 | rows=196 | issues=180 | live_idx=10
+node[1726565]: pthread_create: Resource temporarily unavailable
+cf-build v3 ok — balance=18189.128 | open_live=24019.374 | rows=197 | issues=180 | live_idx=10
+/usr/bin/timeout: the monitored command dumped core
+/usr/bin/timeout: the monitored command dumped core
+/usr/bin/timeout: the monitored command dumped core
+cf-build v3 ok — balance=13448.544 | open_live=23551.759 | rows=202 | issues=180 | live_idx=10
+cf-build v3 ok — balance=14705.815 | open_live=23551.759 | rows=205 | issues=180 | live_idx=10
+/usr/bin/timeout: the monitored command dumped core
+cf-build v3 ok — balance=10081.62 | open_live=23551.759 | rows=210 | issues=180 | live_idx=10

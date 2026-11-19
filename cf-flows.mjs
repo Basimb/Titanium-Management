@@ -47,7 +47,7 @@ function catOut(acc,code,pn,memo){
   if(code==='620001') return rentName(pn,memo);
   if(OUTMAP[code]) return OUTMAP[code];
   if(/^65/.test(code)) return 'استهلاكات';
-  if(code==='110205'){const _m=memo||'';return (/راتب|رواتب/.test(_m)&&!/سلف|إيجار|عمول/.test(_m))?'الرواتب والأجور':'سلف/ذمم موظفين';}
+  if(code==='110205'){const _m=memo||'';if(/عمول/.test(_m))return 'عمولات بيع للعاملين';if(/مزاول/.test(_m))return 'رسوم مزاولة المهنة';if(/علاوة|مكافأ|مكافا|اضافي|إضافي/.test(_m))return 'إضافي وعلاوات ومكافآت';if(/راتب|رواتب/.test(_m))return /متأخر|متاخر|202[0-5]/.test(_m)?'رواتب متأخرة':'الرواتب والأجور';return 'سلف/ذمم موظفين';}
   if(code==='110102'||code==='110103'||code==='110106') return 'إيداعات/تحويلات بنكية';
   if(code==='110104') return 'تحويل لفيزا';
   if(code==='210401'||code==='210404'||code==='210405') return 'جاري شركاء (صادر)';
@@ -56,7 +56,7 @@ function catOut(acc,code,pn,memo){
   const _mm=memo||'';
   if(/كهرباء/.test(_mm)) return 'كهرباء';
   if(/مياه|فاتورة ماء/.test(_mm)) return 'مياه';
-  if(/رواتب|راتب/.test(_mm)&&!/سلف/.test(_mm)) return 'الرواتب والأجور';
+  if(/رواتب|راتب/.test(_mm)&&!/سلف/.test(_mm)) return /متأخر|متاخر|202[0-5]/.test(_mm)?'رواتب متأخرة':'الرواتب والأجور';
   if(/ايجار|إيجار/.test(_mm)) return rentName(pn,memo);
   if(/صيانة|اصلاح|إصلاح/.test(_mm)) return 'صيانة وإصلاح';
   if(/نظافة/.test(_mm)) return 'نظافة';
