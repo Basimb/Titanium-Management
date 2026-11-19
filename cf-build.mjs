@@ -198,6 +198,15 @@ try {
   details['تحصيل تأمين']=insDet;
 
   // 19/11/2026 باسم: ذمم الموظفين الفعلية (110205) لكل موظف، مقسومة عمولة/راتب — الباقي للموظف على الشركة
+  // 19/11/2026 باسم: البطاقة الفعلية غير المودعة = مبيعات بطاقات الورديات اللي سكّرت بعد آخر قيد تحصيل بنكي على حساب الفيزا (110104)
+  let card_real=null; try{
+    const lb = await rpc('object','execute_kw',[DB, uid, KEY, 'account.move.line','search_read',
+      [[['account_id.code','=','110104'],['parent_state','=','posted'],['credit','>',0],['move_id.name','=like','BNK01/%']], ['id','date']], { order:'id desc', limit:1 }]);
+    const lastId = lb.length ? lb[0].id : 0;
+    const cs = await rpc('object','execute_kw',[DB, uid, KEY, 'account.move.line','read_group',
+      [[['account_id.code','=','110104'],['parent_state','=','posted'],['debit','>',0],['id','>',lastId],['move_id.name','=like','PBNK1/%']], ['debit'], []], { lazy:false }]);
+    card_real = { amount: r3((cs[0]&&cs[0].debit)||0), n: (cs[0]&&cs[0].__count)||0, last_bank_date: lb.length?lb[0].date:null };
+  }catch(_){ card_real=null; }
   let staff_due=[]; try{
     const sdAll = await rpc('object','execute_kw',[DB, uid, KEY, 'account.move.line','read_group',
       [[['account_id.code','=','110205'],['parent_state','=','posted'],['partner_id','!=',false]], ['balance'], ['partner_id']], { lazy:false }]);
@@ -228,7 +237,7 @@ try {
     closing_oct: real_open_live,
     live_income: { 'مبيعات كاش': r3(cashSales), 'تحصيل فيزا': r3(cardSales), 'تحصيل تأمين': r3(insurIn), 'متحصلات أخرى وتسويات': r3(othIn), 'موردون أدوية (كاش)': r3(supCashDrug), 'أخرى (كاش)': r3(cashOther), 'الرواتب والأجور': r3(salByTransfer), 'مصاريف بنكية': r3(bankOther) },
     monthly,
-    details, cheque_issues, accrued, staff_due,
+    details, cheque_issues, accrued, staff_due, card_real,
     errors: [], note: 'يُحدَّث آليًا كل 8 ساعات — الشهر الحالي مقسوم فعلي/باقي' });
   const fdone = Object.values(details).reduce((a,c)=>a+c.length,0);
   console.log(`cf-build v3 ok — balance=${current['الإجمالي']} | open_live=${real_open_live} | rows=${fdone} | issues=${cheque_issues.length} | live_idx=${LIVE_BASE}`);
