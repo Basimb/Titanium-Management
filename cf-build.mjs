@@ -151,10 +151,15 @@ try {
   const ensure = (sec,disp)=>{ const k=sec+'||'+disp; if(!bucket[k]) bucket[k]={section:sec,name:disp,arr:Array(NC).fill(0)}; return bucket[k]; };
   for(const row of clr){ const b24=monthBase(row['date:month']); if(b24<0||b24>=LIVE_BASE) continue; const [sec,disp]=classify(pname(row.partner_id)); ensure(sec,disp).arr[col25(b24,'past')]+=row.debit||0; }
   for(const row of liveClr){ const [sec,disp]=classify(pname(row.partner_id)); ensure(sec,disp).arr[col25(0,'actual')]+=row.debit||0; }
+  // 24/11/2026 باسم: علامات دفتر الشيكات على شيك مدخل بأودو (tag: p:<id>) — «ملغى بالدفتر» بيطلع من التدفق، و«ملاحظة» (راتب موظف / أخرى) بتنزّله تحت «أخرى (شيكات)» ببيانها؛ الراتب بيلغي استحقاق الموظف بنفس الشهر باللوحة
+  const TAGS=(()=>{ try{ const t=JSON.parse(fs.readFileSync('/home/titani24/qa_data/idara_chqbooks.json','utf8')).tag; return (t&&typeof t==='object')?t:{}; }catch(_){ return {}; } })();
+  const tagNotes=[];
   for(const row of pend){ const n=pname(row.partner_id); if(!n) continue; const amt=row.payment_amount||0; if(amt<0.001) continue;
+    const tg=TAGS['p:'+row.id]; if(tg&&tg.r==='cancel') continue;
     const b24=dueBase(row.due_date); let col;
     if(b24<=LIVE_BASE) col=col25(0,'remain'); else if(b24<=23) col=col25(b24,'future'); else continue;
-    const [sec,disp]=classify(n); ensure(sec,disp).arr[col]+=amt; }
+    const [sec,disp]=(tg&&tg.r==='note')?['أخرى (شيكات)',String(tg.txt||n)]:classify(n); ensure(sec,disp).arr[col]+=amt;
+    if(tg&&tg.r==='note') tagNotes.push({n:0,pid:row.id,bank:'',book:'',txt:String(tg.txt||''),kind:tg.kind==='sal'?'sal':'oth',emp:String(tg.emp||''),amt:r3(amt),due:String(row.due_date||'')}); }
   // 24/11/2026 باسم: ملاحظات دفتر الشيكات (شيك مكتوب ومش مدخل بأودو — راتب مثلاً) تنزل مصروف بشهر استحقاقها تحت «أخرى (شيكات)»، من 11/2026 وطالع.
   // ملاحظة «راتب»: اللوحة بتلغي استحقاق نفس الموظف بنفس الشهر (من chq_notes) عشان ما ينحسب مرتين. وإذا رقم الشيك انرفع بأودو لاحقاً الملاحظة بتتجاهل لحالها.
   // معزول: أي خطأ هون ما بيوقف البناء.
@@ -179,6 +184,7 @@ try {
       }
     }
   }catch(e){ console.error('chq-notes skipped — '+String((e&&e.message)||e)); }
+  for(const t of tagNotes) chq_notes.push(t);
   // شادي: راتب مدفوع بنكياً — المحرّك يصنّفه ضمن الرواتب، فلا يُكرَّر كشيك (كان يسبّب ازدواج 1140)
 
   const details={}; for(const s of CHQ_SECTIONS) details[s]=[];
