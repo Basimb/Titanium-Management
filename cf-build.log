@@ -57,3 +57,20 @@ cf-build v3 ok — balance=13448.544 | open_live=23551.759 | rows=202 | issues=1
 cf-build v3 ok — balance=14705.815 | open_live=23551.759 | rows=205 | issues=180 | live_idx=10
 /usr/bin/timeout: the monitored command dumped core
 cf-build v3 ok — balance=10081.62 | open_live=23551.759 | rows=210 | issues=180 | live_idx=10
+cf-build v3 ok — balance=9543.65 | open_live=21808.448 | rows=207 | issues=180 | live_idx=10
+cf-build v3 ok — balance=9991.947 | open_live=21808.448 | rows=207 | issues=180 | live_idx=10
+cf-build v3 ok — balance=11180.981 | open_live=21808.448 | rows=207 | issues=180 | live_idx=10
+cf-build v3 ok — balance=12295.392 | open_live=21808.448 | rows=207 | issues=180 | live_idx=10
+cf-build v3 ok — balance=12635.394 | open_live=21808.448 | rows=208 | issues=180 | live_idx=10
+/usr/bin/timeout: the monitored command dumped core
+/usr/bin/timeout: the monitored command dumped core
+/usr/bin/timeout: the monitored command dumped core
+/usr/bin/timeout: the monitored command dumped core
+cf-build v3 ok — balance=17146.018 | open_live=21808.448 | rows=207 | issues=180 | live_idx=10
+cf-build v3 ok — balance=16966.018 | open_live=21808.448 | rows=207 | issues=180 | live_idx=10
+cf-build v3 ok — balance=18526.646 | open_live=21808.448 | rows=207 | issues=180 | live_idx=10
+/usr/bin/timeout: the monitored command dumped core
+cf-build v3 ok — balance=20014.232 | open_live=21808.448 | rows=207 | issues=180 | live_idx=10
+cf-build v3 ok — balance=21086.25 | open_live=21808.448 | rows=207 | issues=178 | live_idx=10
+/usr/bin/timeout: the monitored command dumped core
+/usr/bin/timeout: the monitored command dumped core

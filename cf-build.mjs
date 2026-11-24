@@ -68,6 +68,7 @@ function classify(n){
   if(/سميح عوده|سميح عودة/.test(n)) return ['إيجارات (شيكات)','إيجار صافوط (سميح)'];
   if(/ليمار|الشوابكه|الشوابكة/.test(n)) return ['إيجارات (شيكات)','إيجار دابوق (ليمار)'];
   if(/عيادات تيتانيوم/.test(n)) return ['أخرى (شيكات)','عيادات تيتانيوم (شيكات)'];
+  if(/القدس للتأمين|القدس للتامين/.test(n)) return ['أخرى (شيكات)','القدس للتأمين (صحي وحريق)']; // 22/11/2026 باسم: مش مورد أدوية
   if(/جامعة البتراء/.test(n)) return ['مسحوبات باسم (شيكات)','لمى — جامعة البتراء'];
   if(/جامعة العلوم التطبيقية/.test(n)) return ['مسحوبات باسم (شيكات)','جامعة العلوم التطبيقية'];
   if(/الفيصل/.test(n) && /محاما|قانون/.test(n)) return ['أخرى (شيكات)','أتعاب محاماة (الفيصل)'];
@@ -154,6 +155,30 @@ try {
     const b24=dueBase(row.due_date); let col;
     if(b24<=LIVE_BASE) col=col25(0,'remain'); else if(b24<=23) col=col25(b24,'future'); else continue;
     const [sec,disp]=classify(n); ensure(sec,disp).arr[col]+=amt; }
+  // 24/11/2026 باسم: ملاحظات دفتر الشيكات (شيك مكتوب ومش مدخل بأودو — راتب مثلاً) تنزل مصروف بشهر استحقاقها تحت «أخرى (شيكات)»، من 11/2026 وطالع.
+  // ملاحظة «راتب»: اللوحة بتلغي استحقاق نفس الموظف بنفس الشهر (من chq_notes) عشان ما ينحسب مرتين. وإذا رقم الشيك انرفع بأودو لاحقاً الملاحظة بتتجاهل لحالها.
+  // معزول: أي خطأ هون ما بيوقف البناء.
+  const chq_notes=[];
+  try{
+    const CB=JSON.parse(fs.readFileSync('/home/titani24/qa_data/idara_chqbooks.json','utf8'));
+    const books={}; for(const b of (CB.books||[])) books[String(b.id)]=b;
+    const offs=CB.off||{}; const nkeys=Object.keys(offs).filter(k=>offs[k]&&offs[k].r==='note');
+    if(nkeys.length){
+      const allc = await rpc('object','execute_kw',[DB, uid, KEY, 'pdc.wizard','search_read',
+        [[['payment_type','=','send_money'],['state','!=','cancel']], ['reference','memo','journal_id']], { limit: 9000 }]);
+      const bankOf=j=>{const s=pname(j);return /arab|العربي/i.test(s)?'arab':(/safwa|صفوة|صفوه/i.test(s)?'safwa':'');};
+      const dg=s=>String(s||'').replace(/[٠-٩]/g,d=>String('٠١٢٣٤٥٦٧٨٩'.indexOf(d)));
+      const serial=(ref,memo)=>{let m=dg(ref).match(/[0-9]+/);if(m)return +m[0];const t=dg(memo).replace(/بدل[ ]*شيك[ ]*(رقم)?[ ]*[0-9]+/g,' ');m=t.match(/شيك[ ]*(رقم)?[ ]*([0-9]+)/);return m?+m[2]:0;};
+      const have=new Set(); for(const c of allc){const bk=bankOf(c.journal_id);const s=serial(c.reference,c.memo);if(bk&&s)have.add(bk+':'+s);}
+      for(const k of nkeys){const o=offs[k];const p=k.split(':');const b=books[p[0]];if(!b)continue;const n=+p[1];
+        if(have.has(b.bank+':'+n))continue;
+        const amt=+o.amt||0;const due=String(o.due||'');if(amt<0.001||due<'2026-11-01')continue;
+        const b24=dueBase(due);let col;if(b24<=LIVE_BASE)col=col25(0,'remain');else if(b24<=23)col=col25(b24,'future');else continue;
+        ensure('أخرى (شيكات)',String(o.txt||'شيك')+' — شيك '+n).arr[col]+=amt;
+        chq_notes.push({n,bank:b.bank,book:String(b.no),txt:String(o.txt||''),kind:o.kind==='sal'?'sal':'oth',emp:String(o.emp||''),amt:r3(amt),due});
+      }
+    }
+  }catch(e){ console.error('chq-notes skipped — '+String((e&&e.message)||e)); }
   // شادي: راتب مدفوع بنكياً — المحرّك يصنّفه ضمن الرواتب، فلا يُكرَّر كشيك (كان يسبّب ازدواج 1140)
 
   const details={}; for(const s of CHQ_SECTIONS) details[s]=[];
@@ -237,7 +262,7 @@ try {
     closing_oct: real_open_live,
     live_income: { 'مبيعات كاش': r3(cashSales), 'تحصيل فيزا': r3(cardSales), 'تحصيل تأمين': r3(insurIn), 'متحصلات أخرى وتسويات': r3(othIn), 'موردون أدوية (كاش)': r3(supCashDrug), 'أخرى (كاش)': r3(cashOther), 'الرواتب والأجور': r3(salByTransfer), 'مصاريف بنكية': r3(bankOther) },
     monthly,
-    details, cheque_issues, accrued, staff_due, card_real,
+    details, cheque_issues, accrued, staff_due, card_real, chq_notes,
     errors: [], note: 'يُحدَّث آليًا كل 8 ساعات — الشهر الحالي مقسوم فعلي/باقي' });
   const fdone = Object.values(details).reduce((a,c)=>a+c.length,0);
   console.log(`cf-build v3 ok — balance=${current['الإجمالي']} | open_live=${real_open_live} | rows=${fdone} | issues=${cheque_issues.length} | live_idx=${LIVE_BASE}`);
