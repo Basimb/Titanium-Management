@@ -94,6 +94,14 @@ try {
     const mi = MONTHS.indexOf(String(row['date:month'] || '').split(' ')[0]);
     if (mi >= 0) realmov[mi] += bal;
   }
+  // 27/11 باسم: مرتجعات الموردين المسجّلة كقبض على البنك/الصندوق ما إلها علاقة بالكاش فلو — بتنشال من الحركة والرصيد (نفس قاعدة cf-flows)
+  if(0) try{ const rf = await rpc('object','execute_kw',[DB, uid, KEY, 'account.move.line','read_group',[[['account_id.code','in',['110101','110102']],['parent_state','=','posted'],['debit','>',0],['move_id.line_ids.account_id.code','=','210101'],['move_id.line_ids.account_id.code','not in',['110104','110202','110204','110201','110205']],['move_id.name','=like','PBNK%'],['move_id.line_ids.credit','>',0],['date','>=','2026-01-01'],['date','<=','2026-12-31']], ['debit'], ['account_id','date:month']], { lazy:false }]);
+    for(const row of rf){ const code=(String(pname(row.account_id)).match(/^\d+/)||[])[0]; if(!(code in perAcc)) continue; const v=row.debit||0; perAcc[code]-=v; const mi=MONTHS.indexOf(String(row['date:month']||'').split(' ')[0]); if(mi>=0) realmov[mi]-=v; } }catch(e){ console.error('refund-skip — '+String((e&&e.message)||e)); }
+  if(0) try{ const pays = await rpc('object','execute_kw',[DB, uid, KEY, 'account.payment','search_read',[[['state','=','posted'],['payment_type','=','inbound'],['partner_type','=','supplier'],['date','>=','2026-01-01'],['date','<=','2026-12-31']], ['move_id']], { limit:2000 }]);
+    const pm=pays.map(p=>p.move_id&&p.move_id[0]).filter(Boolean);
+    if(pm.length){ const pl = await rpc('object','execute_kw',[DB, uid, KEY, 'account.move.line','search_read',[[['move_id','in',pm],['account_id.code','in',['110101','110102']],['parent_state','=','posted']], ['account_id','debit','credit','date']], { limit:5000 }]);
+      let rsum=0; for(const l of pl){ const code=(String(pname(l.account_id)).match(/^\d+/)||[])[0]; if(!(code in perAcc)) continue; const v=(l.debit||0)-(l.credit||0); perAcc[code]-=v; rsum+=v; const m=String(l.date||'').match(/^\d{4}-(\d{2})/); if(m) realmov[+m[1]-1]-=v; }
+      console.log('refund-skip sum='+r3(rsum)+' n='+pl.length); } }catch(e){ console.error('refund-skip — '+String((e&&e.message)||e)); }
   const current = {}; let total = 0;
   for (const code of Object.keys(OPENING)) { const v = OPENING[code] + perAcc[code]; current[NAMES[code]] = r3(v); total += v; }
   current['الإجمالي'] = r3(total);
@@ -123,6 +131,11 @@ try {
      ['debit'], ['account_id']], { lazy:false }]);
   let cashSales=0, cardSales=0;
   for(const r of liRows){ const code=(String(pname(r.account_id)).match(/^\d+/)||[])[0]; if(code==='110101')cashSales+=r.debit||0; else if(code==='110104')cardSales+=r.debit||0; }
+  let visaAdj = 0;
+  // 27/11 باسم: مبيعات البطاقة = يومية البطاقات + تصحيحات «كاش ⇄ فيزا» بس — قيود التسوية اليدوية (يومية عامة) على حساب الفيزا مش مبيعات
+  try{ const adjV = await rpc('object','execute_kw',[DB, uid, KEY, 'account.move.line','read_group',
+    [[['account_id.code','=','110104'],['parent_state','=','posted'],['debit','>',0],['journal_id.type','=','general'],['date','>=',LIVE_START],['date','<=',TODAY]], ['debit'], []], { lazy:false }]);
+    visaAdj = (adjV[0]&&adjV[0].debit)||0; cardSales -= visaAdj; }catch(e){ console.error('card-adj — '+String((e&&e.message)||e)); }
   // تحصيل تأمين + متحصلات أخرى (مدين على البنك حسب الطرف) + مصاريف نقدية غير مسمّاة
   const bankIn = await rpc('object','execute_kw',[DB, uid, KEY, 'account.move.line','read_group',
     [[['account_id.code','=','110102'],['parent_state','=','posted'],['debit','>',0],['partner_id','!=',false],['date','>=',LIVE_START],['date','<=',TODAY]],
@@ -158,8 +171,8 @@ try {
     const tg=TAGS['p:'+row.id]; if(tg&&tg.r==='cancel') continue;
     const b24=dueBase(row.due_date); let col;
     if(b24<=LIVE_BASE) col=col25(0,'remain'); else if(b24<=23) col=col25(b24,'future'); else continue;
-    const [sec,disp]=(tg&&tg.r==='note')?['أخرى (شيكات)',String(tg.txt||n)]:classify(n); ensure(sec,disp).arr[col]+=amt;
-    if(tg&&tg.r==='note') tagNotes.push({n:0,pid:row.id,bank:'',book:'',txt:String(tg.txt||''),kind:tg.kind==='sal'?'sal':'oth',emp:String(tg.emp||''),amt:r3(amt),due:String(row.due_date||'')}); }
+    const [sec,disp]=(tg&&tg.r==='note'&&tg.kind==='sal')?['أخرى (شيكات)',String(tg.txt||n)]:classify(n); ensure(sec,disp).arr[col]+=amt;
+    if(tg&&tg.r==='note'&&tg.kind==='sal') tagNotes.push({n:0,pid:row.id,bank:'',book:'',txt:String(tg.txt||''),kind:tg.kind==='sal'?'sal':'oth',emp:String(tg.emp||''),amt:r3(amt),due:String(row.due_date||'')}); }
   // 24/11/2026 باسم: ملاحظات دفتر الشيكات (شيك مكتوب ومش مدخل بأودو — راتب مثلاً) تنزل مصروف بشهر استحقاقها تحت «أخرى (شيكات)»، من 11/2026 وطالع.
   // ملاحظة «راتب»: اللوحة بتلغي استحقاق نفس الموظف بنفس الشهر (من chq_notes) عشان ما ينحسب مرتين. وإذا رقم الشيك انرفع بأودو لاحقاً الملاحظة بتتجاهل لحالها.
   // معزول: أي خطأ هون ما بيوقف البناء.
@@ -235,7 +248,7 @@ try {
       [[['account_id.code','=','110104'],['parent_state','=','posted'],['credit','>',0],['move_id.name','=like','BNK01/%']], ['id','date']], { order:'id desc', limit:1 }]);
     const lastId = lb.length ? lb[0].id : 0;
     const cs = await rpc('object','execute_kw',[DB, uid, KEY, 'account.move.line','read_group',
-      [[['account_id.code','=','110104'],['parent_state','=','posted'],['debit','>',0],['id','>',lastId],['move_id.name','=like','PBNK1/%']], ['debit'], []], { lazy:false }]);
+      [[['account_id.code','=','110104'],['parent_state','=','posted'],['debit','>',0],['id','>',lastId],'|',['move_id.name','=like','PBNK1/%'],['journal_id.type','=','cash']] /* 27/11 باسم: تصحيحات «كاش ⇄ فيزا» (قيود الصندوق على 110104) مبيعات بطاقة حقيقية */, ['debit'], []], { lazy:false }]);
     card_real = { amount: r3((cs[0]&&cs[0].debit)||0), n: (cs[0]&&cs[0].__count)||0, last_bank_date: lb.length?lb[0].date:null };
   }catch(_){ card_real=null; }
   let staff_due=[]; try{
@@ -259,6 +272,10 @@ try {
   cheque_issues.sort((a,b)=>b.amount-a.amount);
   let monthly=null; try{ let prevMonthly=null; if(process.env.CF_LIGHT==="1"){ try{ prevMonthly=JSON.parse(fs.readFileSync(OUT,"utf8")).monthly; }catch(_){} } const mopts=(process.env.CF_LIGHT==="1"&&prevMonthly&&!prevMonthly.error)?{light:true,prev:prevMonthly,liveIdx:LIVE_BASE,liveStart:LIVE_START}:{liveIdx:LIVE_BASE}; monthly=await computeMonthly(rpc,uid,DB,KEY,mopts); }catch(e){ monthly={error:String(e&&e.message||e)}; }
 
+  // 27/11 باسم: «أخرى نقدية» قائمة منسدلة بالبنود اللي ما إلها مكان (حسب الحساب بأودو) — الشهر الحالي بعمود «فعلي»
+  if(monthly&&monthly.oth&&Object.keys(monthly.oth).length){ const od=[]; for(const nm in monthly.oth){ const a=Array(NC).fill(0); (monthly.oth[nm]||[]).forEach((v,mi)=>{ if(!v) return; const b=mi; if(b<10||b>LIVE_BASE) return; /* باسم 27/11: بس من شهر 11 وطالع */ a[b===LIVE_BASE?col25(b,'actual'):col25(b)]=r3(v); }); if(a.some(v=>Math.abs(v)>0.0005)) od.push([nm,a]); } od.sort((x,y)=>y[1].reduce((s,v)=>s+v,0)-x[1].reduce((s,v)=>s+v,0)); details['أخرى نقدية']=od; }
+  // 27/11 باسم: توزيع كل بند مصروف على الفروع من أودو (شهر 11 وطالع) — الصفحة بتحطه مكان أرقام الملف القديمة لهالشهور
+  if(monthly&&monthly.br){ const mk=[]; for(const cat in monthly.br){ if(cat==='الرواتب والأجور'||cat==='أخرى نقدية'||details[cat]) continue; const rows=[]; for(const lb in monthly.br[cat]){ const a=Array(NC).fill(0); (monthly.br[cat][lb]||[]).forEach((v,mi)=>{ if(!v||mi<10||mi>LIVE_BASE) return; a[mi===LIVE_BASE?col25(mi,'actual'):col25(mi)]=r3(v); }); if(a.some(v=>Math.abs(v)>0.0005)) rows.push([lb,a]); } if(rows.length){ details[cat]=rows; mk.push(cat); } } details.__merge={cats:mk,from:10}; }
   if(monthly&&monthly.det&&Object.keys(monthly.det).length){ const sd=[]; for(const nm in monthly.det){ const a=Array(NC).fill(0); a[col25(0,'actual')]=r3(monthly.det[nm]); sd.push([nm,a]); } sd.sort((x,y)=>y[1].reduce((s,v)=>s+v,0)-x[1].reduce((s,v)=>s+v,0)); if(sd.length) details['الرواتب والأجور']=sd; }
   writeOut({ generated_at: nowISO(), source: 'أودو مباشرة',
     live_idx: LIVE_BASE, live_label: `${AR_MONTH[LM-1]} ${LY}`,
@@ -266,11 +283,11 @@ try {
     current, realmov: realmov.map(r3),
     real_open_live,
     closing_oct: real_open_live,
-    live_income: { 'مبيعات كاش': r3(cashSales), 'تحصيل فيزا': r3(cardSales), 'تحصيل تأمين': r3(insurIn), 'متحصلات أخرى وتسويات': r3(othIn), 'موردون أدوية (كاش)': r3(supCashDrug), 'أخرى (كاش)': r3(cashOther), 'الرواتب والأجور': r3(salByTransfer), 'مصاريف بنكية': r3(bankOther) },
+    live_income: { 'مبيعات كاش': r3(cashSales), 'تحصيل فيزا': r3(cardSales), 'تحصيل تأمين': r3(insurIn), 'متحصلات أخرى وتسويات': r3(othIn), 'موردون أدوية (كاش)': r3(supCashDrug), 'أخرى (كاش)': r3(cashOther), 'الرواتب والأجور': r3(salByTransfer), 'مصاريف بنكية': r3(bankOther), 'تسويات حساب الفيزا': r3(visaAdj) },
     monthly,
     details, cheque_issues, accrued, staff_due, card_real, chq_notes,
     errors: [], note: 'يُحدَّث آليًا كل 8 ساعات — الشهر الحالي مقسوم فعلي/باقي' });
-  const fdone = Object.values(details).reduce((a,c)=>a+c.length,0);
+  const fdone = Object.values(details).reduce((a,c)=>a+(Array.isArray(c)?c.length:0),0);
   console.log(`cf-build v3 ok — balance=${current['الإجمالي']} | open_live=${real_open_live} | rows=${fdone} | issues=${cheque_issues.length} | live_idx=${LIVE_BASE}`);
 } catch (e) {
   const err = { time: nowISO().replace('T',' ').slice(0,16), msg: String((e && e.message) || e) };

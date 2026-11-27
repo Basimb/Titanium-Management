@@ -74,3 +74,11 @@ cf-build v3 ok — balance=20014.232 | open_live=21808.448 | rows=207 | issues=1
 cf-build v3 ok — balance=21086.25 | open_live=21808.448 | rows=207 | issues=178 | live_idx=10
 /usr/bin/timeout: the monitored command dumped core
 /usr/bin/timeout: the monitored command dumped core
+cf-build v3 ok — balance=27273.265 | open_live=25508.448 | rows=208 | issues=177 | live_idx=10
+cf-build v3 ok — balance=28515.221 | open_live=25508.448 | rows=208 | issues=177 | live_idx=10
+/usr/bin/timeout: the monitored command dumped core
+cf-build v3 ok — balance=29895.115 | open_live=25508.448 | rows=208 | issues=177 | live_idx=10
+cf-build v3 ok — balance=30958.712 | open_live=25508.448 | rows=208 | issues=177 | live_idx=10
+node[2010818]: pthread_create: Resource temporarily unavailable
+cf-build v3 ok — balance=31721.446 | open_live=25508.448 | rows=208 | issues=177 | live_idx=10
+cf-build v3 ok — balance=32912.848 | open_live=25508.448 | rows=208 | issues=177 | live_idx=10
